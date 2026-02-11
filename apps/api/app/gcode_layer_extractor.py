@@ -89,7 +89,18 @@ class LayerExtractor:
             for line in f:
                 line = line.strip()
 
-                # Skip comments and empty lines
+                # Check for layer change markers before skipping comments
+                if line.startswith(';LAYER_CHANGE') or line.startswith(';LAYER:'):
+                    self.current_layer_num += 1
+                    # Ensure layer exists in dict
+                    if self.current_layer_num not in self.layers:
+                        self.layers[self.current_layer_num] = {
+                            "z_height": round(self.current_z, 3),
+                            "moves": []
+                        }
+                    continue
+
+                # Skip other comments and empty lines
                 if not line or line.startswith(';'):
                     continue
 
@@ -190,10 +201,12 @@ class LayerExtractor:
             else:
                 self.z += float(coords['Z'])
 
-            # Z change indicates new layer
+            # Update current Z height (but don't use it for layer detection - rely on ;LAYER_CHANGE markers)
             if abs(self.z - self.current_z) > 0.001:  # Threshold for float comparison
                 self.current_z = self.z
-                self.current_layer_num = len([z for z in self.layers.values() if z["z_height"] <= self.z])
+                # Update z_height for current layer if it exists
+                if self.current_layer_num in self.layers:
+                    self.layers[self.current_layer_num]["z_height"] = round(self.current_z, 3)
 
         if 'E' in coords:
             if self.absolute_extrusion:
