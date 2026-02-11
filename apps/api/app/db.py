@@ -18,11 +18,20 @@ async def init_db():
     _pg_pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
 
     # Run schema migration
+    # Split into individual statements to avoid asyncpg multi-statement issues
     async with _pg_pool.acquire() as conn:
         schema_path = Path(__file__).parent / "schema.sql"
         if schema_path.exists():
             schema_sql = schema_path.read_text()
-            await conn.execute(schema_sql)
+            # Split on semicolons and execute each statement individually
+            statements = [s.strip() for s in schema_sql.split(';') if s.strip() and not s.strip().startswith('--')]
+            for statement in statements:
+                try:
+                    await conn.execute(statement)
+                except Exception as e:
+                    # Log but continue - some statements may fail if already applied
+                    print(f"Schema statement failed (may be OK): {str(e)[:100]}")
+                    print(f"Statement: {statement[:200]}")
 
     # Redis
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")

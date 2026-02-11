@@ -283,6 +283,10 @@ class ThreeMFBuilder:
         if 'layer_gcode' not in config:
             config['layer_gcode'] = 'G92 E0'
 
+        # Enable arc fitting to reduce G-code file size by 5-6x
+        if 'enable_arc_fitting' not in config:
+            config['enable_arc_fitting'] = '1'
+
         # Apply user overrides (convert to appropriate types)
         for key, value in overrides.items():
             config[key] = value

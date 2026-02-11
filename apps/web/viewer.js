@@ -35,6 +35,9 @@ function gcodeViewer(initialJobId) {
                 this.error = 'No job ID provided';
                 return;
             }
+
+            // Wait for next frame to ensure DOM has laid out
+            await new Promise(resolve => requestAnimationFrame(resolve));
             await this.loadViewer();
         },
 
@@ -46,8 +49,46 @@ function gcodeViewer(initialJobId) {
             this.canvas = this.$refs.canvas;
             this.ctx = this.canvas.getContext('2d');
 
+            // Wait for container to have valid dimensions
+            // We need at least 100px width to render properly
+            const container = this.canvas.parentElement;
+            let attempts = 0;
+            let lastWidth = 0;
+            let stableCount = 0;
+
+            // Wait for container to have a reasonable size AND be stable
+            while (attempts < 30) {  // Max 30 frames (~500ms at 60fps)
+                const currentWidth = container.clientWidth;
+
+                // Need at least 100px width
+                if (currentWidth >= 100) {
+                    // Check if size is stable (same for 2 consecutive frames)
+                    if (currentWidth === lastWidth) {
+                        stableCount++;
+                        if (stableCount >= 2) {
+                            console.log(`Container ready: ${currentWidth}x${container.clientHeight}`);
+                            break;
+                        }
+                    } else {
+                        stableCount = 0;
+                    }
+                }
+
+                lastWidth = currentWidth;
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                attempts++;
+            }
+
+            if (container.clientWidth < 100) {
+                console.error(`Container dimensions too small: ${container.clientWidth}x${container.clientHeight}`);
+                this.error = 'Failed to initialize canvas';
+                return;
+            }
+
             // Set canvas size
+            console.log('Setting initial canvas size...');
             this.resizeCanvas();
+            console.log(`Canvas initialized: ${this.canvas.width}x${this.canvas.height} (display: ${this.canvas.style.width} x ${this.canvas.style.height})`);
             window.addEventListener('resize', () => this.resizeCanvas());
 
             try {
@@ -111,18 +152,19 @@ function gcodeViewer(initialJobId) {
         },
 
         /**
-         * Calculate scale to fit 200mm bed in canvas
+         * Calculate scale to fit bed in canvas (always show full 270mm bed)
          */
         calculateScale() {
             const container = this.canvas.parentElement;
+            const bedSize = 270;
 
-            // Snapmaker U1 bed is 200x200mm
-            const bedSize = 200;
-            const bedScale = Math.min(container.clientWidth, container.clientHeight) * 0.85 / bedSize;
+            // Always scale to show the full bed (0-270mm)
+            this.scale = Math.min(container.clientWidth, container.clientHeight) * 0.85 / bedSize;
 
-            this.scale = bedScale;
-            this.offsetX = (container.clientWidth - bedSize * bedScale) / 2;
-            this.offsetY = (container.clientHeight - bedSize * bedScale) / 2;
+            // Center the bed in the canvas
+            const scaledBed = bedSize * this.scale;
+            this.offsetX = (container.clientWidth - scaledBed) / 2;
+            this.offsetY = (container.clientHeight - scaledBed) / 2;
         },
 
         /**
@@ -186,28 +228,21 @@ function gcodeViewer(initialJobId) {
 
         /**
          * Draw build plate with grid and dimensions
+         * Shows the U1's 270x270mm bed as a reference outline
          */
         drawBuildPlate() {
-            const container = this.canvas.parentElement;
+            // Draw U1 bed outline at (0,0) to (270,270) in G-code coordinates
+            const bedX = this.toCanvasX(0);
+            const bedY = this.toCanvasY(270);  // Top-left corner (Y is flipped)
+            const bedWidth = 270 * this.scale;
+            const bedHeight = 270 * this.scale;
 
-            // Snapmaker U1 bed size is 200x200mm
-            const bedSize = 200;
-            const bedScale = Math.min(container.clientWidth, container.clientHeight) * 0.85 / bedSize;
-            const bedWidth = bedSize * bedScale;
-            const bedHeight = bedSize * bedScale;
-            const bedX = (container.clientWidth - bedWidth) / 2;
-            const bedY = (container.clientHeight - bedHeight) / 2;
-
-            // Draw bed background
-            this.ctx.fillStyle = '#2a2a2a';
-            this.ctx.fillRect(bedX, bedY, bedWidth, bedHeight);
-
-            // Draw grid lines every 10mm
+            // Draw grid lines every 27mm (10% of bed size for reference)
             this.ctx.strokeStyle = '#3a3a3a';
             this.ctx.lineWidth = 1;
-            const gridSpacing = 10 * bedScale;
+            const gridSpacing = 27 * this.scale;
 
-            for (let i = 1; i < bedSize / 10; i++) {
+            for (let i = 1; i < 10; i++) {
                 // Vertical lines
                 this.ctx.beginPath();
                 this.ctx.moveTo(bedX + i * gridSpacing, bedY);
@@ -221,32 +256,66 @@ function gcodeViewer(initialJobId) {
                 this.ctx.stroke();
             }
 
-            // Draw bed outline
+            // Draw bed outline (U1 270x270mm bed)
             this.ctx.strokeStyle = '#666';
             this.ctx.lineWidth = 2;
             this.ctx.strokeRect(bedX, bedY, bedWidth, bedHeight);
 
-            // Draw bed dimensions
+            // Draw bed label
             this.ctx.fillStyle = '#999';
-            this.ctx.font = '12px system-ui';
+            this.ctx.font = '11px system-ui';
             this.ctx.textAlign = 'center';
-            this.ctx.fillText('200mm', bedX + bedWidth / 2, bedY - 5);
-
-            this.ctx.save();
-            this.ctx.translate(bedX - 5, bedY + bedHeight / 2);
-            this.ctx.rotate(-Math.PI / 2);
-            this.ctx.fillText('200mm', 0, 0);
-            this.ctx.restore();
+            this.ctx.fillText('U1 Bed (270×270mm)', bedX + bedWidth / 2, bedY - 5);
 
             // Draw origin indicator
             this.ctx.fillStyle = '#f00';
             this.ctx.beginPath();
-            this.ctx.arc(bedX, bedY + bedHeight, 4, 0, Math.PI * 2);
+            this.ctx.arc(this.toCanvasX(0), this.toCanvasY(0), 4, 0, Math.PI * 2);
             this.ctx.fill();
             this.ctx.fillStyle = '#999';
             this.ctx.font = '10px system-ui';
             this.ctx.textAlign = 'left';
-            this.ctx.fillText('(0,0)', bedX + 6, bedY + bedHeight - 2);
+            this.ctx.fillText('(0,0)', this.toCanvasX(0) + 6, this.toCanvasY(0) + 4);
+
+            // Draw X axis indicator
+            this.ctx.strokeStyle = '#f00';
+            this.ctx.lineWidth = 2;
+            this.ctx.beginPath();
+            this.ctx.moveTo(this.toCanvasX(0), this.toCanvasY(0));
+            this.ctx.lineTo(this.toCanvasX(30), this.toCanvasY(0));
+            this.ctx.stroke();
+            // Arrow head
+            this.ctx.beginPath();
+            this.ctx.moveTo(this.toCanvasX(30), this.toCanvasY(0));
+            this.ctx.lineTo(this.toCanvasX(26), this.toCanvasY(-3));
+            this.ctx.lineTo(this.toCanvasX(26), this.toCanvasY(3));
+            this.ctx.closePath();
+            this.ctx.fillStyle = '#f00';
+            this.ctx.fill();
+            this.ctx.fillStyle = '#f00';
+            this.ctx.font = 'bold 12px system-ui';
+            this.ctx.textAlign = 'left';
+            this.ctx.fillText('X+', this.toCanvasX(32), this.toCanvasY(0) + 4);
+
+            // Draw Y axis indicator
+            this.ctx.strokeStyle = '#0f0';
+            this.ctx.lineWidth = 2;
+            this.ctx.beginPath();
+            this.ctx.moveTo(this.toCanvasX(0), this.toCanvasY(0));
+            this.ctx.lineTo(this.toCanvasX(0), this.toCanvasY(30));
+            this.ctx.stroke();
+            // Arrow head
+            this.ctx.beginPath();
+            this.ctx.moveTo(this.toCanvasX(0), this.toCanvasY(30));
+            this.ctx.lineTo(this.toCanvasX(-3), this.toCanvasY(26));
+            this.ctx.lineTo(this.toCanvasX(3), this.toCanvasY(26));
+            this.ctx.closePath();
+            this.ctx.fillStyle = '#0f0';
+            this.ctx.fill();
+            this.ctx.fillStyle = '#0f0';
+            this.ctx.font = 'bold 12px system-ui';
+            this.ctx.textAlign = 'left';
+            this.ctx.fillText('Y+', this.toCanvasX(3), this.toCanvasY(35) + 4);
         },
 
         /**
@@ -259,7 +328,9 @@ function gcodeViewer(initialJobId) {
             const printWidth = this.bounds.max_x - this.bounds.min_x;
             const printHeight = this.bounds.max_y - this.bounds.min_y;
 
-            this.ctx.strokeStyle = '#f59e0b';
+            // Use red if print exceeds U1 bed size, orange otherwise
+            const exceedsBed = printWidth > 270 || printHeight > 270;
+            this.ctx.strokeStyle = exceedsBed ? '#dc2626' : '#f59e0b';
             this.ctx.lineWidth = 2;
             this.ctx.setLineDash([5, 5]);
             this.ctx.strokeRect(
@@ -271,25 +342,34 @@ function gcodeViewer(initialJobId) {
             this.ctx.setLineDash([]);
 
             // Draw print dimensions
-            this.ctx.fillStyle = '#f59e0b';
-            this.ctx.font = 'bold 11px system-ui';
+            this.ctx.fillStyle = exceedsBed ? '#dc2626' : '#f59e0b';
+            this.ctx.font = 'bold 12px system-ui';
             this.ctx.textAlign = 'center';
 
             // Width dimension (bottom)
             const dimY = this.toCanvasY(this.bounds.min_y) + 15;
             this.ctx.fillText(
-                `${printWidth.toFixed(1)}mm`,
+                `Print: ${printWidth.toFixed(1)}mm`,
                 this.toCanvasX(this.bounds.min_x + printWidth / 2),
                 dimY
             );
 
             // Height dimension (right)
             this.ctx.save();
-            const dimX = this.toCanvasX(this.bounds.max_x) + 15;
+            const dimX = this.toCanvasX(this.bounds.max_x) + 25;
             this.ctx.translate(dimX, this.toCanvasY(this.bounds.max_y - printHeight / 2));
             this.ctx.rotate(-Math.PI / 2);
-            this.ctx.fillText(`${printHeight.toFixed(1)}mm`, 0, 0);
+            this.ctx.fillText(`Print: ${printHeight.toFixed(1)}mm`, 0, 0);
             this.ctx.restore();
+
+            // Warning if exceeds bed
+            if (exceedsBed) {
+                this.ctx.fillStyle = '#dc2626';
+                this.ctx.font = 'bold 14px system-ui';
+                this.ctx.textAlign = 'center';
+                const container = this.canvas.parentElement;
+                this.ctx.fillText('⚠️ Print exceeds U1 bed size!', container.clientWidth / 2, 30);
+            }
         },
 
         /**
@@ -334,18 +414,30 @@ function gcodeViewer(initialJobId) {
          * Draw layer info overlay
          */
         drawLayerInfo(layer) {
-            this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-            this.ctx.fillRect(10, 10, 180, 50);
+            // Position in bottom-left to avoid cropping and overlap with warnings
+            const container = this.canvas.parentElement;
+            const boxX = 10;
+            const boxY = container.clientHeight - 65;
+            const boxWidth = 200;
+            const boxHeight = 55;
 
+            // Semi-transparent background
+            this.ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+            this.ctx.fillRect(boxX, boxY, boxWidth, boxHeight);
+
+            // White text
             this.ctx.fillStyle = '#fff';
-            this.ctx.font = '14px system-ui';
-            this.ctx.fillText(`Layer ${layer.layer_num + 1} / ${this.totalLayers}`, 20, 30);
-            this.ctx.fillText(`Height: ${layer.z_height.toFixed(2)} mm`, 20, 50);
+            this.ctx.font = 'bold 14px system-ui';
+            this.ctx.textAlign = 'left';
+            this.ctx.fillText(`Layer ${layer.layer_num + 1} / ${this.totalLayers}`, boxX + 10, boxY + 22);
+
+            this.ctx.font = '12px system-ui';
+            this.ctx.fillText(`Height: ${layer.z_height.toFixed(2)} mm`, boxX + 10, boxY + 42);
         },
 
         /**
          * Convert G-code X coordinate to canvas X
-         * Maps from bed coordinate (0-200mm) to canvas pixels
+         * Maps from bed coordinate (0-270mm) to canvas pixels
          */
         toCanvasX(x) {
             return this.offsetX + x * this.scale;
@@ -353,12 +445,12 @@ function gcodeViewer(initialJobId) {
 
         /**
          * Convert G-code Y coordinate to canvas Y (flip Y axis)
-         * Maps from bed coordinate (0-200mm) to canvas pixels
+         * Maps from bed coordinate (0-270mm) to canvas pixels
          * Y-axis is flipped (0 at bottom in G-code, top in canvas)
          */
         toCanvasY(y) {
             const container = this.canvas.parentElement;
-            const bedSize = 200;
+            const bedSize = 270;
             return container.clientHeight - (this.offsetY + y * this.scale);
         },
 

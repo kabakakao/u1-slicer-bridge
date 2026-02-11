@@ -5,6 +5,8 @@ from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from db import get_pg_pool
 from parser_3mf import parse_3mf
+from plate_validator import PlateValidator, PlateValidationError
+from config import get_printer_profile
 
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -36,7 +38,7 @@ async def upload_3mf(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
-    # Parse .3mf and extract objects
+    # Parse .3mf and extract object metadata (for informational purposes)
     try:
         objects = parse_3mf(file_path)
     except ValueError as e:
@@ -51,123 +53,113 @@ async def upload_3mf(file: UploadFile = File(...)):
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="No valid objects found in .3mf file")
 
-    # Store in database
+    # Validate plate bounds
+    try:
+        printer_profile = get_printer_profile("snapmaker_u1")
+        validator = PlateValidator(printer_profile)
+        validation = validator.validate_3mf_bounds(file_path)
+    except PlateValidationError as e:
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Plate validation failed: {str(e)}")
+    except Exception as e:
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to validate plate: {str(e)}")
+
+    # Store in database with bounds information
     pool = get_pg_pool()
     async with pool.acquire() as conn:
-        # Insert upload record
+        # Insert upload record with plate bounds
+        bounds = validation['bounds']
+        warnings_text = '\n'.join(validation['warnings']) if validation['warnings'] else None
+
         upload_id = await conn.fetchval(
             """
-            INSERT INTO uploads (filename, file_path, file_size)
-            VALUES ($1, $2, $3)
+            INSERT INTO uploads (
+                filename, file_path, file_size,
+                plate_validated, bounds_min_x, bounds_min_y, bounds_min_z,
+                bounds_max_x, bounds_max_y, bounds_max_z, bounds_warning
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id
             """,
             file.filename,
             str(file_path),
             len(content),
+            True,  # plate_validated
+            bounds['min'][0], bounds['min'][1], bounds['min'][2],
+            bounds['max'][0], bounds['max'][1], bounds['max'][2],
+            warnings_text
         )
-
-        # Insert object records
-        for obj in objects:
-            await conn.execute(
-                """
-                INSERT INTO objects (upload_id, name, object_id, vertices, triangles)
-                VALUES ($1, $2, $3, $4, $5)
-                """,
-                upload_id,
-                obj.name,
-                obj.object_id,
-                obj.vertices,
-                obj.triangles,
-            )
 
     return {
         "upload_id": upload_id,
         "filename": file.filename,
         "file_size": len(content),
-        "objects": [obj.to_dict() for obj in objects],
+        "objects_count": len(objects),
+        "bounds": validation['bounds'],
+        "warnings": validation['warnings'],
+        "fits": validation['fits']
     }
 
 
 @router.get("/{upload_id}")
 async def get_upload(upload_id: int):
-    """Get upload details and associated objects."""
+    """Get upload details including plate bounds."""
     pool = get_pg_pool()
     async with pool.acquire() as conn:
-        # Get upload record
+        # Get upload record with bounds
         upload = await conn.fetchrow(
-            "SELECT id, filename, file_size, uploaded_at FROM uploads WHERE id = $1",
+            """
+            SELECT id, filename, file_size, uploaded_at, plate_validated,
+                   bounds_min_x, bounds_min_y, bounds_min_z,
+                   bounds_max_x, bounds_max_y, bounds_max_z,
+                   bounds_warning
+            FROM uploads WHERE id = $1
+            """,
             upload_id,
         )
         if not upload:
             raise HTTPException(status_code=404, detail="Upload not found")
 
-        # Get objects with normalization status
-        objects = await conn.fetch(
-            """
-            SELECT name, object_id, vertices, triangles,
-                   normalization_status, normalized_path
-            FROM objects
-            WHERE upload_id = $1
-            ORDER BY id
-            """,
-            upload_id,
-        )
+    # Format bounds
+    bounds = None
+    if upload['plate_validated']:
+        bounds = {
+            "min": [upload['bounds_min_x'], upload['bounds_min_y'], upload['bounds_min_z']],
+            "max": [upload['bounds_max_x'], upload['bounds_max_y'], upload['bounds_max_z']],
+            "size": [
+                upload['bounds_max_x'] - upload['bounds_min_x'],
+                upload['bounds_max_y'] - upload['bounds_min_y'],
+                upload['bounds_max_z'] - upload['bounds_min_z']
+            ]
+        }
 
-        # Determine overall normalization status
-        # 'normalized' if all normalized, 'failed' if any failed, 'pending' otherwise
-        statuses = [obj['normalization_status'] for obj in objects]
-        if all(s == 'normalized' for s in statuses):
-            overall_status = 'normalized'
-        elif any(s == 'failed' for s in statuses):
-            overall_status = 'failed'
-        elif any(s == 'normalized' for s in statuses):
-            overall_status = 'processing'
-        else:
-            overall_status = 'pending'
+    warnings = []
+    if upload['bounds_warning']:
+        warnings = upload['bounds_warning'].split('\n')
 
     return {
         "upload_id": upload["id"],
         "filename": upload["filename"],
         "file_size": upload["file_size"],
         "uploaded_at": upload["uploaded_at"].isoformat(),
-        "normalization_status": overall_status,
-        "objects": [dict(obj) for obj in objects],
-        "object_count": len(objects),
-    }
-
-
-@router.get("/{upload_id}/objects")
-async def get_upload_object_ids(upload_id: int):
-    """Get database IDs of normalized objects for an upload."""
-    pool = get_pg_pool()
-    async with pool.acquire() as conn:
-        # Get normalized objects for this upload
-        objects = await conn.fetch(
-            """
-            SELECT id FROM objects
-            WHERE upload_id = $1 AND normalization_status = 'normalized'
-            ORDER BY id
-            """,
-            upload_id
-        )
-
-    return {
-        "object_ids": [obj["id"] for obj in objects]
+        "plate_validated": upload["plate_validated"],
+        "bounds": bounds,
+        "warnings": warnings,
+        "fits": len(warnings) == 0
     }
 
 
 @router.get("")
 async def list_uploads():
-    """List all uploads."""
+    """List all uploads with plate validation status."""
     pool = get_pg_pool()
     async with pool.acquire() as conn:
         uploads = await conn.fetch(
             """
-            SELECT u.id, u.filename, u.file_size, u.uploaded_at, COUNT(o.id) as object_count
-            FROM uploads u
-            LEFT JOIN objects o ON o.upload_id = u.id
-            GROUP BY u.id
-            ORDER BY u.uploaded_at DESC
+            SELECT id, filename, file_size, uploaded_at, plate_validated, bounds_warning
+            FROM uploads
+            ORDER BY uploaded_at DESC
             LIMIT 50
             """
         )
@@ -179,7 +171,8 @@ async def list_uploads():
                 "filename": u["filename"],
                 "file_size": u["file_size"],
                 "uploaded_at": u["uploaded_at"].isoformat(),
-                "object_count": u["object_count"],
+                "plate_validated": u["plate_validated"],
+                "has_warnings": bool(u["bounds_warning"]),
             }
             for u in uploads
         ]

@@ -175,6 +175,7 @@ class OrcaSlicer:
             "xvfb-run", "-a",
             str(self.orca_bin),
             "--slice", "0",  # Slice all plates
+            "--allow-newer-file",  # Allow Bambu Studio 3MF files with newer versions
             "--outputdir", str(workspace),
             str(three_mf_path)
         ]

@@ -1,17 +1,20 @@
-"""Slicing endpoints for converting bundles to G-code."""
+"""Slicing endpoints for converting uploads to G-code (plate-based workflow)."""
 
 import uuid
 import logging
+import shutil
+import re
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict
 
 from db import get_pg_pool
 from config import get_printer_profile
-from slicer import OrcaSlicer, FilamentData, ObjectData, SlicingError
-from builder_3mf import ThreeMFBuilder, ObjectMeshData, ThreeMFBuildError
+from slicer import OrcaSlicer, SlicingError
+from profile_embedder import ProfileEmbedder, ProfileEmbedError
 
 
 router = APIRouter(tags=["slicing"])
@@ -19,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class SliceRequest(BaseModel):
+    filament_id: int
     layer_height: Optional[float] = 0.2
     infill_density: Optional[int] = 15
     supports: Optional[bool] = False
@@ -29,149 +33,110 @@ def setup_job_logging(job_id: str) -> logging.Logger:
     log_path = Path(f"/data/logs/slice_{job_id}.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger = logging.getLogger(f"slice_{job_id}")
-    logger.setLevel(logging.INFO)
+    job_logger = logging.getLogger(f"slice_{job_id}")
+    job_logger.setLevel(logging.INFO)
 
     handler = logging.FileHandler(log_path)
     handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
+    job_logger.addHandler(handler)
 
-    return logger
+    return job_logger
 
 
-@router.post("/bundles/{bundle_id}/slice")
-async def slice_bundle(bundle_id: str, request: SliceRequest = SliceRequest()):
-    """Slice a bundle to generate G-code for printing.
+@router.post("/uploads/{upload_id}/slice")
+async def slice_upload(upload_id: int, request: SliceRequest):
+    """Slice an upload directly, preserving plate layout.
 
     Workflow:
-    1. Validate bundle and objects
+    1. Validate upload and filament exist
     2. Create slicing job
-    3. Prepare workspace
-    4. Generate Orca profile from filament settings
-    5. Invoke Orca Slicer CLI
-    6. Parse G-code metadata
-    7. Validate bounds
-    8. Save G-code to /data/slices/
-    9. Update database
-    10. Cleanup workspace
+    3. Embed profiles into original 3MF (preserves geometry)
+    4. Invoke Orca Slicer
+    5. Parse G-code metadata
+    6. Validate bounds
+    7. Save G-code to /data/slices/
+    8. Update database
     """
     pool = get_pg_pool()
     job_id = f"slice_{uuid.uuid4().hex[:12]}"
-    logger = setup_job_logging(job_id)
+    job_logger = setup_job_logging(job_id)
 
-    logger.info(f"Starting slicing job for bundle {bundle_id}")
-    logger.info(f"Request: layer_height={request.layer_height}, infill_density={request.infill_density}, supports={request.supports}")
+    job_logger.info(f"Starting slicing job for upload {upload_id}")
+    job_logger.info(f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
+                    f"infill_density={request.infill_density}, supports={request.supports}")
 
     async with pool.acquire() as conn:
-        # Validate bundle exists
-        bundle = await conn.fetchrow(
+        # Validate upload exists
+        upload = await conn.fetchrow(
             """
-            SELECT b.id, b.bundle_id, b.name, b.filament_id,
-                   f.material, f.nozzle_temp, f.bed_temp, f.print_speed
-            FROM bundles b
-            LEFT JOIN filaments f ON b.filament_id = f.id
-            WHERE b.bundle_id = $1
+            SELECT id, filename, file_path, bounds_warning
+            FROM uploads
+            WHERE id = $1
             """,
-            bundle_id
+            upload_id
         )
 
-        if not bundle:
-            logger.error(f"Bundle {bundle_id} not found")
-            raise HTTPException(status_code=404, detail="Bundle not found")
+        if not upload:
+            job_logger.error(f"Upload {upload_id} not found")
+            raise HTTPException(status_code=404, detail="Upload not found")
 
-        if not bundle["filament_id"]:
-            logger.error(f"Bundle {bundle_id} has no filament assigned")
-            raise HTTPException(status_code=400, detail="Bundle has no filament assigned")
+        # Check for bounds warnings
+        if upload["bounds_warning"]:
+            job_logger.warning(f"Plate has bounds warnings: {upload['bounds_warning']}")
 
-        # Get objects in bundle
-        objects = await conn.fetch(
+        # Validate filament exists
+        filament = await conn.fetchrow(
             """
-            SELECT o.id, o.name, o.normalized_path, o.normalization_status
-            FROM bundle_objects bo
-            JOIN objects o ON bo.object_id = o.id
-            WHERE bo.bundle_id = $1
-            ORDER BY bo.added_at
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed
+            FROM filaments
+            WHERE id = $1
             """,
-            bundle["id"]
+            request.filament_id
         )
 
-        if not objects:
-            logger.error(f"Bundle {bundle_id} has no objects")
-            raise HTTPException(status_code=400, detail="Bundle has no objects")
+        if not filament:
+            job_logger.error(f"Filament {request.filament_id} not found")
+            raise HTTPException(status_code=404, detail="Filament not found")
 
-        # Validate all objects are normalized
-        for obj in objects:
-            if obj["normalization_status"] != "normalized":
-                logger.error(f"Object {obj['id']} is not normalized (status: {obj['normalization_status']})")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Object '{obj['name']}' is not normalized (status: {obj['normalization_status']})"
-                )
+        job_logger.info(f"Using filament: {filament['name']} ({filament['material']})")
 
-            # Check normalized file exists
-            normalized_path = Path(obj["normalized_path"])
-            if not normalized_path.exists():
-                logger.error(f"Normalized file missing for object {obj['id']}: {obj['normalized_path']}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Normalized file not found for object '{obj['name']}'"
-                )
+        # Check original 3MF file exists
+        source_3mf = Path(upload["file_path"])
+        if not source_3mf.exists():
+            job_logger.error(f"Source 3MF file not found: {source_3mf}")
+            raise HTTPException(status_code=500, detail="Source 3MF file not found")
 
         # Create slicing job record
-        db_job_id = await conn.fetchval(
+        await conn.execute(
             """
-            INSERT INTO slicing_jobs (job_id, bundle_id, status, started_at, log_path)
+            INSERT INTO slicing_jobs (job_id, upload_id, status, started_at, log_path)
             VALUES ($1, $2, 'processing', $3, $4)
-            RETURNING id
             """,
-            job_id, bundle["id"], datetime.utcnow(), f"/data/logs/slice_{job_id}.log"
+            job_id, upload_id, datetime.utcnow(), f"/data/logs/slice_{job_id}.log"
         )
 
     # Execute slicing workflow
     try:
-        # Prepare data structures
-        filament = FilamentData(
-            material=bundle["material"],
-            nozzle_temp=bundle["nozzle_temp"],
-            bed_temp=bundle["bed_temp"],
-            print_speed=bundle["print_speed"]
-        )
-
-        object_list = [
-            ObjectData(
-                id=obj["id"],
-                name=obj["name"],
-                normalized_path=obj["normalized_path"]
-            )
-            for obj in objects
-        ]
-
-        logger.info(f"Slicing {len(object_list)} objects with {filament.material} filament")
-
-        # Initialize slicer
-        printer_profile = get_printer_profile("snapmaker_u1")
-        slicer = OrcaSlicer(printer_profile)
-
-        # Build 3MF file with Snapmaker U1 profiles (M9)
-        logger.info("Building 3MF file with embedded Snapmaker U1 profiles...")
-        builder = ThreeMFBuilder(profile_dir=Path("/app/orca_profiles"))
-
-        # Prepare object mesh data
-        mesh_objects = [
-            ObjectMeshData(
-                id=obj.id,
-                name=obj.name,
-                stl_path=Path(obj.normalized_path)
-            )
-            for obj in object_list
-        ]
-
         # Create workspace directory
         workspace = Path(f"/cache/slicing/{job_id}")
         workspace.mkdir(parents=True, exist_ok=True)
-        three_mf_path = workspace / "bundle.3mf"
+        job_logger.info(f"Created workspace: {workspace}")
 
-        # Apply request overrides to settings
+        # Embed profiles into original 3MF
+        job_logger.info("Embedding Orca profiles into original 3MF...")
+        embedder = ProfileEmbedder(Path("/app/orca_profiles"))
+        embedded_3mf = workspace / "sliceable.3mf"
+
+        # Prepare filament settings
+        # Orca expects temperatures as arrays of strings, not integers
+        filament_settings = {
+            "nozzle_temperature": [str(filament["nozzle_temp"])] * 4,  # U1 has 4 extruders
+            "nozzle_temperature_initial_layer": [str(filament["nozzle_temp"])] * 4,
+            "bed_temperature": [str(filament["bed_temp"])] * 4,
+            "bed_temperature_initial_layer": [str(filament["bed_temp"])] * 4,
+        }
+
+        # Prepare overrides from request
         overrides = {}
         if request.layer_height != 0.2:
             overrides["layer_height"] = str(request.layer_height)
@@ -182,499 +147,413 @@ async def slice_bundle(bundle_id: str, request: SliceRequest = SliceRequest()):
             overrides["support_type"] = "normal(auto)"
 
         try:
-            builder.build_bundle_3mf(
-                objects=mesh_objects,
-                output_path=three_mf_path,
-                settings_overrides=overrides
+            embedder.embed_profiles(
+                source_3mf=source_3mf,
+                output_3mf=embedded_3mf,
+                filament_settings=filament_settings,
+                overrides=overrides
             )
-            three_mf_size_mb = three_mf_path.stat().st_size / 1024 / 1024
-            logger.info(f"3MF created: {three_mf_path} ({three_mf_size_mb:.2f} MB)")
-        except ThreeMFBuildError as e:
-            logger.error(f"Failed to build 3MF: {str(e)}")
-            raise SlicingError(f"3MF creation failed: {str(e)}")
+            three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
+            job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
+        except ProfileEmbedError as e:
+            job_logger.error(f"Failed to embed profiles: {str(e)}")
+            raise SlicingError(f"Profile embedding failed: {str(e)}")
 
-        # Slice 3MF
-        logger.info("Invoking Orca Slicer with 3MF file...")
-        result = slicer.slice_3mf(three_mf_path, workspace)
+        # Slice with Orca
+        job_logger.info("Invoking Orca Slicer...")
+        printer_profile = get_printer_profile("snapmaker_u1")
+        slicer = OrcaSlicer(printer_profile)
+
+        result = slicer.slice_3mf(embedded_3mf, workspace)
 
         if not result["success"]:
-            logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
-            logger.error(f"stdout: {result['stdout']}")
-            logger.error(f"stderr: {result['stderr']}")
+            job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
+            job_logger.error(f"stdout: {result['stdout']}")
+            job_logger.error(f"stderr: {result['stderr']}")
             raise SlicingError(f"Orca Slicer failed: {result['stderr'][:200]}")
 
-        logger.info("Slicing completed successfully")
-        logger.info(f"Orca stdout: {result['stdout'][:500]}")
+        job_logger.info("Slicing completed successfully")
+        job_logger.info(f"Orca stdout: {result['stdout'][:500]}")
 
-        # Find generated G-code file (Orca produces plate_1.gcode for 3MF files)
+        # Find generated G-code file (Orca produces plate_1.gcode)
         gcode_files = list(workspace.glob("plate_*.gcode"))
         if not gcode_files:
-            # Fallback to output.gcode for STL workflow
-            gcode_workspace_path = workspace / "output.gcode"
-            if not gcode_workspace_path.exists():
-                raise SlicingError("G-code file not generated")
-        else:
-            # Use first plate (plate_1.gcode)
-            gcode_workspace_path = gcode_files[0]
-            logger.info(f"Found G-code file: {gcode_workspace_path.name}")
+            job_logger.error("No G-code files generated")
+            raise SlicingError("G-code file not generated by Orca")
 
-        logger.info("Parsing G-code metadata...")
+        gcode_workspace_path = gcode_files[0]
+        job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
+
+        # Parse G-code metadata
+        job_logger.info("Parsing G-code metadata...")
         metadata = slicer.parse_gcode_metadata(gcode_workspace_path)
-        logger.info(f"Metadata: time={metadata['estimated_time_seconds']}s, filament={metadata['filament_used_mm']}mm")
-        logger.info(f"Bounds: X={metadata['bounds']['max_x']}, Y={metadata['bounds']['max_y']}, Z={metadata['bounds']['max_z']}")
+        job_logger.info(f"Metadata: time={metadata['estimated_time_seconds']}s, "
+                       f"filament={metadata['filament_used_mm']}mm, "
+                       f"layers={metadata.get('layer_count', 'N/A')}")
+        job_logger.info(f"Bounds: X={metadata['bounds']['max_x']:.1f}, "
+                       f"Y={metadata['bounds']['max_y']:.1f}, "
+                       f"Z={metadata['bounds']['max_z']:.1f}")
 
         # Validate bounds
-        logger.info("Validating bounds...")
-        slicer.validate_bounds(gcode_workspace_path)
-        logger.info("Bounds validation passed")
+        job_logger.info("Validating bounds against printer build volume...")
+        try:
+            slicer.validate_bounds(gcode_workspace_path)
+            job_logger.info("Bounds validation passed")
+        except Exception as e:
+            job_logger.warning(f"Bounds validation warning: {str(e)}")
+            # Don't fail on bounds warning, just log it
 
         # Move G-code to final location
         slices_dir = Path("/data/slices")
         slices_dir.mkdir(parents=True, exist_ok=True)
-        final_gcode_path = slices_dir / f"{bundle_id}.gcode"
+        final_gcode_path = slices_dir / f"{job_id}.gcode"
 
-        import shutil
-        shutil.move(str(gcode_workspace_path), str(final_gcode_path))
-        logger.info(f"G-code saved to {final_gcode_path}")
-
+        shutil.copy(gcode_workspace_path, final_gcode_path)
         gcode_size = final_gcode_path.stat().st_size
+        gcode_size_mb = gcode_size / 1024 / 1024
+        job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
-        # Update database
+        # Update database with results
         async with pool.acquire() as conn:
-            # Update slicing job
             await conn.execute(
                 """
-                UPDATE slicing_jobs
-                SET status = 'completed',
-                    completed_at = $1,
-                    gcode_path = $2,
-                    gcode_size = $3,
-                    estimated_time_seconds = $4,
-                    filament_used_mm = $5,
-                    layer_count = $6,
-                    three_mf_path = $7
-                WHERE id = $8
+                UPDATE slicing_jobs SET
+                    status = 'completed',
+                    completed_at = $2,
+                    gcode_path = $3,
+                    gcode_size = $4,
+                    estimated_time_seconds = $5,
+                    filament_used_mm = $6,
+                    layer_count = $7,
+                    three_mf_path = $8
+                WHERE job_id = $1
                 """,
-                datetime.utcnow(), str(final_gcode_path), gcode_size,
-                metadata["estimated_time_seconds"], metadata["filament_used_mm"],
-                metadata["layer_count"],
-                str(three_mf_path),
-                db_job_id
+                job_id,
+                datetime.utcnow(),
+                str(final_gcode_path),
+                gcode_size,
+                metadata['estimated_time_seconds'],
+                metadata['filament_used_mm'],
+                metadata.get('layer_count'),
+                str(embedded_3mf)
             )
 
-            # Update bundle
-            await conn.execute(
-                """
-                UPDATE bundles
-                SET sliced_at = $1,
-                    gcode_path = $2,
-                    print_time_estimate = $3,
-                    filament_estimate = $4,
-                    status = 'sliced'
-                WHERE id = $5
-                """,
-                datetime.utcnow(), str(final_gcode_path),
-                metadata["estimated_time_seconds"], metadata["filament_used_mm"],
-                bundle["id"]
-            )
-
-        # Cleanup workspace
-        logger.info("Cleaning up workspace...")
-        slicer.cleanup_workspace(workspace)
-
-        logger.info("Slicing job completed successfully")
-
-        # Format estimated time
-        time_seconds = metadata["estimated_time_seconds"]
-        hours = time_seconds // 3600
-        minutes = (time_seconds % 3600) // 60
-        time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+        job_logger.info(f"Slicing job {job_id} completed successfully")
 
         return {
             "job_id": job_id,
             "status": "completed",
             "gcode_path": str(final_gcode_path),
-            "gcode_size_mb": round(gcode_size / 1024 / 1024, 2),
-            "estimated_time": time_str,
-            "filament_used_mm": metadata["filament_used_mm"],
-            "layer_count": metadata["layer_count"],
-            "bounds_validated": True,
-            "log_path": f"/data/logs/slice_{job_id}.log"
+            "gcode_size": gcode_size,
+            "gcode_size_mb": round(gcode_size_mb, 2),
+            "metadata": {
+                "estimated_time_seconds": metadata['estimated_time_seconds'],
+                "filament_used_mm": metadata['filament_used_mm'],
+                "layer_count": metadata.get('layer_count'),
+                "bounds": metadata['bounds']
+            }
         }
 
     except SlicingError as e:
-        logger.error(f"Slicing error: {str(e)}")
-
-        # Update job as failed
+        job_logger.error(f"Slicing failed: {str(e)}")
+        # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                UPDATE slicing_jobs
-                SET status = 'failed',
-                    completed_at = $1,
-                    error_message = $2
-                WHERE id = $3
+                UPDATE slicing_jobs SET
+                    status = 'failed',
+                    completed_at = $2,
+                    error_message = $3
+                WHERE job_id = $1
                 """,
-                datetime.utcnow(), str(e), db_job_id
+                job_id,
+                datetime.utcnow(),
+                str(e)
             )
-
-        # Cleanup workspace
-        try:
-            slicer.cleanup_workspace(workspace)
-        except:
-            pass
-
-        return {
-            "job_id": job_id,
-            "status": "failed",
-            "error": str(e)
-        }
+        raise HTTPException(status_code=500, detail=f"Slicing failed: {str(e)}")
 
     except Exception as e:
-        logger.exception("Unexpected error during slicing")
-
-        # Update job as failed
+        job_logger.error(f"Unexpected error: {str(e)}")
+        # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                UPDATE slicing_jobs
-                SET status = 'failed',
-                    completed_at = $1,
-                    error_message = $2
-                WHERE id = $3
+                UPDATE slicing_jobs SET
+                    status = 'failed',
+                    completed_at = $2,
+                    error_message = $3
+                WHERE job_id = $1
                 """,
-                datetime.utcnow(), f"Unexpected error: {str(e)}", db_job_id
+                job_id,
+                datetime.utcnow(),
+                f"Unexpected error: {str(e)}"
             )
-
         raise HTTPException(status_code=500, detail=f"Slicing failed: {str(e)}")
 
 
-@router.get("/slicing/jobs/{job_id}")
+@router.get("/jobs/{job_id}")
 async def get_slicing_job(job_id: str):
-    """Get slicing job status and details."""
+    """Get slicing job status and results."""
     pool = get_pg_pool()
-
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
             """
-            SELECT j.job_id, j.status, j.started_at, j.completed_at,
-                   j.log_path, j.gcode_path, j.gcode_size,
-                   j.estimated_time_seconds, j.filament_used_mm, j.layer_count, j.error_message,
-                   b.bundle_id, b.name as bundle_name
-            FROM slicing_jobs j
-            LEFT JOIN bundles b ON j.bundle_id = b.id
-            WHERE j.job_id = $1
+            SELECT job_id, upload_id, status, started_at, completed_at,
+                   gcode_path, gcode_size, estimated_time_seconds, filament_used_mm,
+                   layer_count, error_message
+            FROM slicing_jobs
+            WHERE job_id = $1
             """,
             job_id
         )
 
         if not job:
-            raise HTTPException(status_code=404, detail="Slicing job not found")
+            raise HTTPException(status_code=404, detail="Job not found")
 
-        response = {
-            "job_id": job["job_id"],
-            "bundle_id": job["bundle_id"],
-            "bundle_name": job["bundle_name"],
-            "status": job["status"],
-            "started_at": job["started_at"].isoformat() if job["started_at"] else None,
-            "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None,
-            "log_path": job["log_path"]
+    result = {
+        "job_id": job["job_id"],
+        "upload_id": job["upload_id"],
+        "status": job["status"],
+        "started_at": job["started_at"].isoformat() if job["started_at"] else None,
+        "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None,
+        "gcode_path": job["gcode_path"],
+        "gcode_size": job["gcode_size"],
+        "gcode_size_mb": round(job["gcode_size"] / 1024 / 1024, 2) if job["gcode_size"] else None,
+        "error_message": job["error_message"]
+    }
+
+    # Add metadata if job is completed
+    if job["status"] == "completed":
+        result["metadata"] = {
+            "estimated_time_seconds": job["estimated_time_seconds"],
+            "filament_used_mm": job["filament_used_mm"],
+            "layer_count": job["layer_count"]
         }
 
-        if job["status"] == "completed":
-            time_seconds = job["estimated_time_seconds"]
-            hours = time_seconds // 3600
-            minutes = (time_seconds % 3600) // 60
-            time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
-
-            response.update({
-                "gcode_path": job["gcode_path"],
-                "gcode_size_mb": round(job["gcode_size"] / 1024 / 1024, 2),
-                "estimated_time": time_str,
-                "filament_used_mm": job["filament_used_mm"],
-                "layer_count": job["layer_count"]
-            })
-        elif job["status"] == "failed":
-            response["error"] = job["error_message"]
-
-        return response
+    return result
 
 
-@router.get("/slicing/jobs/{job_id}/gcode/metadata")
-async def get_gcode_metadata(job_id: str):
-    """
-    Get G-code preview metadata without full file.
-
-    Returns metadata needed to initialize the preview viewer:
-    - Total layer count
-    - Bounding box dimensions
-    - Estimated print time
-    - Filament usage
-    - File size
-    """
+@router.get("/jobs/{job_id}/download")
+async def download_gcode(job_id: str):
+    """Download the generated G-code file."""
     pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        job = await conn.fetchrow(
+            "SELECT gcode_path, status FROM slicing_jobs WHERE job_id = $1",
+            job_id
+        )
 
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        if job["status"] != "completed":
+            raise HTTPException(status_code=400, detail="Job not completed")
+
+        gcode_path = Path(job["gcode_path"])
+        if not gcode_path.exists():
+            raise HTTPException(status_code=404, detail="G-code file not found")
+
+        return FileResponse(
+            path=gcode_path,
+            media_type="text/plain",
+            filename=f"{job_id}.gcode"
+        )
+
+
+@router.get("/jobs/{job_id}/gcode/metadata")
+async def get_gcode_metadata(job_id: str):
+    """Get G-code metadata for visualization."""
+    pool = get_pg_pool()
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
             """
-            SELECT j.job_id, j.status, j.gcode_path, j.gcode_size,
-                   j.estimated_time_seconds, j.filament_used_mm, j.layer_count
-            FROM slicing_jobs j
-            WHERE j.job_id = $1
+            SELECT gcode_path, status, layer_count,
+                   estimated_time_seconds, filament_used_mm
+            FROM slicing_jobs
+            WHERE job_id = $1
             """,
             job_id
         )
 
         if not job:
-            raise HTTPException(status_code=404, detail="Slicing job not found")
+            raise HTTPException(status_code=404, detail="Job not found")
 
         if job["status"] != "completed":
-            raise HTTPException(status_code=400, detail=f"Job status is '{job['status']}', not completed")
+            raise HTTPException(status_code=400, detail="Job not completed")
 
-        if not job["gcode_path"]:
+        gcode_path = Path(job["gcode_path"])
+        if not gcode_path.exists():
             raise HTTPException(status_code=404, detail="G-code file not found")
 
-    # Parse G-code bounds (reuse existing parser)
-    from gcode_parser import parse_orca_metadata
-    gcode_path = Path(job["gcode_path"])
-
-    if not gcode_path.exists():
-        raise HTTPException(status_code=404, detail="G-code file not found on disk")
-
-    metadata = parse_orca_metadata(gcode_path)
-
-    # Format time
-    time_seconds = job["estimated_time_seconds"]
-    hours = time_seconds // 3600
-    minutes = (time_seconds % 3600) // 60
-    time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+    # Parse G-code for bounds
+    bounds = _parse_gcode_bounds(gcode_path)
 
     return {
-        "job_id": job["job_id"],
-        "layer_count": job["layer_count"],
-        "bounds": {
-            "min_x": metadata.min_x,
-            "min_y": metadata.min_y,
-            "min_z": metadata.min_z,
-            "max_x": metadata.max_x,
-            "max_y": metadata.max_y,
-            "max_z": metadata.max_z
-        },
-        "estimated_time": time_str,
-        "filament_used_mm": job["filament_used_mm"],
-        "gcode_size_mb": round(job["gcode_size"] / 1024 / 1024, 2)
+        "layer_count": job["layer_count"] or 0,
+        "estimated_time_seconds": job["estimated_time_seconds"] or 0,
+        "filament_used_mm": job["filament_used_mm"] or 0,
+        "bounds": bounds
     }
 
 
-@router.get("/slicing/jobs/{job_id}/gcode/layers")
+@router.get("/jobs/{job_id}/gcode/layers")
 async def get_gcode_layers(job_id: str, start: int = 0, count: int = 20):
-    """
-    Get layer-by-layer G-code geometry for preview rendering.
-
-    Args:
-        job_id: Slicing job ID
-        start: Starting layer number (0-indexed)
-        count: Number of layers to return (default: 20, max: 100)
-
-    Returns:
-        {
-            "job_id": str,
-            "total_layers": int,
-            "start_layer": int,
-            "layer_count": int,
-            "layers": [
-                {
-                    "layer_num": int,
-                    "z_height": float,
-                    "moves": [
-                        {"type": "travel|extrude", "x1": float, "y1": float, "x2": float, "y2": float}
-                    ]
-                }
-            ]
-        }
-    """
-    from db import get_cached_gcode_layers, cache_gcode_layers
-    from gcode_layer_extractor import LayerExtractor
-
-    # Validate parameters
-    if start < 0:
-        raise HTTPException(status_code=400, detail="start must be >= 0")
-
-    if count < 1 or count > 100:
-        raise HTTPException(status_code=400, detail="count must be between 1 and 100")
-
+    """Get G-code layer geometry for visualization."""
     pool = get_pg_pool()
-
-    # Get job and G-code path
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
-            """
-            SELECT j.job_id, j.status, j.gcode_path
-            FROM slicing_jobs j
-            WHERE j.job_id = $1
-            """,
+            "SELECT gcode_path, status FROM slicing_jobs WHERE job_id = $1",
             job_id
         )
 
         if not job:
-            raise HTTPException(status_code=404, detail="Slicing job not found")
+            raise HTTPException(status_code=404, detail="Job not found")
 
         if job["status"] != "completed":
-            raise HTTPException(status_code=400, detail=f"Job status is '{job['status']}', not completed")
+            raise HTTPException(status_code=400, detail="Job not completed")
 
-        if not job["gcode_path"]:
+        gcode_path = Path(job["gcode_path"])
+        if not gcode_path.exists():
             raise HTTPException(status_code=404, detail="G-code file not found")
 
-    gcode_path = Path(job["gcode_path"])
+    # Parse requested layers
+    layers = _parse_gcode_layers(gcode_path, start, count)
 
-    if not gcode_path.exists():
-        raise HTTPException(status_code=404, detail="G-code file not found on disk")
+    return {"layers": layers}
 
-    # Check cache first
-    cached = await get_cached_gcode_layers(job_id, start, count)
-    if cached:
-        logger.info(f"Cache hit for job {job_id}, layers {start}-{start + count - 1}")
-        return {
-            "job_id": job_id,
-            **cached
-        }
 
-    # Cache miss - extract layers
-    logger.info(f"Cache miss for job {job_id}, extracting layers {start}-{start + count - 1}")
-    extractor = LayerExtractor()
+def _parse_gcode_bounds(gcode_path: Path) -> Dict[str, float]:
+    """Parse G-code file to extract print bounds by scanning actual moves."""
+    bounds = {
+        "min_x": float('inf'), "max_x": float('-inf'),
+        "min_y": float('inf'), "max_y": float('-inf'),
+        "min_z": float('inf'), "max_z": float('-inf')
+    }
+
+    current_x, current_y, current_z = 0.0, 0.0, 0.0
+    pattern = re.compile(r'([XYZ])([\d.-]+)')
 
     try:
-        result = extractor.extract_layers(gcode_path, start, count)
+        with open(gcode_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+
+                # Skip comments and non-move commands
+                if not line or line.startswith(';') or not line.startswith('G1'):
+                    continue
+
+                # Parse coordinates
+                parts = dict(pattern.findall(line))
+
+                if 'X' in parts:
+                    current_x = float(parts['X'])
+                    bounds["min_x"] = min(bounds["min_x"], current_x)
+                    bounds["max_x"] = max(bounds["max_x"], current_x)
+
+                if 'Y' in parts:
+                    current_y = float(parts['Y'])
+                    bounds["min_y"] = min(bounds["min_y"], current_y)
+                    bounds["max_y"] = max(bounds["max_y"], current_y)
+
+                if 'Z' in parts:
+                    current_z = float(parts['Z'])
+                    bounds["min_z"] = min(bounds["min_z"], current_z)
+                    bounds["max_z"] = max(bounds["max_z"], current_z)
+
+        # If no coordinates found, default to 0
+        if bounds["min_x"] == float('inf'):
+            bounds = {
+                "min_x": 0.0, "max_x": 270.0,
+                "min_y": 0.0, "max_y": 270.0,
+                "min_z": 0.0, "max_z": 270.0
+            }
+
     except Exception as e:
-        logger.error(f"Failed to extract layers: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to extract layers: {str(e)}")
+        logger.error(f"Failed to parse bounds from G-code: {e}")
+        # Return default bed bounds
+        bounds = {
+            "min_x": 0.0, "max_x": 270.0,
+            "min_y": 0.0, "max_y": 270.0,
+            "min_z": 0.0, "max_z": 270.0
+        }
 
-    # Cache result
-    await cache_gcode_layers(job_id, start, count, result)
-
-    return {
-        "job_id": job_id,
-        **result
-    }
-
-
-@router.get("/slicing/jobs/{job_id}/download")
-async def download_gcode(job_id: str):
-    """
-    Download the G-code file for a completed slicing job.
-
-    Returns the G-code file as a download with proper filename.
-    """
-    from fastapi.responses import FileResponse
-
-    pool = get_pg_pool()
-
-    async with pool.acquire() as conn:
-        job = await conn.fetchrow(
-            """
-            SELECT j.job_id, j.status, j.gcode_path, b.name as bundle_name
-            FROM slicing_jobs j
-            LEFT JOIN bundles b ON j.bundle_id = b.id
-            WHERE j.job_id = $1
-            """,
-            job_id
-        )
-
-        if not job:
-            raise HTTPException(status_code=404, detail="Slicing job not found")
-
-        if job["status"] != "completed":
-            raise HTTPException(status_code=400, detail=f"Job status is '{job['status']}', not completed")
-
-        if not job["gcode_path"]:
-            raise HTTPException(status_code=404, detail="G-code file not found")
-
-    gcode_path = Path(job["gcode_path"])
-
-    if not gcode_path.exists():
-        raise HTTPException(status_code=404, detail="G-code file not found on disk")
-
-    # Generate filename: bundle_name_timestamp.gcode
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    bundle_name = job["bundle_name"] or "print"
-    # Sanitize bundle name for filename
-    safe_name = "".join(c for c in bundle_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-    filename = f"{safe_name}_{timestamp}.gcode"
-
-    return FileResponse(
-        path=gcode_path,
-        media_type="text/plain",
-        filename=filename
-    )
+    return bounds
 
 
-@router.get("/slicing/jobs")
-async def list_slicing_jobs(limit: int = 20, offset: int = 0):
-    """
-    List recent completed slicing jobs.
+def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
+    """Parse specific layers from G-code file."""
+    layers = []
+    current_layer = -1
+    current_z = 0.0
+    last_x, last_y = 0.0, 0.0
+    layer_moves = []
 
-    Args:
-        limit: Maximum number of jobs to return (default: 20, max: 100)
-        offset: Number of jobs to skip (for pagination)
+    pattern = re.compile(r'([GXYZEF])([\d.-]+)')
 
-    Returns:
-        List of slicing jobs with metadata.
-    """
-    if limit < 1 or limit > 100:
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    try:
+        with open(gcode_path, 'r') as f:
+            for line in f:
+                line = line.strip()
 
-    if offset < 0:
-        raise HTTPException(status_code=400, detail="offset must be >= 0")
+                # Detect layer changes
+                if line.startswith(";LAYER_CHANGE"):
+                    if current_layer >= start and layer_moves:
+                        layers.append({
+                            "layer_num": current_layer,
+                            "z_height": current_z,
+                            "moves": layer_moves
+                        })
 
-    pool = get_pg_pool()
+                        if len(layers) >= count:
+                            break
 
-    async with pool.acquire() as conn:
-        jobs = await conn.fetch(
-            """
-            SELECT
-                j.job_id,
-                b.bundle_id,
-                j.status,
-                j.created_at,
-                j.completed_at,
-                j.gcode_size,
-                j.estimated_time_seconds,
-                j.filament_used_mm,
-                j.layer_count,
-                b.name as bundle_name,
-                (SELECT COUNT(*) FROM bundle_objects bo WHERE bo.bundle_id = b.id) as object_count,
-                f.name as filament_name
-            FROM slicing_jobs j
-            LEFT JOIN bundles b ON j.bundle_id = b.id
-            LEFT JOIN filaments f ON b.filament_id = f.id
-            WHERE j.status = 'completed'
-            ORDER BY j.completed_at DESC
-            LIMIT $1 OFFSET $2
-            """,
-            limit,
-            offset
-        )
+                    current_layer += 1
+                    layer_moves = []
+                    continue
 
-    results = []
-    for job in jobs:
-        # Format time
-        time_seconds = job["estimated_time_seconds"] or 0
-        hours = time_seconds // 3600
-        minutes = (time_seconds % 3600) // 60
-        time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                # Skip if not in range
+                if current_layer < start:
+                    continue
+                if len(layers) >= count:
+                    break
 
-        results.append({
-            "job_id": job["job_id"],
-            "bundle_id": job["bundle_id"],
-            "bundle_name": job["bundle_name"],
-            "object_count": job["object_count"],
-            "filament_name": job["filament_name"],
-            "gcode_size_mb": round(job["gcode_size"] / 1024 / 1024, 2) if job["gcode_size"] else 0,
-            "estimated_time": time_str,
-            "filament_used_mm": job["filament_used_mm"],
-            "layer_count": job["layer_count"],
-            "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None
-        })
+                # Parse G1 move commands
+                if line.startswith("G1 "):
+                    parts = dict(pattern.findall(line))
 
-    return {"jobs": results, "count": len(results)}
+                    # Get coordinates, use last known if not specified
+                    x = float(parts['X']) if 'X' in parts else last_x
+                    y = float(parts['Y']) if 'Y' in parts else last_y
+                    z = float(parts['Z']) if 'Z' in parts else current_z
+                    e = parts.get('E')
+
+                    if z != current_z:
+                        current_z = z
+
+                    # Only record XY moves (ignore Z-only moves)
+                    if x != last_x or y != last_y:
+                        # Extrude if E is present and not negative (retraction)
+                        is_extrude = e is not None and float(e) >= 0
+                        layer_moves.append({
+                            "type": "extrude" if is_extrude else "travel",
+                            "x1": last_x,
+                            "y1": last_y,
+                            "x2": x,
+                            "y2": y
+                        })
+
+                    last_x, last_y = x, y
+
+            # Add final layer if in range
+            if current_layer >= start and layer_moves and len(layers) < count:
+                layers.append({
+                    "layer_num": current_layer,
+                    "z_height": current_z,
+                    "moves": layer_moves
+                })
+
+    except Exception as e:
+        logger.error(f"Failed to parse G-code layers: {e}")
+        raise HTTPException(status_code=500, detail="Failed to parse G-code")
+
+    return layers

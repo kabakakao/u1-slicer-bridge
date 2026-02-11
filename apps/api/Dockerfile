@@ -29,10 +29,11 @@ RUN apt-get update && apt-get install -y \
     libwebkit2gtk-4.1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and extract Orca Slicer v2.3.1 AppImage (pinned version)
+# Download and extract Snapmaker's OrcaSlicer fork v2.2.4 (Feb 2025)
+# Snapmaker's fork explicitly supports Bambu Lab printers and file formats
 # Extract AppImage to avoid FUSE requirement in Docker
 RUN wget -O /tmp/orca-slicer.AppImage \
-    https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.3.1/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.3.1.AppImage && \
+    https://github.com/Snapmaker/OrcaSlicer/releases/download/v2.2.4/Snapmaker_Orca_Linux_AppImage_Ubuntu2404_V2.2.4_Beta.AppImage && \
     chmod +x /tmp/orca-slicer.AppImage && \
     cd /tmp && \
     ./orca-slicer.AppImage --appimage-extract && \

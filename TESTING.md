@@ -19,26 +19,28 @@ That's it! The script will test the full workflow automatically.
 The test script validates the complete workflow:
 
 ```
-Upload 3MF → Parse Objects → Normalize → Bundle → Slice → G-code
+Upload 3MF → Validate Plate → Slice → G-code
 ```
 
 ### API Endpoints Tested
-- ✓ `POST /upload` - Upload 3MF file
+- ✓ `POST /upload` - Upload 3MF file (validates plate bounds)
+- ✓ `GET /upload` - List uploads
 - ✓ `GET /upload/{id}` - Retrieve upload details
-- ✓ `POST /filaments/init-defaults` - Initialize default filament profiles
 - ✓ `GET /filaments` - List available filaments
-- ✓ `POST /normalize/{id}` - Normalize objects to Snapmaker U1 build volume
-- ✓ `POST /bundles` - Create bundle from normalized objects
-- ✓ `POST /bundles/{id}/slice` - Slice bundle to G-code
+- ✓ `POST /uploads/{id}/slice` - Slice upload with settings
+- ✓ `GET /jobs/{job_id}` - Check slicing job status
+- ✓ `GET /jobs/{job_id}/download` - Download G-code
+- ✓ `GET /jobs/{job_id}/gcode/metadata` - Viewer metadata
+- ✓ `GET /jobs/{job_id}/gcode/layers` - Layer geometry
 
 ### Validation Steps
 1. **Health Check** - API responding
-2. **Upload** - 3MF file parsed, objects extracted
-3. **Normalization** - Objects placed on Z=0, bounds validated
-4. **Bundle Creation** - Objects grouped with filament settings
-5. **Slicing** - Orca Slicer generates G-code with embedded settings
-6. **Metadata Extraction** - Print time, filament usage, layer count
-7. **G-code Validation** - File exists and contains expected headers
+2. **Upload** - 3MF file parsed, plate bounds validated (270x270x270mm)
+3. **Filament Selection** - Choose PLA/PETG/ABS/TPU profile
+4. **Slicing** - Snapmaker OrcaSlicer generates G-code
+5. **Metadata Extraction** - Print time, filament usage, layer count
+6. **G-code Validation** - File exists and contains expected headers
+7. **Viewer Data** - Layer geometry extracted for preview
 
 ## Manual Testing
 
@@ -68,30 +70,7 @@ curl -X POST http://localhost:8000/upload \
 }
 ```
 
-### 2. Normalize Objects
-```bash
-curl -X POST http://localhost:8000/normalize/1 \
-  -H "Content-Type: application/json" \
-  -d '{"printer_profile": "snapmaker_u1"}' \
-  | jq
-```
-
-**Expected output:**
-```json
-{
-  "job_id": "norm_abc123",
-  "upload_id": 1,
-  "status": "completed",
-  "normalized_objects": [...]
-}
-```
-
-### 3. Initialize Default Filaments
-```bash
-curl -X POST http://localhost:8000/filaments/init-defaults | jq
-```
-
-### 4. List Filaments
+### 2. List Filaments
 ```bash
 curl http://localhost:8000/filaments | jq
 ```
@@ -113,35 +92,13 @@ curl http://localhost:8000/filaments | jq
 }
 ```
 
-### 5. Create Bundle
+### 3. Slice Upload
 ```bash
-# Replace object_ids with actual IDs from step 2
-curl -X POST http://localhost:8000/bundles \
+# Use upload_id from step 1
+curl -X POST http://localhost:8000/uploads/1/slice \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "test_print",
-    "object_ids": [1, 2],
-    "filament_id": 1
-  }' \
-  | jq
-```
-
-**Expected output:**
-```json
-{
-  "bundle_id": "bundle_xyz789",
-  "name": "test_print",
-  "filament": "Snapmaker Generic PLA",
-  "object_count": 2,
-  "status": "pending"
-}
-```
-
-### 6. Slice Bundle
-```bash
-curl -X POST http://localhost:8000/bundles/bundle_xyz789/slice \
-  -H "Content-Type: application/json" \
-  -d '{
+    "filament_id": 1,
     "layer_height": 0.2,
     "infill_density": 15,
     "supports": false
@@ -152,15 +109,32 @@ curl -X POST http://localhost:8000/bundles/bundle_xyz789/slice \
 **Expected output:**
 ```json
 {
-  "job_id": "slice_def456",
-  "bundle_id": "bundle_xyz789",
+  "job_id": "slice_abc123",
+  "upload_id": 1,
   "status": "completed",
-  "gcode_path": "/data/slices/slice_def456.gcode",
-  "estimated_print_time_seconds": 1234,
-  "filament_used_mm": 567.89,
-  "total_layers": 100,
-  "log_path": "/data/logs/slice_def456.log"
+  "gcode_path": "/data/slices/slice_abc123.gcode",
+  "gcode_size_mb": 18.5,
+  "metadata": {
+    "estimated_time_seconds": 28800,
+    "filament_used_mm": 29900,
+    "layer_count": 158
+  }
 }
+```
+
+### 4. Download G-code
+```bash
+curl -o output.gcode http://localhost:8000/jobs/slice_abc123/download
+```
+
+### 5. Get Viewer Metadata
+```bash
+curl http://localhost:8000/jobs/slice_abc123/gcode/metadata | jq
+```
+
+### 6. Get Layer Data
+```bash
+curl http://localhost:8000/jobs/slice_abc123/gcode/layers?start=0&count=10 | jq
 ```
 
 ## Viewing Logs
@@ -182,14 +156,15 @@ docker exec u1-slicer-bridge-api-1 head -n 50 /data/slices/slice_xyz123.gcode
 - 3MF contains no meshes
 - Check logs: `docker logs u1-slicer-bridge-api-1`
 
-### Normalization fails with bounds error
-- Object exceeds Snapmaker U1 build volume (300x300x300mm)
-- Check normalization log in response
+### Upload shows bounds warning
+- Plate exceeds Snapmaker U1 build volume (270x270x270mm)
+- Warning returned in upload response
+- You can still attempt to slice (may fail)
 
 ### Slicing fails
-- Objects not normalized
-- Orca Slicer error (check log_path in response)
-- Missing filament settings
+- Plate exceeds build volume
+- Snapmaker OrcaSlicer error (check job logs)
+- Invalid filament_id or settings
 
 ### Check Docker containers
 ```bash
@@ -197,39 +172,42 @@ docker ps  # All containers should be "Up"
 docker logs u1-slicer-bridge-api-1  # API logs
 ```
 
-### Verify Orca Slicer installation
+### Verify Snapmaker OrcaSlicer installation
 ```bash
 docker exec u1-slicer-bridge-api-1 xvfb-run -a orca-slicer --version
 ```
 
 **Expected output:**
 ```
-OrcaSlicer 2.3.1
+OrcaSlicer 2.2.4
 ```
 
 ## Expected Results
 
 After a successful test run, you should have:
-1. ✅ Upload record in database
-2. ✅ Extracted objects with mesh data
-3. ✅ Normalized STL files in `/data/normalized/`
-4. ✅ Bundle record with filament assignment
-5. ✅ Programmatically generated 3MF with Snapmaker U1 settings
-6. ✅ Valid G-code file in `/data/slices/`
-7. ✅ G-code metadata (time, filament, layers)
+1. ✅ Upload record in database with plate bounds
+2. ✅ 3MF file stored in `/data/uploads/`
+3. ✅ Slicing job record with status
+4. ✅ Valid G-code file in `/data/slices/`
+5. ✅ G-code metadata (time, filament, layers)
+6. ✅ Job log in `/data/logs/`
 
 ## Performance Benchmarks
 
 Typical timing for a simple cube:
-- Upload: < 1 second
-- Normalization: 2-5 seconds
-- 3MF generation: < 5 seconds
-- Slicing: 10-30 seconds (depends on complexity)
+- Upload + validation: < 1 second
+- Slicing: 30-60 seconds (depends on complexity)
+- Viewer metadata extraction: 1-2 seconds
 
 ## Next Steps After Testing
 
-Once the API workflow is validated:
-1. Build the mobile-first web UI (M7)
-2. Add WebSocket for real-time job updates
-3. Implement G-code preview (M9)
-4. Add print control via Moonraker (M10)
+Current status:
+1. ✅ Web UI complete (M7) - 3-step workflow at http://localhost:8080
+2. ✅ G-code preview complete - Interactive 2D layer viewer
+3. ⚠️ Moonraker integration partial (M2) - Health check only
+4. ❌ Print control not implemented (M8) - No upload/start print endpoints
+
+Next steps:
+1. Implement M8 print control (upload G-code to printer, start/stop/pause)
+2. Add WebSocket for real-time job updates (optional)
+3. Add print queue management (optional)

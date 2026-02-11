@@ -114,14 +114,19 @@ class ApiClient {
     }
 
     /**
-     * Normalize objects in an upload
+     * Slice an upload directly to G-code
+     * @param {number} uploadId - The upload ID to slice
+     * @param {object} settings - Slicing settings
+     * @returns {Promise<{job_id: string, status: string}>}
      */
-    async normalize(uploadId, options = {}) {
-        return this.fetch(`/normalize/${uploadId}`, {
+    async sliceUpload(uploadId, settings) {
+        return this.fetch(`/uploads/${uploadId}/slice`, {
             method: 'POST',
             body: JSON.stringify({
-                printer_profile: options.printer_profile || 'snapmaker_u1',
-                object_ids: options.object_ids || null,
+                filament_id: settings.filament_id,
+                layer_height: settings.layer_height,
+                infill_density: settings.infill_density,
+                supports: settings.supports
             }),
         });
     }
@@ -153,44 +158,12 @@ class ApiClient {
     }
 
     /**
-     * Create a bundle
+     * Get job status
+     * @param {string} jobId - The job ID to check
+     * @returns {Promise<{job_id: string, status: string, metadata: object}>}
      */
-    async createBundle(data) {
-        return this.fetch('/bundles', {
-            method: 'POST',
-            body: JSON.stringify(data),
-        });
-    }
-
-    /**
-     * Get bundle details
-     */
-    async getBundle(bundleId) {
-        return this.fetch(`/bundles/${bundleId}`);
-    }
-
-    /**
-     * List all bundles
-     */
-    async listBundles() {
-        return this.fetch('/bundles');
-    }
-
-    /**
-     * Slice a bundle to G-code
-     */
-    async slice(bundleId, settings = {}) {
-        return this.fetch(`/bundles/${bundleId}/slice`, {
-            method: 'POST',
-            body: JSON.stringify(settings),
-        });
-    }
-
-    /**
-     * Get slicing job status
-     */
-    async getSlicingJob(jobId) {
-        return this.fetch(`/slicing/jobs/${jobId}`);
+    async getJobStatus(jobId) {
+        return this.fetch(`/jobs/${jobId}`);
     }
 
     /**
@@ -208,17 +181,17 @@ class ApiClient {
     }
 
     /**
-     * Get G-code preview metadata
+     * Get G-code layer metadata for viewer
      */
     async getGCodeMetadata(jobId) {
-        return this.fetch(`/slicing/jobs/${jobId}/gcode/metadata`);
+        return this.fetch(`/jobs/${jobId}/gcode/metadata`);
     }
 
     /**
-     * Get G-code layer geometry
+     * Get G-code layer geometry for viewer
      */
     async getGCodeLayers(jobId, start = 0, count = 20) {
-        return this.fetch(`/slicing/jobs/${jobId}/gcode/layers?start=${start}&count=${count}`);
+        return this.fetch(`/jobs/${jobId}/gcode/layers?start=${start}&count=${count}`);
     }
 
     /**
@@ -226,14 +199,7 @@ class ApiClient {
      */
     downloadGCode(jobId) {
         // Open download in new window
-        window.open(`/api/slicing/jobs/${jobId}/download`, '_blank');
-    }
-
-    /**
-     * List recent slicing jobs
-     */
-    async listSlicingJobs(limit = 20, offset = 0) {
-        return this.fetch(`/slicing/jobs?limit=${limit}&offset=${offset}`);
+        window.open(`/jobs/${jobId}/download`, '_blank');
     }
 }
 

@@ -27,213 +27,292 @@
 
     <!-- Main Content -->
     <main class="container mx-auto px-4 py-6 max-w-4xl">
-        <!-- Upload Section -->
-        <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
-            <h2 class="text-lg md:text-xl font-semibold mb-4">Upload 3MF File</h2>
-
-            <!-- File Upload Area -->
-            <div
-                x-ref="dropzone"
-                @dragover.prevent="dragOver = true"
-                @dragleave.prevent="dragOver = false"
-                @drop.prevent="handleFileDrop($event)"
-                :class="{'drag-over': dragOver}"
-                class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-gray-400 transition"
-                @click="$refs.fileInput.click()">
-                <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48">
-                    <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <p class="mt-2 text-sm text-gray-600">
-                    <span class="font-semibold">Click to upload</span> or drag and drop
-                </p>
-                <p class="text-xs text-gray-500 mt-1">.3mf files only</p>
-            </div>
-            <input
-                type="file"
-                x-ref="fileInput"
-                @change="handleFileSelect($event)"
-                accept=".3mf"
-                class="hidden">
-
-            <!-- Upload Progress -->
-            <div x-show="uploadProgress > 0 && uploadProgress < 100" class="mt-4" x-cloak>
-                <div class="flex justify-between text-sm mb-1">
-                    <span class="text-gray-600">Uploading...</span>
-                    <span class="text-gray-600" x-text="`${uploadProgress}%`"></span>
+        <!-- Progress Indicator -->
+        <div class="max-w-4xl mx-auto mb-8">
+            <div class="flex items-center justify-between">
+                <!-- Step 1: Upload -->
+                <div class="flex-1 text-center">
+                    <div class="w-12 h-12 mx-auto rounded-full flex items-center justify-center"
+                         :class="currentStep === 'upload' ? 'bg-blue-600 text-white' :
+                                ['configure', 'slicing', 'complete'].includes(currentStep) ? 'bg-green-600 text-white' :
+                                'bg-gray-300 text-gray-600'">
+                        <span x-text="['configure', 'slicing', 'complete'].includes(currentStep) ? '✓' : '1'"></span>
+                    </div>
+                    <p class="mt-2 text-sm font-medium">Upload</p>
                 </div>
-                <div class="w-full bg-gray-200 rounded-full h-2">
-                    <div class="bg-blue-500 h-2 rounded-full transition-all" :style="`width: ${uploadProgress}%`"></div>
+
+                <div class="flex-1 h-1 bg-gray-300 mx-2"
+                     :class="['configure', 'slicing', 'complete'].includes(currentStep) ? 'bg-green-600' : ''"></div>
+
+                <!-- Step 2: Configure -->
+                <div class="flex-1 text-center">
+                    <div class="w-12 h-12 mx-auto rounded-full flex items-center justify-center"
+                         :class="currentStep === 'configure' ? 'bg-blue-600 text-white' :
+                                ['slicing', 'complete'].includes(currentStep) ? 'bg-green-600 text-white' :
+                                'bg-gray-300 text-gray-600'">
+                        <span x-text="['slicing', 'complete'].includes(currentStep) ? '✓' : '2'"></span>
+                    </div>
+                    <p class="mt-2 text-sm font-medium">Configure</p>
+                </div>
+
+                <div class="flex-1 h-1 bg-gray-300 mx-2"
+                     :class="['slicing', 'complete'].includes(currentStep) ? 'bg-green-600' : ''"></div>
+
+                <!-- Step 3: Slice -->
+                <div class="flex-1 text-center">
+                    <div class="w-12 h-12 mx-auto rounded-full flex items-center justify-center"
+                         :class="currentStep === 'slicing' ? 'bg-blue-600 text-white animate-pulse' :
+                                currentStep === 'complete' ? 'bg-green-600 text-white' :
+                                'bg-gray-300 text-gray-600'">
+                        <span x-text="currentStep === 'complete' ? '✓' : '3'"></span>
+                    </div>
+                    <p class="mt-2 text-sm font-medium">Slice</p>
                 </div>
             </div>
+        </div>
 
-            <!-- Recent Uploads -->
-            <div x-show="uploads.length > 0" class="mt-6" x-cloak>
-                <h3 class="text-sm font-semibold text-gray-700 mb-3">Recent Uploads</h3>
-                <div class="space-y-2">
-                    <template x-for="upload in uploads" :key="upload.upload_id">
-                        <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                            <div class="flex-1 min-w-0">
-                                <p class="text-sm font-medium text-gray-900 truncate" x-text="upload.filename"></p>
-                                <p class="text-xs text-gray-500" x-text="`${upload.object_count} objects`"></p>
-                            </div>
-                            <button
-                                @click="selectUpload(upload.upload_id)"
-                                class="ml-2 px-3 py-1 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 active:bg-blue-700 transition">
-                                Process
-                            </button>
+        <!-- Step Content -->
+        <div class="max-w-4xl mx-auto">
+
+            <!-- Step 1: Upload File -->
+            <div x-show="currentStep === 'upload'" x-cloak>
+                <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
+                    <h2 class="text-lg md:text-xl font-semibold mb-4">Upload 3MF File</h2>
+
+                    <!-- File Upload Area -->
+                    <div
+                        x-ref="dropzone"
+                        @dragover.prevent="dragOver = true"
+                        @dragleave.prevent="dragOver = false"
+                        @drop.prevent="handleFileDrop($event)"
+                        :class="{'border-blue-500 bg-blue-50': dragOver}"
+                        class="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center cursor-pointer hover:border-gray-400 transition"
+                        @click="$refs.fileInput.click()">
+                        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                        </svg>
+                        <p class="mt-4 text-lg font-medium text-gray-700">Click to upload or drag and drop</p>
+                        <p class="mt-1 text-sm text-gray-500">.3mf files only</p>
+                        <p class="mt-2 text-xs text-blue-600">✓ Supports Bambu Studio & MakerWorld files</p>
+                    </div>
+                    <input
+                        type="file"
+                        x-ref="fileInput"
+                        @change="handleFileInput($event)"
+                        accept=".3mf"
+                        class="hidden">
+
+                    <!-- Upload Progress -->
+                    <div x-show="uploadProgress > 0 && uploadProgress < 100" class="mt-4" x-cloak>
+                        <div class="flex justify-between text-sm mb-1">
+                            <span class="text-gray-600">Uploading...</span>
+                            <span class="text-gray-600" x-text="`${uploadProgress}%`"></span>
                         </div>
-                    </template>
-                </div>
-            </div>
-        </section>
+                        <div class="w-full bg-gray-200 rounded-full h-2">
+                            <div class="bg-blue-500 h-2 rounded-full transition-all" :style="`width: ${uploadProgress}%`"></div>
+                        </div>
+                    </div>
 
-        <!-- Workflow Section -->
-        <section x-show="currentUploadId" class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6" x-cloak>
-            <h2 class="text-lg md:text-xl font-semibold mb-4">Processing Workflow</h2>
+                    <!-- Recent Uploads -->
+                    <div x-show="uploads.length > 0" class="mt-8">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-medium">Recent Uploads</h3>
+                            <span class="text-sm text-gray-500" x-text="`${uploads.length} files`"></span>
+                        </div>
 
-            <!-- Step 1: Normalize -->
-            <div class="mb-4">
-                <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-sm font-semibold text-gray-700">1. Normalize Objects</h3>
-                    <span class="text-xs px-2 py-1 rounded-full"
-                        :class="{
-                            'bg-yellow-100 text-yellow-800': workflow.normalize === 'pending',
-                            'bg-blue-100 text-blue-800': workflow.normalize === 'processing',
-                            'bg-green-100 text-green-800': workflow.normalize === 'completed',
-                            'bg-red-100 text-red-800': workflow.normalize === 'failed'
-                        }"
-                        x-text="workflow.normalize"></span>
-                </div>
-                <button
-                    @click="startNormalize()"
-                    :disabled="workflow.normalize !== 'pending'"
-                    class="w-full px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 active:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition">
-                    <span x-show="workflow.normalize === 'pending'">Start Normalization</span>
-                    <span x-show="workflow.normalize === 'processing'">Processing...</span>
-                    <span x-show="workflow.normalize === 'completed'">✓ Completed</span>
-                    <span x-show="workflow.normalize === 'failed'">Failed - Retry</span>
-                </button>
+                        <div class="space-y-2 max-h-96 overflow-y-auto">
+                            <template x-for="upload in uploads" :key="upload.upload_id">
+                                <div @click="selectUpload(upload)"
+                                     class="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 cursor-pointer transition">
+                                    <div class="flex-1">
+                                        <p class="font-medium text-gray-900" x-text="upload.filename"></p>
+                                        <p class="text-sm text-gray-500" x-text="`${(upload.file_size / 1024 / 1024).toFixed(2)} MB`"></p>
+                                    </div>
+                                    <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+                                        Slice →
+                                    </button>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </section>
             </div>
 
-            <!-- Step 2: Bundle -->
-            <div class="mb-4">
-                <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-sm font-semibold text-gray-700">2. Create Bundle</h3>
-                    <span class="text-xs px-2 py-1 rounded-full"
-                        :class="{
-                            'bg-gray-100 text-gray-800': workflow.bundle === 'pending',
-                            'bg-blue-100 text-blue-800': workflow.bundle === 'processing',
-                            'bg-green-100 text-green-800': workflow.bundle === 'completed',
-                            'bg-red-100 text-red-800': workflow.bundle === 'failed'
-                        }"
-                        x-text="workflow.bundle"></span>
-                </div>
+            <!-- Step 2: Configure Settings -->
+            <div x-show="currentStep === 'configure'" x-cloak>
+                <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
+                    <h2 class="text-lg md:text-xl font-semibold mb-4">Configure Print Settings</h2>
 
-                <!-- Filament Selection -->
-                <div x-show="workflow.normalize === 'completed' && workflow.bundle === 'pending'" class="mb-3" x-cloak>
-                    <label class="block text-sm font-medium text-gray-700 mb-2">Select Filament</label>
-                    <select x-model="selectedFilament" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
-                        <option value="">Choose filament...</option>
-                        <template x-for="filament in filaments" :key="filament.id">
-                            <option :value="filament.id" x-text="`${filament.name} (${filament.material})`"></option>
+                    <!-- File Info -->
+                    <div class="mb-6 p-4 bg-gray-50 rounded-lg">
+                        <h3 class="font-medium text-gray-900 mb-2">Selected File</h3>
+                        <p class="text-sm text-gray-700" x-text="selectedUpload?.filename"></p>
+                        <p class="text-xs text-gray-500 mt-1" x-text="`${(selectedUpload?.file_size / 1024 / 1024).toFixed(2)} MB`"></p>
+                        <template x-if="selectedUpload?.warnings && selectedUpload.warnings.length > 0">
+                            <div class="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded">
+                                <p class="text-xs text-yellow-800">⚠️ <span x-text="selectedUpload.warnings[0]"></span></p>
+                            </div>
                         </template>
-                    </select>
-                </div>
+                    </div>
 
-                <button
-                    @click="createBundle()"
-                    :disabled="workflow.normalize !== 'completed' || !selectedFilament || workflow.bundle !== 'pending'"
-                    class="w-full px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 active:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition">
-                    <span x-show="workflow.bundle === 'pending'">Create Bundle</span>
-                    <span x-show="workflow.bundle === 'processing'">Creating...</span>
-                    <span x-show="workflow.bundle === 'completed'">✓ Completed</span>
-                    <span x-show="workflow.bundle === 'failed'">Failed - Retry</span>
-                </button>
+                    <!-- Filament Selection -->
+                    <div class="mb-6">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Filament Profile</label>
+                        <select x-model.number="selectedFilament"
+                                class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                            <template x-for="filament in filaments" :key="filament.id">
+                                <option :value="filament.id"
+                                        x-text="`${filament.name} - ${filament.material} (${filament.nozzle_temp}°C / ${filament.bed_temp}°C)`">
+                                </option>
+                            </template>
+                        </select>
+                    </div>
+
+                    <!-- Print Settings -->
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Layer Height</label>
+                            <select x-model.number="sliceSettings.layer_height"
+                                    class="w-full px-4 py-2 border border-gray-300 rounded-lg">
+                                <option value="0.10">0.10mm (Fine)</option>
+                                <option value="0.15">0.15mm (Standard)</option>
+                                <option value="0.20" selected>0.20mm (Standard)</option>
+                                <option value="0.25">0.25mm (Fast)</option>
+                                <option value="0.30">0.30mm (Draft)</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Infill Density: <span x-text="sliceSettings.infill_density + '%'"></span>
+                            </label>
+                            <input type="range" x-model.number="sliceSettings.infill_density"
+                                   min="0" max="100" step="5"
+                                   class="w-full">
+                        </div>
+
+                        <div class="flex items-center">
+                            <input type="checkbox" x-model="sliceSettings.supports" id="supports"
+                                   class="h-4 w-4 text-blue-600 rounded">
+                            <label for="supports" class="ml-2 text-sm font-medium text-gray-700">
+                                Enable Support Structures
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="mt-8 flex gap-4">
+                        <button @click="currentStep = 'upload'"
+                                class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                            ← Back
+                        </button>
+                        <button @click="startSlice()"
+                                :disabled="!selectedFilament"
+                                :class="selectedFilament ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'"
+                                class="flex-1 px-6 py-3 text-white rounded-lg transition">
+                            Slice Now →
+                        </button>
+                    </div>
+                </section>
             </div>
 
-            <!-- Step 3: Slice -->
-            <div>
-                <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-sm font-semibold text-gray-700">3. Slice to G-code</h3>
-                    <span class="text-xs px-2 py-1 rounded-full"
-                        :class="{
-                            'bg-gray-100 text-gray-800': workflow.slice === 'pending',
-                            'bg-blue-100 text-blue-800': workflow.slice === 'processing',
-                            'bg-green-100 text-green-800': workflow.slice === 'completed',
-                            'bg-red-100 text-red-800': workflow.slice === 'failed'
-                        }"
-                        x-text="workflow.slice"></span>
-                </div>
+            <!-- Step 3: Slicing Progress -->
+            <div x-show="currentStep === 'slicing'" x-cloak>
+                <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
+                    <h2 class="text-lg md:text-xl font-semibold mb-4">Slicing Your Print...</h2>
 
-                <!-- Slicing Settings -->
-                <div x-show="workflow.bundle === 'completed' && workflow.slice === 'pending'" class="mb-3 space-y-3" x-cloak>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Layer Height (mm)</label>
-                        <input type="number" x-model.number="sliceSettings.layer_height" step="0.05" min="0.1" max="0.4"
-                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Infill Density (%)</label>
-                        <input type="number" x-model.number="sliceSettings.infill_density" step="5" min="0" max="100"
-                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
-                    </div>
-                    <div class="flex items-center">
-                        <input type="checkbox" x-model="sliceSettings.supports" id="supports"
-                            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
-                        <label for="supports" class="ml-2 text-sm text-gray-700">Enable Supports</label>
-                    </div>
-                </div>
+                    <div class="py-8">
+                        <div class="relative pt-1">
+                            <div class="flex mb-2 items-center justify-between">
+                                <div>
+                                    <span class="text-xs font-semibold inline-block py-1 px-2 uppercase rounded-full text-blue-600 bg-blue-200">
+                                        In Progress
+                                    </span>
+                                </div>
+                                <div class="text-right">
+                                    <span class="text-xs font-semibold inline-block text-blue-600" x-text="sliceProgress + '%'"></span>
+                                </div>
+                            </div>
+                            <div class="overflow-hidden h-2 mb-4 text-xs flex rounded bg-blue-200">
+                                <div :style="`width: ${sliceProgress}%`"
+                                     class="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-blue-600 transition-all duration-500">
+                                </div>
+                            </div>
+                        </div>
 
-                <button
-                    @click="startSlice()"
-                    :disabled="workflow.bundle !== 'completed' || workflow.slice !== 'pending'"
-                    class="w-full px-4 py-2 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 active:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition">
-                    <span x-show="workflow.slice === 'pending'">Start Slicing</span>
-                    <span x-show="workflow.slice === 'processing'">Slicing...</span>
-                    <span x-show="workflow.slice === 'completed'">✓ Completed</span>
-                    <span x-show="workflow.slice === 'failed'">Failed - Retry</span>
-                </button>
+                        <div class="mt-6 text-center text-gray-600">
+                            <p class="text-sm">⚙️ Embedding profiles...</p>
+                            <p class="text-sm mt-2">🔧 Running Snapmaker Orca Slicer...</p>
+                            <p class="text-xs mt-4 text-gray-500">This may take up to 60 seconds</p>
+                        </div>
+                    </div>
+                </section>
             </div>
 
-            <!-- Results -->
-            <div x-show="workflow.slice === 'completed' && sliceResult" class="mt-6 p-4 bg-green-50 rounded-lg" x-cloak>
-                <h4 class="text-sm font-semibold text-green-900 mb-3">Slicing Complete!</h4>
-                <div class="space-y-2 text-sm">
-                    <div class="flex justify-between">
-                        <span class="text-gray-700">G-code Size:</span>
-                        <span class="font-medium" x-text="sliceResult?.gcode_size_mb ? sliceResult.gcode_size_mb + ' MB' : '-'"></span>
+            <!-- Step 4: Complete (Results) -->
+            <div x-show="currentStep === 'complete'" x-cloak>
+                <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
+                    <div class="text-center mb-6">
+                        <div class="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-4">
+                            <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                            </svg>
+                        </div>
+                        <h2 class="text-2xl font-bold text-gray-900">Your G-code is Ready!</h2>
                     </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-700">Estimated Time:</span>
-                        <span class="font-medium" x-text="sliceResult?.estimated_time || '-'"></span>
+
+                    <!-- Print Summary -->
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                        <div class="text-center p-4 bg-gray-50 rounded-lg">
+                            <p class="text-2xl font-bold text-gray-900" x-text="formatTime(sliceResult?.metadata?.estimated_time_seconds || 0)"></p>
+                            <p class="text-xs text-gray-600 mt-1">Estimated Time</p>
+                        </div>
+                        <div class="text-center p-4 bg-gray-50 rounded-lg">
+                            <p class="text-2xl font-bold text-gray-900" x-text="formatFilament(sliceResult?.metadata?.filament_used_mm || 0)"></p>
+                            <p class="text-xs text-gray-600 mt-1">Filament Used</p>
+                        </div>
+                        <div class="text-center p-4 bg-gray-50 rounded-lg">
+                            <p class="text-2xl font-bold text-gray-900" x-text="sliceResult?.metadata?.layer_count || 0"></p>
+                            <p class="text-xs text-gray-600 mt-1">Layers</p>
+                        </div>
+                        <div class="text-center p-4 bg-gray-50 rounded-lg">
+                            <p class="text-2xl font-bold text-gray-900" x-text="sliceResult?.gcode_size_mb?.toFixed(1) + ' MB'"></p>
+                            <p class="text-xs text-gray-600 mt-1">File Size</p>
+                        </div>
                     </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-700">Filament Used:</span>
-                        <span class="font-medium" x-text="sliceResult?.filament_used_mm ? Math.round(sliceResult.filament_used_mm / 1000 * 100) / 100 + ' m' : '-'"></span>
+
+                    <!-- Action Buttons -->
+                    <div class="flex gap-4">
+                        <a :href="`/api/jobs/${sliceResult?.job_id}/download`" download
+                           class="flex-1 px-6 py-3 bg-green-600 text-white text-center rounded-lg hover:bg-green-700 transition">
+                            Download G-code
+                        </a>
+                        <button @click="resetWorkflow()"
+                                class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                            Slice Another
+                        </button>
                     </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-700">Layer Count:</span>
-                        <span class="font-medium" x-text="sliceResult?.layer_count ? sliceResult.layer_count + ' layers' : '-'"></span>
-                    </div>
-                </div>
+                </section>
             </div>
-        </section>
+
+        </div>
 
         <!-- G-code Preview -->
-        <section x-show="workflow.slice === 'completed' && sliceResult" class="bg-white rounded-lg shadow-sm p-4 md:p-6" x-cloak>
+        <section x-show="currentStep === 'complete' && sliceResult" class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6" x-cloak>
             <div class="flex justify-between items-center mb-4">
                 <h3 class="text-lg font-semibold">G-code Preview</h3>
-                <button @click="api.downloadGCode(sliceResult.job_id)"
-                        class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition flex items-center gap-2">
+                <a :href="`/api/jobs/${sliceResult?.job_id}/download`" download
+                   class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition flex items-center gap-2">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
                     </svg>
                     Download G-code
-                </button>
+                </a>
             </div>
 
             <template x-if="sliceResult && sliceResult.job_id">
-                <div x-data="gcodeViewer(sliceResult.job_id)" class="space-y-4">
+                <div x-data="gcodeViewer(sliceResult.job_id)" x-init="init()" class="space-y-4">
                 <!-- Canvas Container -->
                 <div class="relative bg-gray-900 rounded-lg overflow-hidden" style="height: 400px;">
                     <canvas x-ref="canvas" class="w-full h-full"></canvas>
@@ -297,80 +376,6 @@
                 </p>
             </div>
             </template>
-        </section>
-
-        <!-- Previous Slices -->
-        <section class="bg-white rounded-lg shadow-sm p-4 md:p-6">
-            <h3 class="text-lg font-semibold mb-4">Previous Slices</h3>
-
-            <div x-data="{
-                previousJobs: [],
-                loading: false,
-                selectedJobId: null,
-
-                async init() {
-                    await this.loadPreviousJobs();
-                },
-
-                async loadPreviousJobs() {
-                    this.loading = true;
-                    try {
-                        const result = await api.listSlicingJobs(10, 0);
-                        this.previousJobs = result.jobs;
-                    } catch (err) {
-                        console.error('Failed to load previous jobs:', err);
-                    } finally {
-                        this.loading = false;
-                    }
-                },
-
-                async selectJob(jobId) {
-                    this.selectedJobId = jobId;
-                    // Load the job into the main preview
-                    sliceResult = this.previousJobs.find(j => j.job_id === jobId);
-                    if (sliceResult) {
-                        workflow.slice = 'completed';
-                    }
-                }
-            }">
-                <div x-show="loading" class="text-center py-4 text-gray-500">
-                    Loading previous slices...
-                </div>
-
-                <div x-show="!loading && previousJobs.length === 0" class="text-center py-4 text-gray-500">
-                    No previous slices found. Slice something first!
-                </div>
-
-                <div x-show="!loading && previousJobs.length > 0" class="space-y-2">
-                    <template x-for="job in previousJobs" :key="job.job_id">
-                        <div class="border rounded-lg p-3 hover:bg-gray-50 cursor-pointer transition"
-                             :class="{'bg-blue-50 border-blue-300': selectedJobId === job.job_id}"
-                             @click="selectJob(job.job_id); sliceResult = job">
-                            <div class="flex justify-between items-start">
-                                <div class="flex-1">
-                                    <h4 class="font-medium text-sm" x-text="job.bundle_name || 'Unnamed Bundle'"></h4>
-                                    <div class="text-xs text-gray-600 mt-1 space-y-1">
-                                        <div class="flex gap-4">
-                                            <span x-text="`${job.object_count} objects`"></span>
-                                            <span x-text="`${job.layer_count} layers`"></span>
-                                            <span x-text="`${job.gcode_size_mb} MB`"></span>
-                                        </div>
-                                        <div class="flex gap-4">
-                                            <span x-text="`⏱️ ${job.estimated_time}`"></span>
-                                            <span x-text="`🧵 ${(job.filament_used_mm / 1000).toFixed(1)}m`"></span>
-                                        </div>
-                                        <div class="text-gray-500" x-text="new Date(job.completed_at).toLocaleString()"></div>
-                                    </div>
-                                </div>
-                                <button @click.stop="api.downloadGCode(job.job_id)"
-                                        class="px-3 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition">
-                                    Download
-                                </button>
-                            </div>
-                        </div>
-                    </template>
-                </div>
-            </div>
         </section>
 
         <!-- Filament Management -->

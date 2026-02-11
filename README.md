@@ -9,22 +9,24 @@ Self-hostable, Docker-first service for Snapmaker U1 3D printing workflow.
 U1 Slicer Bridge provides a complete workflow for 3D printing with the Snapmaker U1:
 
 ```
-upload → select → normalize → slice → preview → print
+upload → validate → slice → preview → print
 ```
 
 **Key Features:**
-- Upload `.3mf` files and select objects
-- Automatic mesh normalization (placement on bed, bounds checking)
-- Slicing with upstream Orca Slicer
-- G-code preview and analysis
-- Print control via Moonraker API
+- Upload `.3mf` files (including MakerWorld/Bambu Studio files)
+- Automatic plate validation (270x270x270mm build volume)
+- Slicing with Snapmaker OrcaSlicer fork (v2.2.4)
+- Interactive G-code preview with layer-by-layer visualization
+- Modern web UI with 3-step workflow
+- Print control via Moonraker API (partial)
 
 ## Architecture
 
 - **Docker-first:** Everything runs via `docker-compose`
-- **Upstream Orca only:** Always uses official Orca Slicer (no forks)
+- **Snapmaker OrcaSlicer:** Uses Snapmaker's fork (v2.2.4) for Bambu file compatibility
+- **Plate-based workflow:** Preserves MakerWorld arrangements, no object normalization
 - **LAN-first security:** Designed for local network use
-- **Deterministic:** Pinned versions, per-bundle sandboxing, no global state
+- **Deterministic:** Pinned versions, per-job sandboxing, no global state
 
 ### Services
 
@@ -67,10 +69,9 @@ upload → select → normalize → slice → preview → print
 
 All data is stored under `/data`:
 - `uploads/` - Uploaded .3mf files
-- `normalized/` - Normalized meshes
-- `bundles/` - Object bundles for slicing
-- `slices/` - Generated G-code
+- `slices/` - Generated G-code files
 - `logs/` - Per-job log files
+- `cache/` - Temporary processing files
 
 ## Documentation
 
@@ -85,22 +86,24 @@ This project is designed to be built with AI coding agents (Claude Code). See [A
 
 ### Milestones
 
-- M0: Skeleton
-- M1: Database
-- M2: Moonraker integration
-- M3: Object extraction
-- M4: Normalization
-- M5: Bundles/filaments
-- M6: Slicing
-- M7: Preview
-- M8: Print control
+- ✅ M0: Skeleton (Docker, FastAPI, services)
+- ✅ M1: Database (PostgreSQL with uploads, jobs, filaments)
+- ⚠️ M2: Moonraker integration (health check only, no print control)
+- ✅ M3: Object extraction (3MF parser with external references)
+- ✅ M4: ~~Normalization~~ → Plate validation (preserves arrangements)
+- ✅ M5: ~~Bundles~~ → Direct slicing with filament profiles
+- ✅ M6: Slicing (Snapmaker OrcaSlicer, Bambu file support)
+- ✅ M7: Preview (Interactive 2D layer viewer)
+- ❌ M8: Print control (not implemented)
+
+**Progress:** 6.5 / 8 complete (81%)
 
 ## Non-Goals (v1)
 
-- MakerWorld scraping
-- Per-object filament assignment
-- Mesh repair beyond placement normalization
-- Forked Snapmaker Orca versions
+- MakerWorld scraping (use browser download)
+- Per-object filament assignment (single filament per plate)
+- Mesh repair or geometry modifications
+- Multi-material/MMU support
 
 ## License
 

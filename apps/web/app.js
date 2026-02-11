@@ -5,24 +5,23 @@
 
 function app() {
     return {
-        // State
+        // UI State
         dragOver: false,
         uploadProgress: 0,
+        error: null,
+
+        // Current workflow step: 'upload' | 'configure' | 'slicing' | 'complete'
+        currentStep: 'upload',
+
+        // Data
         uploads: [],
         filaments: [],
-        currentUploadId: null,
-        currentBundleId: null,
-        selectedFilament: '',
-        error: null,
+        selectedUpload: null,     // Current upload object
+        selectedFilament: null,   // Selected filament ID
+
+        // Printer status
         printerConnected: false,
         printerStatus: 'Checking...',
-
-        // Workflow state
-        workflow: {
-            normalize: 'pending',  // pending, processing, completed, failed
-            bundle: 'pending',
-            slice: 'pending',
-        },
 
         // Slicing settings
         sliceSettings: {
@@ -31,11 +30,11 @@ function app() {
             supports: false,
         },
 
-        // Slicing result
+        // Results
         sliceResult: null,
+        sliceProgress: 0,         // Progress percentage (0-100)
 
-        // Polling intervals
-        normalizeInterval: null,
+        // Polling interval
         sliceInterval: null,
 
         /**
@@ -117,24 +116,24 @@ function app() {
             this.dragOver = false;
             const files = event.dataTransfer.files;
             if (files.length > 0) {
-                this.uploadFile(files[0]);
+                this.handleFileUpload(files[0]);
             }
         },
 
         /**
          * Handle file select from input
          */
-        handleFileSelect(event) {
+        handleFileInput(event) {
             const files = event.target.files;
             if (files.length > 0) {
-                this.uploadFile(files[0]);
+                this.handleFileUpload(files[0]);
             }
         },
 
         /**
-         * Upload a file
+         * Handle file upload (Step 1)
          */
-        async uploadFile(file) {
+        async handleFileUpload(file) {
             // Validate file type
             if (!file.name.endsWith('.3mf')) {
                 this.showError('Please upload a .3mf file');
@@ -142,6 +141,7 @@ function app() {
             }
 
             console.log(`Uploading: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+            this.currentStep = 'upload';
             this.uploadProgress = 0;
 
             try {
@@ -155,8 +155,15 @@ function app() {
                 // Add to uploads list
                 this.uploads.unshift(result);
 
-                // Auto-select this upload
-                this.selectUpload(result.upload_id);
+                // Select this upload and move to configure step
+                this.selectedUpload = result;
+                this.currentStep = 'configure';
+
+                // Auto-select default filament
+                const defaultFilament = this.filaments.find(f => f.is_default);
+                if (defaultFilament) {
+                    this.selectedFilament = defaultFilament.id;
+                }
             } catch (err) {
                 this.uploadProgress = 0;
                 this.showError(`Upload failed: ${err.message}`);
@@ -165,152 +172,57 @@ function app() {
         },
 
         /**
-         * Select an upload for processing
+         * Select an existing upload (from recent uploads list)
          */
-        selectUpload(uploadId) {
-            console.log('Selected upload:', uploadId);
-            this.currentUploadId = uploadId;
-            this.currentBundleId = null;
-            this.sliceResult = null;
+        selectUpload(upload) {
+            console.log('Selected upload:', upload.upload_id);
+            this.selectedUpload = upload;
+            this.currentStep = 'configure';
 
-            // Reset workflow
-            this.workflow = {
-                normalize: 'pending',
-                bundle: 'pending',
-                slice: 'pending',
-            };
-        },
-
-        /**
-         * Start normalization process
-         */
-        async startNormalize() {
-            if (!this.currentUploadId) return;
-
-            console.log('Starting normalization for:', this.currentUploadId);
-            this.workflow.normalize = 'processing';
-
-            try {
-                const result = await api.normalize(this.currentUploadId);
-                console.log('Normalization started:', result);
-
-                // Poll for completion
-                this.pollNormalizeStatus(result.job_id);
-            } catch (err) {
-                this.workflow.normalize = 'failed';
-                this.showError(`Normalization failed: ${err.message}`);
-                console.error(err);
-            }
-        },
-
-        /**
-         * Poll normalization job status
-         */
-        pollNormalizeStatus(jobId) {
-            if (this.normalizeInterval) {
-                clearInterval(this.normalizeInterval);
-            }
-
-            this.normalizeInterval = setInterval(async () => {
-                try {
-                    const upload = await api.getUpload(this.currentUploadId);
-                    console.log('Normalization status:', upload.normalization_status);
-
-                    if (upload.normalization_status === 'normalized') {
-                        clearInterval(this.normalizeInterval);
-                        this.workflow.normalize = 'completed';
-                        console.log('Normalization completed');
-                    } else if (upload.normalization_status === 'failed') {
-                        clearInterval(this.normalizeInterval);
-                        this.workflow.normalize = 'failed';
-                        this.showError('Normalization failed');
-                    }
-                } catch (err) {
-                    console.error('Failed to check normalization status:', err);
+            // Auto-select default filament if not already selected
+            if (!this.selectedFilament) {
+                const defaultFilament = this.filaments.find(f => f.is_default);
+                if (defaultFilament) {
+                    this.selectedFilament = defaultFilament.id;
                 }
-            }, 2000); // Poll every 2 seconds
-        },
-
-        /**
-         * Create bundle
-         */
-        async createBundle() {
-            if (!this.currentUploadId || !this.selectedFilament) return;
-
-            console.log('Creating bundle for:', this.currentUploadId);
-            this.workflow.bundle = 'processing';
-
-            try {
-                // First, get the upload details to fetch object IDs
-                const upload = await api.getUpload(this.currentUploadId);
-
-                // Extract the database IDs from the objects
-                // Note: We need to get the actual database IDs, not the object_id field
-                // For now, we'll use a workaround to get all normalized objects for this upload
-                const objectIds = await this.getObjectIdsForUpload(this.currentUploadId);
-                console.log('Object IDs for bundle:', objectIds);
-
-                if (!objectIds || objectIds.length === 0) {
-                    throw new Error('No normalized objects found for this upload');
-                }
-
-                const bundleData = {
-                    name: `Bundle ${new Date().toLocaleString()}`,
-                    object_ids: objectIds,
-                    filament_id: parseInt(this.selectedFilament),
-                };
-                console.log('Creating bundle with data:', bundleData);
-
-                const result = await api.createBundle(bundleData);
-
-                console.log('Bundle created:', result);
-                this.currentBundleId = result.bundle_id;
-                this.workflow.bundle = 'completed';
-            } catch (err) {
-                this.workflow.bundle = 'failed';
-                this.showError(`Failed to create bundle: ${err.message}`);
-                console.error(err);
             }
         },
 
         /**
-         * Get database IDs of normalized objects for an upload
-         */
-        async getObjectIdsForUpload(uploadId) {
-            try {
-                const response = await api.fetch(`/upload/${uploadId}/objects`);
-                return response.object_ids || [];
-            } catch (err) {
-                console.error('Failed to get object IDs:', err);
-                return [];
-            }
-        },
-
-        /**
-         * Start slicing process
+         * Start slicing (Step 3)
          */
         async startSlice() {
-            if (!this.currentBundleId) return;
+            if (!this.selectedUpload || !this.selectedFilament) {
+                this.showError('Please select an upload and filament');
+                return;
+            }
 
-            console.log('Starting slice for bundle:', this.currentBundleId);
+            console.log('Starting slice for upload:', this.selectedUpload.upload_id);
             console.log('Settings:', this.sliceSettings);
-            this.workflow.slice = 'processing';
+
+            this.currentStep = 'slicing';
+            this.sliceProgress = 0;
 
             try {
-                const result = await api.slice(this.currentBundleId, this.sliceSettings);
+                const result = await api.sliceUpload(this.selectedUpload.upload_id, {
+                    filament_id: this.selectedFilament,
+                    ...this.sliceSettings
+                });
+
                 console.log('Slice started:', result);
 
                 if (result.status === 'completed') {
                     // Synchronous slicing (completed immediately)
-                    this.workflow.slice = 'completed';
                     this.sliceResult = result;
+                    this.sliceProgress = 100;
+                    this.currentStep = 'complete';
                 } else {
                     // Async slicing - poll for completion
                     this.pollSliceStatus(result.job_id);
                 }
             } catch (err) {
-                this.workflow.slice = 'failed';
                 this.showError(`Slicing failed: ${err.message}`);
+                this.currentStep = 'configure';
                 console.error(err);
             }
         },
@@ -325,23 +237,60 @@ function app() {
 
             this.sliceInterval = setInterval(async () => {
                 try {
-                    const job = await api.getSlicingJob(jobId);
+                    const job = await api.getJobStatus(jobId);
                     console.log('Slice status:', job.status);
+
+                    // Increment progress (fake progress since API doesn't provide real progress)
+                    this.sliceProgress = Math.min(90, this.sliceProgress + 5);
 
                     if (job.status === 'completed') {
                         clearInterval(this.sliceInterval);
-                        this.workflow.slice = 'completed';
                         this.sliceResult = job;
+                        this.sliceProgress = 100;
+                        this.currentStep = 'complete';
                         console.log('Slicing completed');
                     } else if (job.status === 'failed') {
                         clearInterval(this.sliceInterval);
-                        this.workflow.slice = 'failed';
-                        this.showError(`Slicing failed: ${job.error}`);
+                        this.showError(`Slicing failed: ${job.error_message || 'Unknown error'}`);
+                        this.currentStep = 'configure';
                     }
                 } catch (err) {
                     console.error('Failed to check slice status:', err);
                 }
-            }, 3000); // Poll every 3 seconds
+            }, 2000); // Poll every 2 seconds
+        },
+
+        /**
+         * Reset workflow to start over
+         */
+        resetWorkflow() {
+            this.currentStep = 'upload';
+            this.selectedUpload = null;
+            this.sliceResult = null;
+            this.sliceProgress = 0;
+
+            if (this.sliceInterval) {
+                clearInterval(this.sliceInterval);
+                this.sliceInterval = null;
+            }
+        },
+
+        /**
+         * Format time in seconds to human readable string
+         */
+        formatTime(seconds) {
+            if (!seconds) return '0h 0m';
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            return `${hours}h ${minutes}m`;
+        },
+
+        /**
+         * Format filament length in mm to meters
+         */
+        formatFilament(mm) {
+            if (!mm) return '0.0m';
+            return `${(mm / 1000).toFixed(1)}m`;
         },
 
         /**
@@ -358,9 +307,6 @@ function app() {
          * Cleanup intervals on destroy
          */
         destroy() {
-            if (this.normalizeInterval) {
-                clearInterval(this.normalizeInterval);
-            }
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
             }

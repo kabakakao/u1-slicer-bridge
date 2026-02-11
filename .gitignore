@@ -64,3 +64,14 @@ docker-compose.override.yml
 uploads/
 temp/
 *.tmp
+*.gcode
+
+# Testing artifacts
+node_modules/
+test-results/
+screenshots/
+playwright-report/
+PLAYWRIGHT-TEST-REPORT.md
+
+# Old/backup files
+*_old.py
