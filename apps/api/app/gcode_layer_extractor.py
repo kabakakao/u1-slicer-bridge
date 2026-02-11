@@ -37,7 +37,7 @@ class LayerExtractor:
         self.absolute_extrusion = False
 
         # Layer tracking
-        self.current_layer_num = 0
+        self.current_layer_num = -1  # Start at -1 so first LAYER_CHANGE makes it 0
         self.current_z = 0.0
         self.layers = {}  # {layer_num: {"z_height": float, "moves": []}}
 
