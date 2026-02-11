@@ -15,6 +15,7 @@ from builder_3mf import ThreeMFBuilder, ObjectMeshData, ThreeMFBuildError
 
 
 router = APIRouter(tags=["slicing"])
+logger = logging.getLogger(__name__)
 
 
 class SliceRequest(BaseModel):
@@ -451,7 +452,11 @@ async def get_gcode_metadata(job_id: str):
     return {
         "job_id": job["job_id"],
         "layer_count": job["layer_count"],
-        "bounds": metadata["bounds"],
+        "bounds": {
+            "max_x": metadata.max_x,
+            "max_y": metadata.max_y,
+            "max_z": metadata.max_z
+        },
         "estimated_time": time_str,
         "filament_used_mm": job["filament_used_mm"],
         "gcode_size_mb": round(job["gcode_size"] / 1024 / 1024, 2)
@@ -626,7 +631,7 @@ async def list_slicing_jobs(limit: int = 20, offset: int = 0):
             """
             SELECT
                 j.job_id,
-                j.bundle_id,
+                b.bundle_id,
                 j.status,
                 j.created_at,
                 j.completed_at,
@@ -635,10 +640,10 @@ async def list_slicing_jobs(limit: int = 20, offset: int = 0):
                 j.filament_used_mm,
                 j.layer_count,
                 b.name as bundle_name,
-                b.object_count,
+                (SELECT COUNT(*) FROM bundle_objects bo WHERE bo.bundle_id = b.id) as object_count,
                 f.name as filament_name
             FROM slicing_jobs j
-            LEFT JOIN bundles b ON j.bundle_id = b.bundle_id
+            LEFT JOIN bundles b ON j.bundle_id = b.id
             LEFT JOIN filaments f ON b.filament_id = f.id
             WHERE j.status = 'completed'
             ORDER BY j.completed_at DESC
