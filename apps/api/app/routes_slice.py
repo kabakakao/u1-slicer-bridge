@@ -453,6 +453,9 @@ async def get_gcode_metadata(job_id: str):
         "job_id": job["job_id"],
         "layer_count": job["layer_count"],
         "bounds": {
+            "min_x": metadata.min_x,
+            "min_y": metadata.min_y,
+            "min_z": metadata.min_z,
             "max_x": metadata.max_x,
             "max_y": metadata.max_y,
             "max_z": metadata.max_z

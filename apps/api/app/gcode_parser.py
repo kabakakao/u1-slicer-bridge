@@ -11,6 +11,9 @@ class GCodeMetadata:
     estimated_time_seconds: int
     filament_used_mm: float
     layer_count: Optional[int]
+    min_x: float
+    min_y: float
+    min_z: float
     max_x: float
     max_y: float
     max_z: float
@@ -95,6 +98,9 @@ def parse_orca_metadata(gcode_path: Path) -> GCodeMetadata:
         estimated_time_seconds=estimated_time_seconds,
         filament_used_mm=filament_used_mm,
         layer_count=layer_count,
+        min_x=bounds['min_x'],
+        min_y=bounds['min_y'],
+        min_z=bounds['min_z'],
         max_x=bounds['max_x'],
         max_y=bounds['max_y'],
         max_z=bounds['max_z']
