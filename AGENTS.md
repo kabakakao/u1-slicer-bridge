@@ -514,6 +514,14 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Files**: `main.py`, `api.js`, `app.js`, `index.html`
 - **Result**: Filament profiles are manageable in-app with clearer safety behavior and fewer accidental misconfigurations.
 
+**Implemented: JSON Filament Profile Import (M13 Foundation)**
+- **What changed**:
+  1. Added `POST /filaments/import` to import JSON filament profiles into the Filament Library.
+  2. Added `Import Profile` action in Settings with local file picker (`.json`).
+  3. Added `source_type` tracking (`starter` / `manual` / `custom`) and `Custom`/`Starter` badges in UI.
+- **Files**: `main.py`, `schema.sql`, `api.js`, `app.js`, `index.html`
+- **Result**: Users can start bringing external filament profiles into the app while keeping source provenance visible.
+
 **Expanded: Prime Tower Defaults/Overrides**
 - **What changed**: Added additional prime tower controls in Settings + per-job overrides:
   - `prime_volume`

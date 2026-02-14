@@ -262,6 +262,26 @@ class ApiClient {
     }
 
     /**
+     * Import filament profile JSON file
+     */
+    async importFilamentProfile(file) {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const response = await fetch(`${this.baseUrl}/filaments/import`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: response.statusText }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        return await response.json();
+    }
+
+    /**
      * Get extruder presets + default slicing settings
      */
     async getExtruderPresets() {

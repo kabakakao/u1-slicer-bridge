@@ -31,6 +31,7 @@ function app() {
             color_hex: '#FFFFFF',
             extruder_index: 0,
             is_default: false,
+            source_type: 'manual',
         },
         selectedIds: {},        // Track selected items { upload_id: bool, job_id: bool }
         lastSelectedIndex: {},  // Track last selected index per list { uploads: num, jobs: num }
@@ -320,6 +321,26 @@ function app() {
             }
         },
 
+        openImportFilamentDialog() {
+            const input = document.getElementById('import-filament-input');
+            if (input) input.click();
+        },
+
+        async importFilamentFromFile(event) {
+            const file = event?.target?.files?.[0];
+            if (!file) return;
+
+            try {
+                await api.importFilamentProfile(file);
+                await this.loadFilaments();
+            } catch (err) {
+                this.showError(`Failed to import filament profile: ${err.message}`);
+                console.error(err);
+            } finally {
+                event.target.value = '';
+            }
+        },
+
         startCreateFilament() {
             this.editingFilamentId = null;
             this.filamentForm = {
@@ -332,6 +353,7 @@ function app() {
                 color_hex: '#FFFFFF',
                 extruder_index: 0,
                 is_default: false,
+                source_type: 'manual',
             };
             this.showFilamentForm = true;
         },
@@ -348,6 +370,7 @@ function app() {
                 color_hex: filament.color_hex || '#FFFFFF',
                 extruder_index: filament.extruder_index || 0,
                 is_default: !!filament.is_default,
+                source_type: filament.source_type || 'manual',
             };
             this.showFilamentForm = true;
         },

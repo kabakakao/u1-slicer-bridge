@@ -103,6 +103,20 @@
   - If deleting current default filament, auto-promote replacement (prefers PLA) to keep default fallback stable.
 - UI added Add/Edit/Delete/Set Default actions in Settings -> Filament Library.
 
+### JSON Filament Import Foundation (2026-02-14)
+
+- Added `POST /filaments/import` for JSON profile files.
+- Current parser supports practical fields (with fallbacks):
+  - `name|filament_name|profile_name`
+  - `material|filament_type|type`
+  - `nozzle_temp|temperature|nozzle_temperature`
+  - `bed_temp|bed_temperature`
+  - `print_speed|speed`
+  - `bed_type|build_plate_type`
+  - `color_hex|color`
+- Added `source_type` on filaments (`starter`, `manual`, `custom`) to explain profile origin in UI.
+- Import guardrail: rejects duplicate profile name with HTTP 409.
+
 ### Additional Prime Tower Controls (2026-02-14)
 
 - Added support for:

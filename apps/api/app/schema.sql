@@ -48,6 +48,7 @@ ALTER TABLE filaments ADD COLUMN IF NOT EXISTS bed_type TEXT DEFAULT 'PEI';
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS color_hex VARCHAR(7) DEFAULT '#FFFFFF';
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS extruder_index INTEGER DEFAULT 0;
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+ALTER TABLE filaments ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'manual';
 
 -- ============================================================================
 -- OLD TABLES (removed - plate-based workflow)

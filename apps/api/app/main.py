@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import Optional, List
+import json
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from db import init_db, close_db
@@ -101,6 +102,7 @@ class FilamentCreate(BaseModel):
     color_hex: str = "#FFFFFF"
     extruder_index: int = 0
     is_default: bool = False
+    source_type: str = "manual"
 
 
 class FilamentUpdate(BaseModel):
@@ -113,6 +115,11 @@ class FilamentUpdate(BaseModel):
     color_hex: str = "#FFFFFF"
     extruder_index: int = 0
     is_default: bool = False
+    source_type: str = "manual"
+
+
+async def _ensure_filament_schema(conn):
+    await conn.execute("ALTER TABLE filaments ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'manual'")
 
 
 class ExtruderPreset(BaseModel):
@@ -223,9 +230,10 @@ async def get_filaments():
     pool = get_pg_pool()
 
     async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
         rows = await conn.fetch(
             """
-            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type
             FROM filaments
             ORDER BY is_default DESC,
                      CASE WHEN UPPER(material) = 'PLA' THEN 0 ELSE 1 END,
@@ -244,7 +252,8 @@ async def get_filaments():
                 "bed_type": row["bed_type"] or "PEI",
                 "color_hex": row["color_hex"] or "#FFFFFF",
                 "extruder_index": row["extruder_index"] or 0,
-                "is_default": row["is_default"]
+                "is_default": row["is_default"],
+                "source_type": row["source_type"] or "manual",
             }
             for row in rows
         ]
@@ -406,6 +415,7 @@ async def create_filament(filament: FilamentCreate):
     pool = get_pg_pool()
 
     async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
         async with conn.transaction():
             if filament.is_default:
                 await conn.execute("UPDATE filaments SET is_default = FALSE WHERE is_default = TRUE")
@@ -413,8 +423,8 @@ async def create_filament(filament: FilamentCreate):
             try:
                 result = await conn.fetchrow(
                     """
-                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     RETURNING id
                     """,
                     filament.name,
@@ -425,7 +435,8 @@ async def create_filament(filament: FilamentCreate):
                     filament.bed_type,
                     filament.color_hex,
                     filament.extruder_index,
-                    filament.is_default
+                    filament.is_default,
+                    filament.source_type,
                 )
             except Exception as e:
                 if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
@@ -442,6 +453,7 @@ async def update_filament(filament_id: int, filament: FilamentUpdate):
     pool = get_pg_pool()
 
     async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
         async with conn.transaction():
             existing = await conn.fetchrow("SELECT id FROM filaments WHERE id = $1", filament_id)
             if not existing:
@@ -462,8 +474,9 @@ async def update_filament(filament_id: int, filament: FilamentUpdate):
                         bed_type = $6,
                         color_hex = $7,
                         extruder_index = $8,
-                        is_default = $9
-                    WHERE id = $10
+                        is_default = $9,
+                        source_type = $10
+                    WHERE id = $11
                     """,
                     filament.name,
                     filament.material,
@@ -474,6 +487,7 @@ async def update_filament(filament_id: int, filament: FilamentUpdate):
                     filament.color_hex,
                     filament.extruder_index,
                     filament.is_default,
+                    filament.source_type,
                     filament_id,
                 )
             except Exception as e:
@@ -543,6 +557,91 @@ async def delete_filament(filament_id: int):
     return {"message": "Filament deleted"}
 
 
+def _extract_profile_value(data, keys: List[str], default=None):
+    if not isinstance(data, dict):
+        return default
+    for key in keys:
+        if key in data and data[key] is not None:
+            value = data[key]
+            if isinstance(value, list) and value:
+                return value[0]
+            return value
+    return default
+
+
+@app.post("/filaments/import")
+async def import_filament_profile(file: UploadFile = File(...)):
+    """Import a filament profile from JSON and add to library."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    if not file.filename.lower().endswith(".json"):
+        raise HTTPException(status_code=400, detail="Only JSON filament profiles are supported for now")
+
+    try:
+        raw = await file.read()
+        payload = json.loads(raw.decode("utf-8", errors="ignore"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON profile file")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Profile JSON must be an object")
+
+    root = payload.get("filament") if isinstance(payload.get("filament"), dict) else payload
+
+    profile_name = str(
+        _extract_profile_value(root, ["name", "filament_name", "profile_name"], None)
+        or file.filename.rsplit(".", 1)[0]
+    ).strip()
+
+    material = str(_extract_profile_value(root, ["material", "filament_type", "type"], "PLA")).strip().upper()
+    def _as_int(value, fallback: int) -> int:
+        try:
+            return int(float(value))
+        except Exception:
+            return fallback
+
+    nozzle_temp = _as_int(_extract_profile_value(root, ["nozzle_temp", "temperature", "nozzle_temperature"], 210), 210)
+    bed_temp = _as_int(_extract_profile_value(root, ["bed_temp", "bed_temperature"], 60), 60)
+    print_speed = _as_int(_extract_profile_value(root, ["print_speed", "speed"], 60), 60)
+    bed_type = str(_extract_profile_value(root, ["bed_type", "build_plate_type"], "PEI")).strip() or "PEI"
+    color_hex = str(_extract_profile_value(root, ["color_hex", "color"], "#FFFFFF")).strip()
+    if not color_hex.startswith("#"):
+        color_hex = f"#{color_hex}"
+    if len(color_hex) == 4:
+        color_hex = f"#{color_hex[1]*2}{color_hex[2]*2}{color_hex[3]*2}"
+    color_hex = color_hex[:7]
+
+    from db import get_pg_pool
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
+
+        existing = await conn.fetchrow("SELECT id FROM filaments WHERE name = $1", profile_name)
+        if existing:
+            raise HTTPException(status_code=409, detail="A filament with this profile name already exists")
+
+        row = await conn.fetchrow(
+            """
+            INSERT INTO filaments (
+                name, material, nozzle_temp, bed_temp, print_speed,
+                bed_type, color_hex, extruder_index, is_default, source_type
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, FALSE, 'custom')
+            RETURNING id
+            """,
+            profile_name,
+            material,
+            nozzle_temp,
+            bed_temp,
+            print_speed,
+            bed_type,
+            color_hex,
+        )
+
+    return {"id": row["id"], "message": "Filament profile imported", "name": profile_name}
+
+
 @app.post("/filaments/init-defaults")
 async def init_default_filaments():
     """Initialize default filament profiles."""
@@ -550,26 +649,27 @@ async def init_default_filaments():
     pool = get_pg_pool()
 
     default_filaments = [
-        {"name": "PLA Red", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#FF0000", "extruder_index": 0, "is_default": True},
-        {"name": "PLA Blue", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#0000FF", "extruder_index": 1, "is_default": False},
-        {"name": "PLA Green", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#00FF00", "extruder_index": 2, "is_default": False},
-        {"name": "PLA Yellow", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#FFFF00", "extruder_index": 3, "is_default": False},
-        {"name": "PETG", "material": "PETG", "nozzle_temp": 240, "bed_temp": 80, "print_speed": 50, "bed_type": "PEI", "color_hex": "#FF6600", "extruder_index": 0, "is_default": False},
-        {"name": "ABS", "material": "ABS", "nozzle_temp": 250, "bed_temp": 100, "print_speed": 50, "bed_type": "Glass", "color_hex": "#333333", "extruder_index": 0, "is_default": False},
-        {"name": "TPU", "material": "TPU", "nozzle_temp": 220, "bed_temp": 40, "print_speed": 30, "bed_type": "PEI", "color_hex": "#FF00FF", "extruder_index": 0, "is_default": False},
+        {"name": "PLA Red", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#FF0000", "extruder_index": 0, "is_default": True, "source_type": "starter"},
+        {"name": "PLA Blue", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#0000FF", "extruder_index": 1, "is_default": False, "source_type": "starter"},
+        {"name": "PLA Green", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#00FF00", "extruder_index": 2, "is_default": False, "source_type": "starter"},
+        {"name": "PLA Yellow", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#FFFF00", "extruder_index": 3, "is_default": False, "source_type": "starter"},
+        {"name": "PETG", "material": "PETG", "nozzle_temp": 240, "bed_temp": 80, "print_speed": 50, "bed_type": "PEI", "color_hex": "#FF6600", "extruder_index": 0, "is_default": False, "source_type": "starter"},
+        {"name": "ABS", "material": "ABS", "nozzle_temp": 250, "bed_temp": 100, "print_speed": 50, "bed_type": "Glass", "color_hex": "#333333", "extruder_index": 0, "is_default": False, "source_type": "starter"},
+        {"name": "TPU", "material": "TPU", "nozzle_temp": 220, "bed_temp": 40, "print_speed": 30, "bed_type": "PEI", "color_hex": "#FF00FF", "extruder_index": 0, "is_default": False, "source_type": "starter"},
     ]
 
     async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
         for f in default_filaments:
             try:
                 await conn.execute(
                     """
-                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     ON CONFLICT (name) DO NOTHING
                     """,
                     f["name"], f["material"], f["nozzle_temp"], f["bed_temp"],
-                    f["print_speed"], f["bed_type"], f["color_hex"], f["extruder_index"], f["is_default"]
+                    f["print_speed"], f["bed_type"], f["color_hex"], f["extruder_index"], f["is_default"], f["source_type"]
                 )
             except Exception as e:
                 pass
