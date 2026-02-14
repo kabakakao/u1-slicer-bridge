@@ -73,6 +73,21 @@
 - **Compatibility note**:
   - Existing DBs need additive columns on `slicing_defaults`; handled by runtime `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in `_ensure_preset_rows()`.
 
+### Printer Defaults UX (2026-02-14)
+
+- **Adjustment**: Renamed user-facing `Machine Defaults` terminology to `Printer Defaults`.
+- **Override behavior**: Enabling `Override settings for this job` now copies current printer defaults into override fields (instead of carrying stale values).
+- **Readability improvement**: Override controls now display inline `(... printer default)` hints so users can compare quickly.
+- **Multicolour placement**: Filament/extruder override controls are shown inside job overrides, not in the detected-colors header.
+
+### Additional Prime Tower Controls (2026-02-14)
+
+- Added support for:
+  - `prime_volume`
+  - `prime_tower_brim_chamfer`
+  - `prime_tower_brim_chamfer_max_width`
+- Wired through persistence, API payloads, backend override mapping, and UI controls in both Settings and job overrides.
+
 ## Configuration Notes
 
 ### API Endpoints
@@ -125,6 +140,22 @@ Then hard refresh browser (Ctrl+Shift+R).
 - **Follow-on behavior**: Some selected plates still emit `T0`-only G-code despite multicolour request.
   - For full-file multicolour requests, keep fail-fast.
   - For `slice-plate`, allow completion with warning when output is `T0` only (selected plate can be effectively single-tool even if file-level metadata is multicolour).
+
+### Prime/Wipe Tower Edge Placement (2026-02-14)
+
+- **Symptom**: Prime tower/wipe tower could appear at or near bed edge in viewer/output for some Bambu-derived files.
+- **Root cause**: Embedded source config retained low `wipe_tower_x/y` (e.g., `15`) while requested tower width/brim made the effective footprint too close to edge.
+- **Fix**: Added dynamic clamp in `profile_embedder.py` for `wipe_tower_x/y` based on tower half-span (`prime_tower_width / 2 + prime_tower_brim_width + margin`) within U1 bed bounds.
+- **Validation**: New hollow+cube slice writes clamped coordinates (`wipe_tower_x=165`, previous edge-hugging value was `15`).
+
+### Multicolour Plate Time Inflation (2026-02-14)
+
+- **Symptom**: `hollow+cube` plate 2 showed ~2h estimates when expected around ~45-50m.
+- **Root cause**: Config retained MMU timing defaults (`machine_load_filament_time=30`, `machine_unload_filament_time=30`) which inflated toolchange estimation for U1 extruder-slot swaps.
+- **Fix**: In both slice endpoints, when `extruder_count > 1`, override those timings to `0`.
+- **Validation**:
+  - Before: ~7582s (~2h06m) with prime tower.
+  - After: ~3022s (~50m) with prime tower; ~1504s (~25m) without prime tower.
 
 #### Matrix Findings (apps/api/app/multicolor_matrix.py)
 - `orig_*` strategies (preserving original Bambu structure) mostly segfault (`exit 139`).

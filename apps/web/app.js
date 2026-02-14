@@ -52,9 +52,11 @@ function app() {
             infill_pattern: 'gyroid',
             supports: false,
             enable_prime_tower: false,
+            prime_volume: null,
             prime_tower_width: null,
             prime_tower_brim_width: null,
-            nozzle_temp: null,
+            prime_tower_brim_chamfer: true,
+            prime_tower_brim_chamfer_max_width: null,
             bed_temp: null,
             bed_type: null,
         },
@@ -66,8 +68,11 @@ function app() {
             infill_pattern: 'gyroid',
             supports: false,
             enable_prime_tower: false,
+            prime_volume: null,
             prime_tower_width: null,
             prime_tower_brim_width: null,
+            prime_tower_brim_chamfer: true,
+            prime_tower_brim_chamfer_max_width: null,
             nozzle_temp: null,
             bed_temp: null,
             bed_type: null,
@@ -148,6 +153,8 @@ function app() {
                         ...this.machineSettings,
                         ...response.slicing_defaults,
                     };
+                    this.machineSettings.layer_height = this.normalizeLayerHeight(this.machineSettings.layer_height);
+                    this.machineSettings.nozzle_temp = null;
                 }
 
                 this.applyPresetDefaults();
@@ -172,15 +179,17 @@ function app() {
                         color_hex: p.color_hex || '#FFFFFF',
                     })),
                     slicing_defaults: {
-                        layer_height: this.machineSettings.layer_height,
+                        layer_height: this.normalizeLayerHeight(this.machineSettings.layer_height),
                         infill_density: this.machineSettings.infill_density,
                         wall_count: this.machineSettings.wall_count,
                         infill_pattern: this.machineSettings.infill_pattern,
                         supports: this.machineSettings.supports,
                         enable_prime_tower: this.machineSettings.enable_prime_tower,
+                        prime_volume: this.machineSettings.prime_volume,
                         prime_tower_width: this.machineSettings.prime_tower_width,
                         prime_tower_brim_width: this.machineSettings.prime_tower_brim_width,
-                        nozzle_temp: this.machineSettings.nozzle_temp,
+                        prime_tower_brim_chamfer: this.machineSettings.prime_tower_brim_chamfer,
+                        prime_tower_brim_chamfer_max_width: this.machineSettings.prime_tower_brim_chamfer_max_width,
                         bed_temp: this.machineSettings.bed_temp,
                         bed_type: this.machineSettings.bed_type,
                     },
@@ -226,20 +235,53 @@ function app() {
 
         resetJobOverrideSettings() {
             this.useJobOverrides = false;
+            this.applyPrinterDefaultsToOverrides();
+        },
+
+        applyPrinterDefaultsToOverrides() {
             this.sliceSettings = {
                 ...this.sliceSettings,
-                layer_height: this.machineSettings.layer_height,
+                layer_height: this.normalizeLayerHeight(this.machineSettings.layer_height),
                 infill_density: this.machineSettings.infill_density,
                 wall_count: this.machineSettings.wall_count,
                 infill_pattern: this.machineSettings.infill_pattern,
                 supports: this.machineSettings.supports,
                 enable_prime_tower: this.machineSettings.enable_prime_tower,
+                prime_volume: this.machineSettings.prime_volume,
                 prime_tower_width: this.machineSettings.prime_tower_width,
                 prime_tower_brim_width: this.machineSettings.prime_tower_brim_width,
-                nozzle_temp: this.machineSettings.nozzle_temp,
+                prime_tower_brim_chamfer: this.machineSettings.prime_tower_brim_chamfer,
+                prime_tower_brim_chamfer_max_width: this.machineSettings.prime_tower_brim_chamfer_max_width,
+                nozzle_temp: null,
                 bed_temp: this.machineSettings.bed_temp,
                 bed_type: this.machineSettings.bed_type,
             };
+        },
+
+        handleJobOverrideToggle(enabled) {
+            const isEnabled = typeof enabled === 'boolean' ? enabled : this.useJobOverrides;
+            if (isEnabled) {
+                this.applyPrinterDefaultsToOverrides();
+            } else {
+                this.filamentOverride = false;
+            }
+        },
+
+        printerDefaultText(value, unit = '') {
+            if (value === null || value === undefined || value === '') {
+                return `Filament default (printer default)`;
+            }
+            return `${value}${unit} (printer default)`;
+        },
+
+        normalizeLayerHeight(value) {
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return 0.2;
+            return Number(numeric.toFixed(2));
+        },
+
+        formatLayerHeight(value) {
+            return this.normalizeLayerHeight(value).toFixed(2);
         },
 
         openSettings() {
@@ -653,6 +695,7 @@ function app() {
                 // Prepare slice settings with filament info
                 const sliceSettings = {
                     ...this.machineSettings,
+                    nozzle_temp: null,
                     filament_colors: [...(this.sliceSettings.filament_colors || [])],
                     extruder_assignments: [...(this.sliceSettings.extruder_assignments || [0, 1, 2, 3])],
                 };
@@ -664,9 +707,11 @@ function app() {
                     sliceSettings.infill_pattern = this.sliceSettings.infill_pattern;
                     sliceSettings.supports = this.sliceSettings.supports;
                     sliceSettings.enable_prime_tower = this.sliceSettings.enable_prime_tower;
+                    sliceSettings.prime_volume = this.sliceSettings.prime_volume;
                     sliceSettings.prime_tower_width = this.sliceSettings.prime_tower_width;
                     sliceSettings.prime_tower_brim_width = this.sliceSettings.prime_tower_brim_width;
-                    sliceSettings.nozzle_temp = this.sliceSettings.nozzle_temp;
+                    sliceSettings.prime_tower_brim_chamfer = this.sliceSettings.prime_tower_brim_chamfer;
+                    sliceSettings.prime_tower_brim_chamfer_max_width = this.sliceSettings.prime_tower_brim_chamfer_max_width;
                     sliceSettings.bed_temp = this.sliceSettings.bed_temp;
                     sliceSettings.bed_type = this.sliceSettings.bed_type;
                 }
@@ -832,32 +877,13 @@ function app() {
         autoAssignFilaments() {
             if (this.detectedColors.length === 0) return;
 
-            this.selectedFilaments = [];
             this.sliceSettings.extruder_assignments = this.detectedColors
                 .slice(0, this.maxExtruders)
                 .map((_, idx) => idx);
 
-            // For each detected color, find the closest matching filament
-            for (const color of this.detectedColors) {
-                if (this.selectedFilaments.length >= this.maxExtruders) break;
-                
-                // Find filament with closest color
-                let bestFilament = null;
-                let bestDistance = Infinity;
-                
-                for (const filament of this.filaments) {
-                    const distance = this.colorDistance(color, filament.color_hex);
-                    if (distance < bestDistance) {
-                        bestDistance = distance;
-                        bestFilament = filament;
-                    }
-                }
-                
-                if (bestFilament) {
-                    this.selectedFilaments.push(bestFilament.id);
-                }
-            }
-            
+            // Prefer machine preset filament loaded in each assigned extruder.
+            this.applyPresetFilamentsForAssignments(true);
+
             console.log('Auto-assigned filaments:', this.selectedFilaments);
         },
 
@@ -927,6 +953,36 @@ function app() {
             );
         },
 
+        colorName(hex) {
+            const rgb = this.hexToRgb(hex);
+            if (!rgb) return 'Unknown';
+
+            const palette = [
+                { name: 'Red', hex: '#FF0000' },
+                { name: 'Green', hex: '#00FF00' },
+                { name: 'Blue', hex: '#0000FF' },
+                { name: 'Yellow', hex: '#FFFF00' },
+                { name: 'Orange', hex: '#FFA500' },
+                { name: 'Purple', hex: '#800080' },
+                { name: 'Pink', hex: '#FFC0CB' },
+                { name: 'White', hex: '#FFFFFF' },
+                { name: 'Black', hex: '#000000' },
+                { name: 'Gray', hex: '#808080' },
+                { name: 'Brown', hex: '#8B4513' },
+            ];
+
+            let best = palette[0];
+            let bestDistance = Infinity;
+            for (const p of palette) {
+                const d = this.colorDistance(hex, p.hex);
+                if (d < bestDistance) {
+                    bestDistance = d;
+                    best = p;
+                }
+            }
+            return best.name;
+        },
+
         /**
          * Convert hex color to RGB object
          */
@@ -961,10 +1017,45 @@ function app() {
                 return;
             }
             this.filamentOverride = !this.filamentOverride;
-            if (!this.filamentOverride) {
+            if (this.filamentOverride) {
+                if (!this.sliceSettings.extruder_assignments || this.sliceSettings.extruder_assignments.length === 0) {
+                    this.sliceSettings.extruder_assignments = (this.detectedColors || [])
+                        .slice(0, this.maxExtruders)
+                        .map((_, idx) => idx);
+                }
+                this.applyPresetFilamentsForAssignments(true);
+                setTimeout(() => this.applyPresetFilamentsForAssignments(true), 0);
+            } else {
                 // Re-auto-assign when turning off override
                 this.applyDetectedColors(this.detectedColors || []);
             }
+        },
+
+        getFallbackFilamentId() {
+            const e1Preset = this.extruderPresets?.[0]?.filament_id;
+            if (e1Preset) return e1Preset;
+            const defaultFilament = this.filaments.find(f => f.is_default);
+            if (defaultFilament) return defaultFilament.id;
+            return this.filaments?.[0]?.id || null;
+        },
+
+        applyPresetFilamentsForAssignments(overwriteExisting = false) {
+            const colorCount = Math.min((this.detectedColors || []).length, this.maxExtruders);
+            if (colorCount <= 0) return;
+
+            const assignments = this.sliceSettings.extruder_assignments || [];
+            const next = [...(this.selectedFilaments || [])];
+            const fallbackId = this.getFallbackFilamentId();
+
+            for (let idx = 0; idx < colorCount; idx++) {
+                const extruderIdx = assignments[idx] ?? idx;
+                const presetFilamentId = this.extruderPresets?.[extruderIdx]?.filament_id || null;
+                if (overwriteExisting || !next[idx]) {
+                    next[idx] = presetFilamentId || fallbackId;
+                }
+            }
+
+            this.selectedFilaments = next.slice(0, colorCount);
         },
 
         /**
@@ -1036,6 +1127,8 @@ function app() {
             }
             assignments[colorIdx] = extruderIdx;
             this.sliceSettings.extruder_assignments = [...assignments];
+            // Default filament selection follows machine preset for chosen extruder.
+            this.applyPresetFilamentsForAssignments(true);
         },
 
         /**

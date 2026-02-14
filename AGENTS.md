@@ -486,6 +486,23 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Files**: `app.js`, `index.html`
 - **Result**: Cleaner workflow separation between machine setup and per-job customization.
 
+**Refined: Printer Defaults + Override Defaults UX**
+- **What changed**:
+  1. Renamed UI terminology from `Machine Defaults` to `Printer Defaults`.
+  2. Opening `Override settings for this job` now initializes all override fields from current printer defaults.
+  3. Override controls now show inline `(... printer default)` hints for quick comparison.
+  4. Multicolour filament/extruder override lives under job overrides only (not in detected-colors header).
+- **Files**: `app.js`, `index.html`
+- **Result**: Clearer defaults model and faster per-job tuning with less accidental mismatch.
+
+**Expanded: Prime Tower Defaults/Overrides**
+- **What changed**: Added additional prime tower controls in Settings + per-job overrides:
+  - `prime_volume`
+  - `prime_tower_brim_chamfer`
+  - `prime_tower_brim_chamfer_max_width`
+- **Files**: `main.py`, `schema.sql`, `routes_slice.py`, `api.js`, `app.js`, `index.html`, `profile_embedder.py`
+- **Result**: More complete prime-tower tuning from UI without manual profile edits.
+
 **Implemented: Prime Tower Options (M17)**
 - **What changed**:
   1. Added machine-default prime tower settings in `Settings` (`enable_prime_tower`, `prime_tower_width`, `prime_tower_brim_width`).
@@ -507,6 +524,18 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Fix**: Kept strict `T0-only` fail-fast for full-file multicolour slices, but for `slice-plate` now continue with a warning when output is `T0` only.
 - **Files**: `routes_slice.py`
 - **Result**: `hollow+cube.3mf` selected-plate multicolour requests now complete instead of failing on `T0-only` guard.
+
+**Fixed: Prime/Wipe Tower Edge Placement From Embedded Bambu Settings**
+- **Problem**: Some files could place wipe/prime tower too close to bed edge (e.g., inherited `wipe_tower_x=15`), causing edge-hugging preview/print paths.
+- **Root Cause**: Assignment-preserving embed path reused source `wipe_tower_x/y` without considering prime tower footprint width + brim.
+- **Fix**: Added dynamic tower-position sanitizer in `profile_embedder.py` that clamps `wipe_tower_x/y` based on estimated tower half-span (`prime_tower_width`, `prime_tower_brim_width`) and U1 bed bounds.
+- **Result**: New slices keep tower placement inside safer bed margins.
+
+**Fixed: Multicolour Time Estimate Inflation on Plate Slices**
+- **Problem**: Some multicolour plate slices (e.g., `hollow+cube` plate 2) reported ~2 hours when expected around ~45-50 minutes.
+- **Root Cause**: Embedded config inherited single-nozzle MMU timing defaults (`machine_load_filament_time=30`, `machine_unload_filament_time=30`), inflating toolchange time estimation for U1 extruder-slot swaps.
+- **Fix**: For multicolour requests (`extruder_count > 1`), slice endpoints now override load/unload times to `0` in project settings.
+- **Result**: Plate 2 estimate dropped from ~2h to ~50m with prime tower enabled (and ~25m without prime tower), matching expected behavior much better.
 
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.

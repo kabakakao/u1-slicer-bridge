@@ -178,6 +178,78 @@ class ProfileEmbedder:
             numeric = minimum
         config[key] = str(numeric)
 
+    @staticmethod
+    def _sanitize_float_field(config: Dict[str, Any], key: str, minimum: float) -> None:
+        raw = config.get(key)
+        if raw is None:
+            return
+
+        # Bambu settings may encode numeric fields as a scalar or single-item list.
+        value = raw[0] if isinstance(raw, list) and raw else raw
+        try:
+            numeric = float(str(value).strip())
+        except Exception:
+            return
+
+        if numeric < minimum:
+            numeric = minimum
+
+        normalized = str(numeric)
+        if isinstance(raw, list):
+            config[key] = [normalized]
+        else:
+            config[key] = normalized
+
+    @staticmethod
+    def _get_numeric(config: Dict[str, Any], key: str, fallback: float) -> float:
+        raw = config.get(key)
+        if raw is None:
+            return fallback
+        value = raw[0] if isinstance(raw, list) and raw else raw
+        try:
+            return float(str(value).strip())
+        except Exception:
+            return fallback
+
+    def _sanitize_wipe_tower_position(
+        self,
+        config: Dict[str, Any],
+        bed_size_mm: float = 270.0,
+        extra_margin_mm: float = 6.0,
+    ) -> None:
+        """Keep wipe/prime tower safely inside bed bounds.
+
+        Orca/Bambu configs can carry low `wipe_tower_x` values (e.g., 15mm) that
+        place a wide prime tower at or beyond the printable edge.
+        """
+        tower_width = self._get_numeric(config, 'prime_tower_width', 35.0)
+        tower_brim = max(0.0, self._get_numeric(config, 'prime_tower_brim_width', 3.0))
+        half_span = max(12.0, (tower_width / 2.0) + tower_brim + extra_margin_mm)
+        min_pos = half_span
+        max_pos = max(min_pos, bed_size_mm - half_span)
+
+        for axis_key in ('wipe_tower_x', 'wipe_tower_y'):
+            raw = config.get(axis_key)
+            if raw is None:
+                continue
+
+            value = raw[0] if isinstance(raw, list) and raw else raw
+            try:
+                numeric = float(str(value).strip())
+            except Exception:
+                continue
+
+            if numeric < min_pos:
+                numeric = min_pos
+            if numeric > max_pos:
+                numeric = max_pos
+
+            normalized = f"{numeric:.3f}"
+            if isinstance(raw, list):
+                config[axis_key] = [normalized]
+            else:
+                config[axis_key] = normalized
+
     def _build_assignment_preserving_config(
         self,
         source_3mf: Path,
@@ -219,7 +291,12 @@ class ProfileEmbedder:
 
         self._sanitize_index_field(config, 'raft_first_layer_expansion', 0)
         self._sanitize_index_field(config, 'tree_support_wall_count', 0)
+        self._sanitize_index_field(config, 'prime_volume', 0)
         self._sanitize_index_field(config, 'prime_tower_brim_width', 0)
+        self._sanitize_index_field(config, 'prime_tower_brim_chamfer', 0)
+        self._sanitize_index_field(config, 'prime_tower_brim_chamfer_max_width', 0)
+        # Keep purge/prime tower safely inside bed bounds for U1 reliability.
+        self._sanitize_wipe_tower_position(config)
         self._sanitize_index_field(config, 'solid_infill_filament', 1)
         self._sanitize_index_field(config, 'sparse_infill_filament', 1)
         self._sanitize_index_field(config, 'wall_filament', 1)
@@ -254,8 +331,9 @@ class ProfileEmbedder:
             bed_single = [config['bed_temperature_initial_layer'][0]]
         config['bed_temperature_initial_layer_single'] = bed_single
 
-        if target_slots > 1:
-            config['single_extruder_multi_material'] = '1'
+        # U1 workflow targets explicit extruder slots (E1-E4), not single-nozzle MMU swaps.
+        # Keep this off to avoid inflated load/unload toolchange behavior and time estimates.
+        config['single_extruder_multi_material'] = '0'
 
         logger.info(
             "Built assignment-preserving config with %s extruder slots "
@@ -272,7 +350,8 @@ class ProfileEmbedder:
                        filament_settings: Dict[str, Any],
                        overrides: Dict[str, Any],
                        requested_filament_count: int = 1,
-                       extruder_remap: Dict[int, int] | None = None) -> Path:
+                       extruder_remap: Dict[int, int] | None = None,
+                       preserve_geometry: bool = False) -> Path:
         """Copy original 3MF and inject Orca profiles.
 
         Preserves all original geometry, transforms, and positioning.
@@ -326,7 +405,7 @@ class ProfileEmbedder:
                 logger.info(f"Successfully embedded profiles into {output_3mf.name}")
                 return output_3mf
 
-            if is_bambu:
+            if is_bambu and not preserve_geometry:
                 logger.info("Detected Bambu Studio file - rebuilding with trimesh")
                 temp_clean = source_3mf.parent / f"{source_3mf.stem}_clean.3mf"
                 self._rebuild_with_trimesh(source_3mf, temp_clean)

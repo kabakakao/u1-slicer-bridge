@@ -122,8 +122,11 @@ class SliceRequest(BaseModel):
     infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
     enable_prime_tower: Optional[bool] = False
+    prime_volume: Optional[int] = None
     prime_tower_width: Optional[int] = None
     prime_tower_brim_width: Optional[int] = None
+    prime_tower_brim_chamfer: Optional[bool] = True
+    prime_tower_brim_chamfer_max_width: Optional[int] = None
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
@@ -141,8 +144,11 @@ class SlicePlateRequest(BaseModel):
     infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
     enable_prime_tower: Optional[bool] = False
+    prime_volume: Optional[int] = None
     prime_tower_width: Optional[int] = None
     prime_tower_brim_width: Optional[int] = None
+    prime_tower_brim_chamfer: Optional[bool] = True
+    prime_tower_brim_chamfer_max_width: Optional[int] = None
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
@@ -188,8 +194,11 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         f"infill_density={request.infill_density}, wall_count={request.wall_count}, "
         f"infill_pattern={request.infill_pattern}, supports={request.supports}, "
         f"enable_prime_tower={request.enable_prime_tower}, "
+        f"prime_volume={request.prime_volume}, "
         f"prime_tower_width={request.prime_tower_width}, "
-        f"prime_tower_brim_width={request.prime_tower_brim_width}"
+        f"prime_tower_brim_width={request.prime_tower_brim_width}, "
+        f"prime_tower_brim_chamfer={request.prime_tower_brim_chamfer}, "
+        f"prime_tower_brim_chamfer_max_width={request.prime_tower_brim_chamfer_max_width}"
     )
 
     async with pool.acquire() as conn:
@@ -389,12 +398,23 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["support_type"] = "normal(auto)"
         if request.enable_prime_tower:
             overrides["enable_prime_tower"] = "1"
+            if request.prime_volume is not None:
+                overrides["prime_volume"] = str(max(0, int(request.prime_volume)))
             if request.prime_tower_width is not None:
                 overrides["prime_tower_width"] = str(max(1, int(request.prime_tower_width)))
             if request.prime_tower_brim_width is not None:
                 overrides["prime_tower_brim_width"] = str(max(0, int(request.prime_tower_brim_width)))
+            overrides["prime_tower_brim_chamfer"] = "1" if request.prime_tower_brim_chamfer else "0"
+            if request.prime_tower_brim_chamfer_max_width is not None:
+                overrides["prime_tower_brim_chamfer_max_width"] = str(max(0, int(request.prime_tower_brim_chamfer_max_width)))
         else:
             overrides["enable_prime_tower"] = "0"
+
+        if extruder_count > 1:
+            # U1 tool swaps are direct extruder changes, not AMS load/unload cycles.
+            # Avoid inflated print-time estimates from single-nozzle MMU timing defaults.
+            overrides["machine_load_filament_time"] = "0"
+            overrides["machine_unload_filament_time"] = "0"
 
         try:
             embedder.embed_profiles(
@@ -404,6 +424,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 overrides=overrides,
                 requested_filament_count=extruder_count,
                 extruder_remap=None,
+                preserve_geometry=True,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -610,8 +631,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         f"infill_density={request.infill_density}, wall_count={request.wall_count}, "
         f"infill_pattern={request.infill_pattern}, supports={request.supports}, "
         f"enable_prime_tower={request.enable_prime_tower}, "
+        f"prime_volume={request.prime_volume}, "
         f"prime_tower_width={request.prime_tower_width}, "
-        f"prime_tower_brim_width={request.prime_tower_brim_width}"
+        f"prime_tower_brim_width={request.prime_tower_brim_width}, "
+        f"prime_tower_brim_chamfer={request.prime_tower_brim_chamfer}, "
+        f"prime_tower_brim_chamfer_max_width={request.prime_tower_brim_chamfer_max_width}"
     )
 
     async with pool.acquire() as conn:
@@ -832,12 +856,21 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["support_type"] = "normal(auto)"
         if request.enable_prime_tower:
             overrides["enable_prime_tower"] = "1"
+            if request.prime_volume is not None:
+                overrides["prime_volume"] = str(max(0, int(request.prime_volume)))
             if request.prime_tower_width is not None:
                 overrides["prime_tower_width"] = str(max(1, int(request.prime_tower_width)))
             if request.prime_tower_brim_width is not None:
                 overrides["prime_tower_brim_width"] = str(max(0, int(request.prime_tower_brim_width)))
+            overrides["prime_tower_brim_chamfer"] = "1" if request.prime_tower_brim_chamfer else "0"
+            if request.prime_tower_brim_chamfer_max_width is not None:
+                overrides["prime_tower_brim_chamfer_max_width"] = str(max(0, int(request.prime_tower_brim_chamfer_max_width)))
         else:
             overrides["enable_prime_tower"] = "0"
+
+        if extruder_count > 1:
+            overrides["machine_load_filament_time"] = "0"
+            overrides["machine_unload_filament_time"] = "0"
 
         try:
             embedder.embed_profiles(
