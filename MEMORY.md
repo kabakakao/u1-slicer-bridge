@@ -92,6 +92,17 @@
   - Settings UX renamed and clarified as `Filament Library` with starter-library messaging.
 - **Result**: More predictable material defaults and clearer mental model for filament source/purpose.
 
+### Filament CRUD Guardrails (2026-02-14)
+
+- Added API endpoints for library management:
+  - `PUT /filaments/{id}`
+  - `DELETE /filaments/{id}`
+  - `POST /filaments/{id}/default`
+- Safety behavior:
+  - Block delete when filament is assigned in `extruder_presets` (returns slots `E1-E4` in error).
+  - If deleting current default filament, auto-promote replacement (prefers PLA) to keep default fallback stable.
+- UI added Add/Edit/Delete/Set Default actions in Settings -> Filament Library.
+
 ### Additional Prime Tower Controls (2026-02-14)
 
 - Added support for:

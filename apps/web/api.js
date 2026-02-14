@@ -218,6 +218,34 @@ class ApiClient {
     }
 
     /**
+     * Update filament profile
+     */
+    async updateFilament(filamentId, data) {
+        return this.fetch(`/filaments/${filamentId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        });
+    }
+
+    /**
+     * Delete filament profile
+     */
+    async deleteFilament(filamentId) {
+        return this.fetch(`/filaments/${filamentId}`, {
+            method: 'DELETE',
+        });
+    }
+
+    /**
+     * Set one filament as default
+     */
+    async setDefaultFilament(filamentId) {
+        return this.fetch(`/filaments/${filamentId}/default`, {
+            method: 'POST',
+        });
+    }
+
+    /**
      * List all filaments
      */
     async listFilaments() {

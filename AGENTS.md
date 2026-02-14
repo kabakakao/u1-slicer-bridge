@@ -505,6 +505,15 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Files**: `main.py`, `app.js`, `index.html`
 - **Result**: More predictable automatic filament selection and clearer understanding of where library entries come from.
 
+**Implemented: Filament Library CRUD Guardrails**
+- **What changed**:
+  1. Added filament update/delete/default endpoints in API.
+  2. Added Settings UI controls for Add/Edit/Delete/Set Default in Filament Library.
+  3. Added delete safety check: prevent deleting filaments assigned to extruder presets until reassigned.
+  4. Deleting the current default now auto-promotes a replacement (prefers PLA) to keep sane fallback behavior.
+- **Files**: `main.py`, `api.js`, `app.js`, `index.html`
+- **Result**: Filament profiles are manageable in-app with clearer safety behavior and fewer accidental misconfigurations.
+
 **Expanded: Prime Tower Defaults/Overrides**
 - **What changed**: Added additional prime tower controls in Settings + per-job overrides:
   - `prime_volume`

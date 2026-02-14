@@ -103,6 +103,18 @@ class FilamentCreate(BaseModel):
     is_default: bool = False
 
 
+class FilamentUpdate(BaseModel):
+    name: str
+    material: str
+    nozzle_temp: int
+    bed_temp: int
+    print_speed: Optional[int] = 60
+    bed_type: str = "PEI"
+    color_hex: str = "#FFFFFF"
+    extruder_index: int = 0
+    is_default: bool = False
+
+
 class ExtruderPreset(BaseModel):
     slot: int
     filament_id: Optional[int] = None
@@ -394,24 +406,141 @@ async def create_filament(filament: FilamentCreate):
     pool = get_pg_pool()
 
     async with pool.acquire() as conn:
-        result = await conn.fetchrow(
-            """
-            INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING id
-            """,
-            filament.name,
-            filament.material,
-            filament.nozzle_temp,
-            filament.bed_temp,
-            filament.print_speed,
-            filament.bed_type,
-            filament.color_hex,
-            filament.extruder_index,
-            filament.is_default
-        )
+        async with conn.transaction():
+            if filament.is_default:
+                await conn.execute("UPDATE filaments SET is_default = FALSE WHERE is_default = TRUE")
+
+            try:
+                result = await conn.fetchrow(
+                    """
+                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    RETURNING id
+                    """,
+                    filament.name,
+                    filament.material,
+                    filament.nozzle_temp,
+                    filament.bed_temp,
+                    filament.print_speed,
+                    filament.bed_type,
+                    filament.color_hex,
+                    filament.extruder_index,
+                    filament.is_default
+                )
+            except Exception as e:
+                if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
+                    raise HTTPException(status_code=409, detail="Filament name already exists")
+                raise
 
         return {"id": result["id"], "message": "Filament created"}
+
+
+@app.put("/filaments/{filament_id}")
+async def update_filament(filament_id: int, filament: FilamentUpdate):
+    """Update a filament profile."""
+    from db import get_pg_pool
+    pool = get_pg_pool()
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await conn.fetchrow("SELECT id FROM filaments WHERE id = $1", filament_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="Filament not found")
+
+            if filament.is_default:
+                await conn.execute("UPDATE filaments SET is_default = FALSE WHERE id != $1", filament_id)
+
+            try:
+                await conn.execute(
+                    """
+                    UPDATE filaments
+                    SET name = $1,
+                        material = $2,
+                        nozzle_temp = $3,
+                        bed_temp = $4,
+                        print_speed = $5,
+                        bed_type = $6,
+                        color_hex = $7,
+                        extruder_index = $8,
+                        is_default = $9
+                    WHERE id = $10
+                    """,
+                    filament.name,
+                    filament.material,
+                    filament.nozzle_temp,
+                    filament.bed_temp,
+                    filament.print_speed,
+                    filament.bed_type,
+                    filament.color_hex,
+                    filament.extruder_index,
+                    filament.is_default,
+                    filament_id,
+                )
+            except Exception as e:
+                if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
+                    raise HTTPException(status_code=409, detail="Filament name already exists")
+                raise
+
+    return {"message": "Filament updated"}
+
+
+@app.post("/filaments/{filament_id}/default")
+async def set_default_filament(filament_id: int):
+    """Set one filament as the default fallback filament."""
+    from db import get_pg_pool
+    pool = get_pg_pool()
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await conn.fetchrow("SELECT id FROM filaments WHERE id = $1", filament_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="Filament not found")
+
+            await conn.execute("UPDATE filaments SET is_default = FALSE")
+            await conn.execute("UPDATE filaments SET is_default = TRUE WHERE id = $1", filament_id)
+
+    return {"message": "Default filament updated"}
+
+
+@app.delete("/filaments/{filament_id}")
+async def delete_filament(filament_id: int):
+    """Delete a filament profile with safety checks."""
+    from db import get_pg_pool
+    pool = get_pg_pool()
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await conn.fetchrow("SELECT id, name, is_default FROM filaments WHERE id = $1", filament_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="Filament not found")
+
+            usage = await conn.fetch("SELECT slot FROM extruder_presets WHERE filament_id = $1 ORDER BY slot", filament_id)
+            if usage:
+                slots = [f"E{row['slot']}" for row in usage]
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Filament is assigned to printer presets ({', '.join(slots)}). Reassign those slots first.",
+                )
+
+            total_count = await conn.fetchval("SELECT COUNT(*) FROM filaments")
+            if int(total_count or 0) <= 1:
+                raise HTTPException(status_code=400, detail="Cannot delete the only filament profile")
+
+            await conn.execute("DELETE FROM filaments WHERE id = $1", filament_id)
+
+            if existing["is_default"]:
+                replacement_id = await conn.fetchval(
+                    """
+                    SELECT id
+                    FROM filaments
+                    ORDER BY CASE WHEN UPPER(material) = 'PLA' THEN 0 ELSE 1 END, name
+                    LIMIT 1
+                    """
+                )
+                if replacement_id is not None:
+                    await conn.execute("UPDATE filaments SET is_default = TRUE WHERE id = $1", replacement_id)
+
+    return {"message": "Filament deleted"}
 
 
 @app.post("/filaments/init-defaults")

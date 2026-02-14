@@ -19,6 +19,19 @@ function app() {
         uploads: [],
         jobs: [],               // All slicing jobs
         filaments: [],
+        showFilamentForm: false,
+        editingFilamentId: null,
+        filamentForm: {
+            name: '',
+            material: 'PLA',
+            nozzle_temp: 210,
+            bed_temp: 60,
+            print_speed: 60,
+            bed_type: 'PEI',
+            color_hex: '#FFFFFF',
+            extruder_index: 0,
+            is_default: false,
+        },
         selectedIds: {},        // Track selected items { upload_id: bool, job_id: bool }
         lastSelectedIndex: {},  // Track last selected index per list { uploads: num, jobs: num }
         selectedUpload: null,     // Current upload object
@@ -303,6 +316,91 @@ function app() {
                 console.log('Default filaments initialized');
             } catch (err) {
                 this.showError('Failed to initialize default filaments');
+                console.error(err);
+            }
+        },
+
+        startCreateFilament() {
+            this.editingFilamentId = null;
+            this.filamentForm = {
+                name: '',
+                material: 'PLA',
+                nozzle_temp: 210,
+                bed_temp: 60,
+                print_speed: 60,
+                bed_type: 'PEI',
+                color_hex: '#FFFFFF',
+                extruder_index: 0,
+                is_default: false,
+            };
+            this.showFilamentForm = true;
+        },
+
+        startEditFilament(filament) {
+            this.editingFilamentId = filament.id;
+            this.filamentForm = {
+                name: filament.name,
+                material: filament.material,
+                nozzle_temp: filament.nozzle_temp,
+                bed_temp: filament.bed_temp,
+                print_speed: filament.print_speed || 60,
+                bed_type: filament.bed_type || 'PEI',
+                color_hex: filament.color_hex || '#FFFFFF',
+                extruder_index: filament.extruder_index || 0,
+                is_default: !!filament.is_default,
+            };
+            this.showFilamentForm = true;
+        },
+
+        cancelFilamentForm() {
+            this.showFilamentForm = false;
+            this.editingFilamentId = null;
+        },
+
+        async saveFilamentForm() {
+            try {
+                const payload = {
+                    ...this.filamentForm,
+                    nozzle_temp: Number(this.filamentForm.nozzle_temp),
+                    bed_temp: Number(this.filamentForm.bed_temp),
+                    print_speed: Number(this.filamentForm.print_speed),
+                    extruder_index: Number(this.filamentForm.extruder_index),
+                };
+
+                if (this.editingFilamentId) {
+                    await api.updateFilament(this.editingFilamentId, payload);
+                } else {
+                    await api.createFilament(payload);
+                }
+
+                await this.loadFilaments();
+                await this.loadExtruderPresets();
+                this.cancelFilamentForm();
+            } catch (err) {
+                this.showError(`Failed to save filament: ${err.message}`);
+                console.error(err);
+            }
+        },
+
+        async makeDefaultFilament(filamentId) {
+            try {
+                await api.setDefaultFilament(filamentId);
+                await this.loadFilaments();
+            } catch (err) {
+                this.showError(`Failed to set default filament: ${err.message}`);
+                console.error(err);
+            }
+        },
+
+        async deleteFilament(filamentId, filamentName) {
+            if (!confirm(`Delete filament '${filamentName}'?`)) return;
+
+            try {
+                await api.deleteFilament(filamentId);
+                await this.loadFilaments();
+                await this.loadExtruderPresets();
+            } catch (err) {
+                this.showError(`Failed to delete filament: ${err.message}`);
                 console.error(err);
             }
         },
