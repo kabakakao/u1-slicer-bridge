@@ -222,6 +222,23 @@ class ApiClient {
     }
 
     /**
+     * Get extruder presets + default slicing settings
+     */
+    async getExtruderPresets() {
+        return this.fetch('/presets/extruders');
+    }
+
+    /**
+     * Save extruder presets + default slicing settings
+     */
+    async saveExtruderPresets(payload) {
+        return this.fetch('/presets/extruders', {
+            method: 'PUT',
+            body: JSON.stringify(payload),
+        });
+    }
+
+    /**
      * Get job status
      * @param {string} jobId - The job ID to check
      * @returns {Promise<{job_id: string, status: string, metadata: object}>}

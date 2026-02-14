@@ -82,6 +82,30 @@ CREATE INDEX IF NOT EXISTS idx_slicing_jobs_upload_id ON slicing_jobs(upload_id)
 -- Migration: Add filament_colors column to existing databases
 ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS filament_colors TEXT;
 
+-- Persistent extruder preset mapping (E1-E4)
+CREATE TABLE IF NOT EXISTS extruder_presets (
+    slot INTEGER PRIMARY KEY,
+    filament_id INTEGER REFERENCES filaments(id) ON DELETE SET NULL,
+    color_hex VARCHAR(7) NOT NULL DEFAULT '#FFFFFF',
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_extruder_preset_slot CHECK (slot BETWEEN 1 AND 4)
+);
+
+-- Persistent default slicing settings
+CREATE TABLE IF NOT EXISTS slicing_defaults (
+    id INTEGER PRIMARY KEY,
+    layer_height REAL NOT NULL DEFAULT 0.2,
+    infill_density INTEGER NOT NULL DEFAULT 15,
+    wall_count INTEGER NOT NULL DEFAULT 3,
+    infill_pattern TEXT NOT NULL DEFAULT 'gyroid',
+    supports BOOLEAN NOT NULL DEFAULT FALSE,
+    nozzle_temp INTEGER,
+    bed_temp INTEGER,
+    bed_type TEXT,
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_slicing_defaults_single_row CHECK (id = 1)
+);
+
 -- ============================================================================
 -- OLD WORKFLOW CLEANUP (already migrated)
 -- ============================================================================

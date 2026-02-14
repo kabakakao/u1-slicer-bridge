@@ -60,14 +60,14 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ### Slicing Controls & Profiles
 ✅ M7.2 build plate type & temperature overrides - Set bed type per filament and override temps at slice time  
 ❌ M13 custom filament profiles - Upload and use user-provided filament profiles  
-❌ M24 extruder presets - Preconfigure default slicing settings and filament color/type per extruder
+✅ M24 extruder presets - Preconfigure default slicing settings and filament color/type per extruder
 ❌ M19 slicer selection - Choose between OrcaSlicer and Snapmaker Orca for slicing
 ✅ M23 common slicing options - Allow changing wall count, infill pattern, and infill density (%)
 
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 
-**Current:** 17.7 / 24 complete (74%)
+**Current:** 18.7 / 24 complete (78%)
 
 ---
 
@@ -464,6 +464,27 @@ Multi-plate files were being treated as a single giant plate, causing:
   3. Backend applies overrides to Orca project settings (`wall_loops`, `sparse_infill_pattern`, `sparse_infill_density`).
 - **Files**: `index.html`, `app.js`, `api.js`, `routes_slice.py`
 - **Result**: Users can tune core print strength/speed behavior from the UI without editing profiles.
+
+**Implemented: Extruder Presets (M24)**
+- **What changed**:
+  1. Added persistent extruder preset storage for E1-E4 (`filament_id` + `color_hex`) and one-row global slicing defaults.
+  2. Added API endpoints:
+     - `GET /presets/extruders` to fetch presets + slicing defaults.
+     - `PUT /presets/extruders` to save presets + slicing defaults.
+  3. Configure UI now includes an `Extruder Presets` section with `Save as Defaults`.
+  4. Presets are auto-loaded and applied for new uploads (single and multi-filament paths).
+- **Files**: `schema.sql`, `main.py`, `api.js`, `app.js`, `index.html`
+- **Result**: Users can preconfigure default filament/color per extruder and reuse standard slicing settings across jobs.
+
+**Implemented: Settings Tab Architecture (Machine Defaults vs Per-Job Overrides)**
+- **Problem**: Machine-level defaults were mixed into per-slice Configure flow, making occasional global settings too easy to change during a single job.
+- **What changed**:
+  1. Added top-level `Upload` / `Settings` tabs in the web UI.
+  2. Moved machine defaults editing (extruder presets + default slicing settings) to `Settings`.
+  3. Configure now shows a `Machine Defaults` summary plus an `Override settings for this job` toggle.
+  4. Slice payload behavior now follows: defaults when override is off, per-job override values when on.
+- **Files**: `app.js`, `index.html`
+- **Result**: Cleaner workflow separation between machine setup and per-job customization.
 
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.

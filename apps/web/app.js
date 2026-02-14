@@ -13,6 +13,7 @@ function app() {
 
         // Current workflow step: 'upload' | 'configure' | 'slicing' | 'complete'
         currentStep: 'upload',
+        activeTab: 'upload', // 'upload' | 'settings'
 
         // Data
         uploads: [],
@@ -28,6 +29,14 @@ function app() {
         platesLoading: false,     // Loading state for plates
         detectedColors: [],       // Colors detected from 3MF file
         filamentOverride: false,  // Whether user wants to manually override filament assignment
+        extruderPresets: [
+            { slot: 1, filament_id: null, color_hex: '#FFFFFF' },
+            { slot: 2, filament_id: null, color_hex: '#FFFFFF' },
+            { slot: 3, filament_id: null, color_hex: '#FFFFFF' },
+            { slot: 4, filament_id: null, color_hex: '#FFFFFF' },
+        ],
+        presetsSaving: false,
+        presetMessage: null,
         maxExtruders: 4,
         multicolorNotice: null,
 
@@ -36,6 +45,17 @@ function app() {
         printerStatus: 'Checking...',
 
         // Slicing settings
+        machineSettings: {
+            layer_height: 0.2,
+            infill_density: 15,
+            wall_count: 3,
+            infill_pattern: 'gyroid',
+            supports: false,
+            nozzle_temp: null,
+            bed_temp: null,
+            bed_type: null,
+        },
+        useJobOverrides: false,
         sliceSettings: {
             layer_height: 0.2,
             infill_density: 15,
@@ -65,6 +85,7 @@ function app() {
             // Load initial data
             await this.checkPrinterStatus();
             await this.loadFilaments();
+            await this.loadExtruderPresets();
             await this.loadRecentUploads();
             await this.loadJobs();
 
@@ -102,12 +123,129 @@ function app() {
         },
 
         /**
+         * Load persistent extruder and slicing defaults presets.
+         */
+        async loadExtruderPresets() {
+            try {
+                const response = await api.getExtruderPresets();
+                const presets = (response.extruders || []).slice(0, this.maxExtruders);
+                if (presets.length === this.maxExtruders) {
+                    this.extruderPresets = presets.map((p, idx) => ({
+                        slot: idx + 1,
+                        filament_id: p.filament_id || null,
+                        color_hex: p.color_hex || '#FFFFFF',
+                    }));
+                }
+
+                if (response.slicing_defaults) {
+                    this.machineSettings = {
+                        ...this.machineSettings,
+                        ...response.slicing_defaults,
+                    };
+                }
+
+                this.applyPresetDefaults();
+                this.resetJobOverrideSettings();
+            } catch (err) {
+                console.warn('Failed to load extruder presets:', err);
+            }
+        },
+
+        /**
+         * Persist extruder presets and current slicing defaults.
+         */
+        async saveExtruderPresets() {
+            this.presetsSaving = true;
+            this.presetMessage = null;
+
+            try {
+                const payload = {
+                    extruders: this.extruderPresets.map((p, idx) => ({
+                        slot: idx + 1,
+                        filament_id: p.filament_id || null,
+                        color_hex: p.color_hex || '#FFFFFF',
+                    })),
+                    slicing_defaults: {
+                        layer_height: this.machineSettings.layer_height,
+                        infill_density: this.machineSettings.infill_density,
+                        wall_count: this.machineSettings.wall_count,
+                        infill_pattern: this.machineSettings.infill_pattern,
+                        supports: this.machineSettings.supports,
+                        nozzle_temp: this.machineSettings.nozzle_temp,
+                        bed_temp: this.machineSettings.bed_temp,
+                        bed_type: this.machineSettings.bed_type,
+                    },
+                };
+
+                await api.saveExtruderPresets(payload);
+                this.presetMessage = 'Extruder presets saved.';
+                this.applyPresetDefaults();
+                this.resetJobOverrideSettings();
+            } catch (err) {
+                this.presetMessage = `Failed to save presets: ${err.message}`;
+                this.showError(this.presetMessage);
+            } finally {
+                this.presetsSaving = false;
+                setTimeout(() => {
+                    this.presetMessage = null;
+                }, 3000);
+            }
+        },
+
+        /**
+         * Apply preset defaults to active filament selections.
+         */
+        applyPresetDefaults() {
+            const e1 = this.extruderPresets[0];
+            if (e1 && e1.filament_id) {
+                this.selectedFilament = e1.filament_id;
+            }
+
+            const presetFilaments = this.extruderPresets
+                .map((p) => p.filament_id)
+                .filter((id) => !!id)
+                .slice(0, this.maxExtruders);
+            if (presetFilaments.length > 0) {
+                this.selectedFilaments = presetFilaments;
+            }
+
+            this.sliceSettings.filament_colors = this.extruderPresets
+                .map((p) => p.color_hex || '#FFFFFF')
+                .slice(0, this.maxExtruders);
+            this.sliceSettings.extruder_assignments = [0, 1, 2, 3];
+        },
+
+        resetJobOverrideSettings() {
+            this.useJobOverrides = false;
+            this.sliceSettings = {
+                ...this.sliceSettings,
+                layer_height: this.machineSettings.layer_height,
+                infill_density: this.machineSettings.infill_density,
+                wall_count: this.machineSettings.wall_count,
+                infill_pattern: this.machineSettings.infill_pattern,
+                supports: this.machineSettings.supports,
+                nozzle_temp: this.machineSettings.nozzle_temp,
+                bed_temp: this.machineSettings.bed_temp,
+                bed_type: this.machineSettings.bed_type,
+            };
+        },
+
+        openSettings() {
+            this.activeTab = 'settings';
+        },
+
+        openUpload() {
+            this.activeTab = 'upload';
+        },
+
+        /**
          * Initialize default filaments
          */
         async initDefaultFilaments() {
             try {
                 await api.initDefaultFilaments();
                 await this.loadFilaments();
+                await this.loadExtruderPresets();
                 console.log('Default filaments initialized');
             } catch (err) {
                 this.showError('Failed to initialize default filaments');
@@ -280,6 +418,7 @@ function app() {
 
             console.log(`Uploading: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
             this.currentStep = 'upload';
+            this.activeTab = 'upload';
             this.uploadProgress = 0;
             this.uploadPhase = 'uploading';
 
@@ -320,10 +459,12 @@ function app() {
                 this.plates = [];
                 this.platesLoading = false;
                 this.currentStep = 'configure';
+                this.activeTab = 'upload';
 
                 // Initialize detected colors and filament assignment state from upload response
                 this.filamentOverride = false;
                 this.applyDetectedColors(result.detected_colors || []);
+                this.resetJobOverrideSettings();
                 
                 // Always reload plate info so we get latest validation + preview URLs.
                 this.platesLoading = true;
@@ -378,8 +519,10 @@ function app() {
             }
 
             this.filamentOverride = false;
+            this.resetJobOverrideSettings();
             
             this.currentStep = 'configure';
+            this.activeTab = 'upload';
             
             // Try to load plates - this works for both multi-plate and single-plate files
             // If it's multi-plate, we'll get plates data; if single, we'll get empty plates
@@ -489,6 +632,7 @@ function app() {
             console.log('Selected filaments:', hasMultiFilaments ? this.selectedFilaments : this.selectedFilament);
 
             this.currentStep = 'slicing';
+            this.activeTab = 'upload';
             this.sliceProgress = 0;
 
             try {
@@ -496,8 +640,21 @@ function app() {
                 
                 // Prepare slice settings with filament info
                 const sliceSettings = {
-                    ...this.sliceSettings
+                    ...this.machineSettings,
+                    filament_colors: [...(this.sliceSettings.filament_colors || [])],
+                    extruder_assignments: [...(this.sliceSettings.extruder_assignments || [0, 1, 2, 3])],
                 };
+
+                if (this.useJobOverrides) {
+                    sliceSettings.layer_height = this.sliceSettings.layer_height;
+                    sliceSettings.infill_density = this.sliceSettings.infill_density;
+                    sliceSettings.wall_count = this.sliceSettings.wall_count;
+                    sliceSettings.infill_pattern = this.sliceSettings.infill_pattern;
+                    sliceSettings.supports = this.sliceSettings.supports;
+                    sliceSettings.nozzle_temp = this.sliceSettings.nozzle_temp;
+                    sliceSettings.bed_temp = this.sliceSettings.bed_temp;
+                    sliceSettings.bed_type = this.sliceSettings.bed_type;
+                }
                 
                 // Reorder colors and filament_ids based on extruder assignments
                 if (hasMultiFilaments && this.sliceSettings.extruder_assignments) {
@@ -610,11 +767,13 @@ function app() {
          */
         resetWorkflow() {
             this.currentStep = 'upload';
+            this.activeTab = 'upload';
             this.selectedUpload = null;
             this.sliceResult = null;
             this.sliceProgress = 0;
             this.uploadProgress = 0;
             this.uploadPhase = 'idle';
+            this.resetJobOverrideSettings();
 
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
@@ -635,6 +794,7 @@ function app() {
                 };
                 this.sliceResult = status;
                 this.currentStep = 'complete';
+                this.activeTab = 'upload';
             } catch (err) {
                 this.showError('Failed to load job');
                 console.error(err);
@@ -746,7 +906,11 @@ function app() {
             this.selectedFilaments = [];
 
             const limitedColors = (colors || []).slice(0, this.maxExtruders);
-            this.sliceSettings.filament_colors = [...limitedColors];
+            const presetColors = this.extruderPresets.map((p) => p.color_hex || '#FFFFFF');
+            const presetFilaments = this.extruderPresets.map((p) => p.filament_id || null);
+            this.sliceSettings.filament_colors = limitedColors.length > 0
+                ? limitedColors.map((c, idx) => presetColors[idx] || c || '#FFFFFF')
+                : [...presetColors];
             this.sliceSettings.extruder_assignments = limitedColors.map((_, idx) => idx);
 
             if (!colors || colors.length === 0) {
@@ -763,13 +927,26 @@ function app() {
 
             this.multicolorNotice = null;
             this.selectedFilament = null;
-            this.autoAssignFilaments();
+
+            const configuredPresetFilaments = presetFilaments
+                .slice(0, limitedColors.length)
+                .filter((id) => !!id);
+            if (configuredPresetFilaments.length === limitedColors.length) {
+                this.selectedFilaments = presetFilaments.slice(0, limitedColors.length);
+            } else {
+                this.autoAssignFilaments();
+            }
         },
 
         /**
          * Select default filament in single-filament mode.
          */
         setDefaultFilament() {
+            const presetFilamentId = this.extruderPresets[0]?.filament_id;
+            if (presetFilamentId) {
+                this.selectedFilament = presetFilamentId;
+                return;
+            }
             const defaultFilament = this.filaments.find(f => f.is_default);
             if (defaultFilament) {
                 this.selectedFilament = defaultFilament.id;

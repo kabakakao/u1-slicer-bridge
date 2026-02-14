@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from db import init_db, close_db
@@ -89,6 +91,100 @@ async def printer_status():
         raise HTTPException(status_code=503, detail=f"Printer error: {str(e)}")
 
 
+class FilamentCreate(BaseModel):
+    name: str
+    material: str
+    nozzle_temp: int
+    bed_temp: int
+    print_speed: Optional[int] = 60
+    bed_type: str = "PEI"
+    color_hex: str = "#FFFFFF"
+    extruder_index: int = 0
+    is_default: bool = False
+
+
+class ExtruderPreset(BaseModel):
+    slot: int
+    filament_id: Optional[int] = None
+    color_hex: str = "#FFFFFF"
+
+
+class SlicingDefaults(BaseModel):
+    layer_height: float = 0.2
+    infill_density: int = 15
+    wall_count: int = 3
+    infill_pattern: str = "gyroid"
+    supports: bool = False
+    nozzle_temp: Optional[int] = None
+    bed_temp: Optional[int] = None
+    bed_type: Optional[str] = None
+
+
+class ExtruderPresetUpdate(BaseModel):
+    extruders: List[ExtruderPreset]
+    slicing_defaults: Optional[SlicingDefaults] = None
+
+
+async def _ensure_preset_rows(conn):
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS extruder_presets (
+            slot INTEGER PRIMARY KEY,
+            filament_id INTEGER REFERENCES filaments(id) ON DELETE SET NULL,
+            color_hex VARCHAR(7) NOT NULL DEFAULT '#FFFFFF',
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT chk_extruder_preset_slot CHECK (slot BETWEEN 1 AND 4)
+        )
+        """
+    )
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS slicing_defaults (
+            id INTEGER PRIMARY KEY,
+            layer_height REAL NOT NULL DEFAULT 0.2,
+            infill_density INTEGER NOT NULL DEFAULT 15,
+            wall_count INTEGER NOT NULL DEFAULT 3,
+            infill_pattern TEXT NOT NULL DEFAULT 'gyroid',
+            supports BOOLEAN NOT NULL DEFAULT FALSE,
+            nozzle_temp INTEGER,
+            bed_temp INTEGER,
+            bed_type TEXT,
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT chk_slicing_defaults_single_row CHECK (id = 1)
+        )
+        """
+    )
+
+    for slot in range(1, 5):
+        fallback_filament_id = await conn.fetchval(
+            """
+            SELECT id FROM filaments
+            WHERE extruder_index = $1
+            ORDER BY is_default DESC, id ASC
+            LIMIT 1
+            """,
+            slot - 1,
+        )
+        await conn.execute(
+            """
+            INSERT INTO extruder_presets (slot, filament_id, color_hex)
+            VALUES ($1, $2, '#FFFFFF')
+            ON CONFLICT (slot) DO NOTHING
+            """,
+            slot,
+            fallback_filament_id,
+        )
+
+    await conn.execute(
+        """
+        INSERT INTO slicing_defaults (id)
+        VALUES (1)
+        ON CONFLICT (id) DO NOTHING
+        """
+    )
+
+
 @app.get("/filaments")
 async def get_filaments():
     """Get all configured filament profiles."""
@@ -119,16 +215,129 @@ async def get_filaments():
         return {"filaments": filaments}
 
 
-class FilamentCreate(BaseModel):
-    name: str
-    material: str
-    nozzle_temp: int
-    bed_temp: int
-    print_speed: Optional[int] = 60
-    bed_type: str = "PEI"
-    color_hex: str = "#FFFFFF"
-    extruder_index: int = 0
-    is_default: bool = False
+@app.get("/presets/extruders")
+async def get_extruder_presets():
+    """Get extruder presets and default slicing settings."""
+    from db import get_pg_pool
+    pool = get_pg_pool()
+
+    async with pool.acquire() as conn:
+        await _ensure_preset_rows(conn)
+
+        preset_rows = await conn.fetch(
+            """
+            SELECT slot, filament_id, color_hex
+            FROM extruder_presets
+            ORDER BY slot
+            """
+        )
+
+        defaults = await conn.fetchrow(
+            """
+            SELECT layer_height, infill_density, wall_count, infill_pattern,
+                   supports, nozzle_temp, bed_temp, bed_type
+            FROM slicing_defaults
+            WHERE id = 1
+            """
+        )
+
+    return {
+        "extruders": [
+            {
+                "slot": row["slot"],
+                "filament_id": row["filament_id"],
+                "color_hex": row["color_hex"] or "#FFFFFF",
+            }
+            for row in preset_rows
+        ],
+        "slicing_defaults": {
+            "layer_height": defaults["layer_height"],
+            "infill_density": defaults["infill_density"],
+            "wall_count": defaults["wall_count"],
+            "infill_pattern": defaults["infill_pattern"],
+            "supports": defaults["supports"],
+            "nozzle_temp": defaults["nozzle_temp"],
+            "bed_temp": defaults["bed_temp"],
+            "bed_type": defaults["bed_type"],
+        },
+    }
+
+
+@app.put("/presets/extruders")
+async def update_extruder_presets(payload: ExtruderPresetUpdate):
+    """Update extruder presets and optional global slicing defaults."""
+    from db import get_pg_pool
+    pool = get_pg_pool()
+
+    if len(payload.extruders) != 4:
+        raise HTTPException(status_code=400, detail="Exactly 4 extruder presets are required (E1-E4).")
+
+    slots = sorted(p.slot for p in payload.extruders)
+    if slots != [1, 2, 3, 4]:
+        raise HTTPException(status_code=400, detail="Extruder preset slots must be exactly [1,2,3,4].")
+
+    async with pool.acquire() as conn:
+        await _ensure_preset_rows(conn)
+
+        # Validate filament IDs exist when provided.
+        requested_ids = [p.filament_id for p in payload.extruders if p.filament_id is not None]
+        if requested_ids:
+            found = await conn.fetch(
+                "SELECT id FROM filaments WHERE id = ANY($1)",
+                requested_ids,
+            )
+            found_ids = {row["id"] for row in found}
+            missing = [fid for fid in requested_ids if fid not in found_ids]
+            if missing:
+                raise HTTPException(status_code=404, detail=f"Filament IDs not found: {missing}")
+
+        for preset in payload.extruders:
+            await conn.execute(
+                """
+                INSERT INTO extruder_presets (slot, filament_id, color_hex, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (slot) DO UPDATE SET
+                    filament_id = EXCLUDED.filament_id,
+                    color_hex = EXCLUDED.color_hex,
+                    updated_at = NOW()
+                """,
+                preset.slot,
+                preset.filament_id,
+                preset.color_hex,
+            )
+
+        if payload.slicing_defaults is not None:
+            d = payload.slicing_defaults
+            await conn.execute(
+                """
+                INSERT INTO slicing_defaults (
+                    id, layer_height, infill_density, wall_count, infill_pattern,
+                    supports, nozzle_temp, bed_temp, bed_type, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    layer_height = EXCLUDED.layer_height,
+                    infill_density = EXCLUDED.infill_density,
+                    wall_count = EXCLUDED.wall_count,
+                    infill_pattern = EXCLUDED.infill_pattern,
+                    supports = EXCLUDED.supports,
+                    nozzle_temp = EXCLUDED.nozzle_temp,
+                    bed_temp = EXCLUDED.bed_temp,
+                    bed_type = EXCLUDED.bed_type,
+                    updated_at = NOW()
+                """,
+                1,
+                d.layer_height,
+                d.infill_density,
+                d.wall_count,
+                d.infill_pattern,
+                d.supports,
+                d.nozzle_temp,
+                d.bed_temp,
+                d.bed_type,
+            )
+
+    return {"message": "Extruder presets updated"}
 
 
 @app.post("/filaments")
