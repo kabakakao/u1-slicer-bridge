@@ -115,6 +115,9 @@ class SlicingDefaults(BaseModel):
     wall_count: int = 3
     infill_pattern: str = "gyroid"
     supports: bool = False
+    enable_prime_tower: bool = False
+    prime_tower_width: Optional[int] = None
+    prime_tower_brim_width: Optional[int] = None
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
@@ -147,6 +150,9 @@ async def _ensure_preset_rows(conn):
             wall_count INTEGER NOT NULL DEFAULT 3,
             infill_pattern TEXT NOT NULL DEFAULT 'gyroid',
             supports BOOLEAN NOT NULL DEFAULT FALSE,
+            enable_prime_tower BOOLEAN NOT NULL DEFAULT FALSE,
+            prime_tower_width INTEGER,
+            prime_tower_brim_width INTEGER,
             nozzle_temp INTEGER,
             bed_temp INTEGER,
             bed_type TEXT,
@@ -155,6 +161,10 @@ async def _ensure_preset_rows(conn):
         )
         """
     )
+
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS enable_prime_tower BOOLEAN NOT NULL DEFAULT FALSE")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS prime_tower_width INTEGER")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS prime_tower_brim_width INTEGER")
 
     for slot in range(1, 5):
         fallback_filament_id = await conn.fetchval(
@@ -235,7 +245,8 @@ async def get_extruder_presets():
         defaults = await conn.fetchrow(
             """
             SELECT layer_height, infill_density, wall_count, infill_pattern,
-                   supports, nozzle_temp, bed_temp, bed_type
+                   supports, enable_prime_tower, prime_tower_width, prime_tower_brim_width,
+                   nozzle_temp, bed_temp, bed_type
             FROM slicing_defaults
             WHERE id = 1
             """
@@ -256,6 +267,9 @@ async def get_extruder_presets():
             "wall_count": defaults["wall_count"],
             "infill_pattern": defaults["infill_pattern"],
             "supports": defaults["supports"],
+            "enable_prime_tower": defaults["enable_prime_tower"],
+            "prime_tower_width": defaults["prime_tower_width"],
+            "prime_tower_brim_width": defaults["prime_tower_brim_width"],
             "nozzle_temp": defaults["nozzle_temp"],
             "bed_temp": defaults["bed_temp"],
             "bed_type": defaults["bed_type"],
@@ -312,15 +326,19 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
                 """
                 INSERT INTO slicing_defaults (
                     id, layer_height, infill_density, wall_count, infill_pattern,
-                    supports, nozzle_temp, bed_temp, bed_type, updated_at
+                    supports, enable_prime_tower, prime_tower_width, prime_tower_brim_width,
+                    nozzle_temp, bed_temp, bed_type, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     layer_height = EXCLUDED.layer_height,
                     infill_density = EXCLUDED.infill_density,
                     wall_count = EXCLUDED.wall_count,
                     infill_pattern = EXCLUDED.infill_pattern,
                     supports = EXCLUDED.supports,
+                    enable_prime_tower = EXCLUDED.enable_prime_tower,
+                    prime_tower_width = EXCLUDED.prime_tower_width,
+                    prime_tower_brim_width = EXCLUDED.prime_tower_brim_width,
                     nozzle_temp = EXCLUDED.nozzle_temp,
                     bed_temp = EXCLUDED.bed_temp,
                     bed_type = EXCLUDED.bed_type,
@@ -332,6 +350,9 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
                 d.wall_count,
                 d.infill_pattern,
                 d.supports,
+                d.enable_prime_tower,
+                d.prime_tower_width,
+                d.prime_tower_brim_width,
                 d.nozzle_temp,
                 d.bed_temp,
                 d.bed_type,

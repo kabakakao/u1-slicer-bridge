@@ -64,6 +64,15 @@
 - **Result**: Bed temp correctly set to requested value (e.g., M140 S70)
 - **Files Changed**: `apps/api/app/routes_slice.py`
 
+### Prime Tower Defaults + Overrides (M17)
+
+- **What changed**:
+  - Added machine-level prime tower defaults in settings persistence (`enable_prime_tower`, `prime_tower_width`, `prime_tower_brim_width`).
+  - Added per-job prime tower overrides in Configure (visible only when per-job override toggle is enabled).
+  - Added payload fields in both slice endpoints and mapped them to Orca overrides (`enable_prime_tower`, `prime_tower_width`, `prime_tower_brim_width`).
+- **Compatibility note**:
+  - Existing DBs need additive columns on `slicing_defaults`; handled by runtime `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in `_ensure_preset_rows()`.
+
 ## Configuration Notes
 
 ### API Endpoints
@@ -106,6 +115,16 @@ Then hard refresh browser (Ctrl+Shift+R).
 - **Validation Result**: `calib-cube-10-dual-colour-merged.3mf` now slices successfully with real multi-tool output (`T0` and `T1`).
 - **Safety Fix Retained**: Slice endpoints still fail when multicolour is requested but output is single-tool.
   - Error: `Multicolour requested, but slicer produced single-tool G-code (T0 only).`
+
+### Hollow+Cube Plate Slice Failure (2026-02-14)
+
+- **Symptom**: `hollow+cube.3mf` failed on `POST /uploads/{id}/slice-plate` with:
+  - `prime_tower_brim_width: -1 not in range [0,2147483647]`
+- **Root cause**: Assignment-preserving project settings path in `profile_embedder.py` did not sanitize `prime_tower_brim_width` inherited from source `project_settings.config`.
+- **Fix**: Clamp/sanitize `prime_tower_brim_width` to minimum `0` during config build.
+- **Follow-on behavior**: Some selected plates still emit `T0`-only G-code despite multicolour request.
+  - For full-file multicolour requests, keep fail-fast.
+  - For `slice-plate`, allow completion with warning when output is `T0` only (selected plate can be effectively single-tool even if file-level metadata is multicolour).
 
 #### Matrix Findings (apps/api/app/multicolor_matrix.py)
 - `orig_*` strategies (preserving original Bambu structure) mostly segfault (`exit 139`).

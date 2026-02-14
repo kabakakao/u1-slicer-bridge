@@ -47,7 +47,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ✅ M11 multifilament support - Color detection from 3MF, auto-assignment, manual override, multi-extruder slicing  
 ✅ M15 multicolour viewer - Show color legend in 2D viewer with all detected/assigned colors  
 ✅ M16 flexible filament assignment - Allow overriding color per extruder (separate material type from color)
-❌ M17 prime tower options - Add configurable prime tower options for multicolour prints
+✅ M17 prime tower options - Add configurable prime tower options for multicolour prints
 ✅ M18 multi-plate visual selection - Show plate names and preview images when selecting plates
 
 ### Preview & UX
@@ -67,7 +67,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 
-**Current:** 18.7 / 24 complete (78%)
+**Current:** 19.7 / 24 complete (82%)
 
 ---
 
@@ -485,6 +485,28 @@ Multi-plate files were being treated as a single giant plate, causing:
   4. Slice payload behavior now follows: defaults when override is off, per-job override values when on.
 - **Files**: `app.js`, `index.html`
 - **Result**: Cleaner workflow separation between machine setup and per-job customization.
+
+**Implemented: Prime Tower Options (M17)**
+- **What changed**:
+  1. Added machine-default prime tower settings in `Settings` (`enable_prime_tower`, `prime_tower_width`, `prime_tower_brim_width`).
+  2. Added per-job prime tower overrides in Configure under `Override settings for this job`.
+  3. Slice payloads now include prime tower fields for both full-file and plate slice requests.
+  4. Backend applies prime tower overrides to Orca project settings and sanitizes numeric values.
+- **Files**: `index.html`, `app.js`, `api.js`, `routes_slice.py`, `main.py`, `schema.sql`
+- **Result**: Users can set stable machine-level prime tower behavior and selectively override per print job.
+
+**Fixed: Hollow+Cube Multicolour Config Rejection (`prime_tower_brim_width`)**
+- **Problem**: `hollow+cube.3mf` failed in multicolour path with Orca config validation error:
+  - `prime_tower_brim_width: -1 not in range [0,2147483647]`
+- **Root Cause**: Assignment-preserving embed path reused Bambu `project_settings.config` values but did not sanitize `prime_tower_brim_width`.
+- **Fix**: Added sanitizer clamp for `prime_tower_brim_width` (min `0`) in `profile_embedder.py`.
+- **Result**: Config-validation failure no longer blocks slicing for this file.
+
+**Adjusted: Plate Slice Multicolour `T0-only` Handling**
+- **Problem**: Some multi-plate projects advertise multiple colors at file level, but selected plates are effectively single-tool; strict `T0-only` fail-fast blocked valid plate slices.
+- **Fix**: Kept strict `T0-only` fail-fast for full-file multicolour slices, but for `slice-plate` now continue with a warning when output is `T0` only.
+- **Files**: `routes_slice.py`
+- **Result**: `hollow+cube.3mf` selected-plate multicolour requests now complete instead of failing on `T0-only` guard.
 
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.

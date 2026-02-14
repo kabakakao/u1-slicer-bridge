@@ -121,6 +121,9 @@ class SliceRequest(BaseModel):
     wall_count: Optional[int] = 3
     infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
+    enable_prime_tower: Optional[bool] = False
+    prime_tower_width: Optional[int] = None
+    prime_tower_brim_width: Optional[int] = None
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
@@ -137,6 +140,9 @@ class SlicePlateRequest(BaseModel):
     wall_count: Optional[int] = 3
     infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
+    enable_prime_tower: Optional[bool] = False
+    prime_tower_width: Optional[int] = None
+    prime_tower_brim_width: Optional[int] = None
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
@@ -180,7 +186,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
     job_logger.info(
         f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
         f"infill_density={request.infill_density}, wall_count={request.wall_count}, "
-        f"infill_pattern={request.infill_pattern}, supports={request.supports}"
+        f"infill_pattern={request.infill_pattern}, supports={request.supports}, "
+        f"enable_prime_tower={request.enable_prime_tower}, "
+        f"prime_tower_width={request.prime_tower_width}, "
+        f"prime_tower_brim_width={request.prime_tower_brim_width}"
     )
 
     async with pool.acquire() as conn:
@@ -378,6 +387,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         if request.supports:
             overrides["enable_support"] = "1"
             overrides["support_type"] = "normal(auto)"
+        if request.enable_prime_tower:
+            overrides["enable_prime_tower"] = "1"
+            if request.prime_tower_width is not None:
+                overrides["prime_tower_width"] = str(max(1, int(request.prime_tower_width)))
+            if request.prime_tower_brim_width is not None:
+                overrides["prime_tower_brim_width"] = str(max(0, int(request.prime_tower_brim_width)))
+        else:
+            overrides["enable_prime_tower"] = "0"
 
         try:
             embedder.embed_profiles(
@@ -591,7 +608,10 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
     job_logger.info(
         f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
         f"infill_density={request.infill_density}, wall_count={request.wall_count}, "
-        f"infill_pattern={request.infill_pattern}, supports={request.supports}"
+        f"infill_pattern={request.infill_pattern}, supports={request.supports}, "
+        f"enable_prime_tower={request.enable_prime_tower}, "
+        f"prime_tower_width={request.prime_tower_width}, "
+        f"prime_tower_brim_width={request.prime_tower_brim_width}"
     )
 
     async with pool.acquire() as conn:
@@ -810,6 +830,14 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         if request.supports:
             overrides["enable_support"] = "1"
             overrides["support_type"] = "normal(auto)"
+        if request.enable_prime_tower:
+            overrides["enable_prime_tower"] = "1"
+            if request.prime_tower_width is not None:
+                overrides["prime_tower_width"] = str(max(1, int(request.prime_tower_width)))
+            if request.prime_tower_brim_width is not None:
+                overrides["prime_tower_brim_width"] = str(max(0, int(request.prime_tower_brim_width)))
+        else:
+            overrides["enable_prime_tower"] = "0"
 
         try:
             embedder.embed_profiles(
@@ -865,10 +893,13 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         used_tools = slicer.get_used_tools(gcode_workspace_path)
         job_logger.info(f"Tools used in G-code: {used_tools}")
 
-        # Strict validation: when multicolor is requested, output must use T1+
+        # For selected-plate slices, gracefully accept single-tool output.
+        # Some multi-plate projects contain per-plate single-color geometry
+        # even when file-level metadata advertises multiple colors.
         if len(filaments) > 1 and all(t == "T0" for t in used_tools):
-            raise SlicingError(
-                "Multicolour requested, but slicer produced single-tool G-code (T0 only)."
+            job_logger.warning(
+                "Multicolour requested for selected plate, but slicer produced T0-only output; "
+                "continuing as single-tool plate slice"
             )
 
         job_logger.info(f"Metadata: time={metadata['estimated_time_seconds']}s, "

@@ -426,7 +426,8 @@
                             Layer <span x-text="machineSettings.layer_height"></span>mm •
                             Infill <span x-text="machineSettings.infill_density"></span>% (<span x-text="machineSettings.infill_pattern"></span>) •
                             Walls <span x-text="machineSettings.wall_count"></span> •
-                            Supports <span x-text="machineSettings.supports ? 'On' : 'Off'"></span>
+                            Supports <span x-text="machineSettings.supports ? 'On' : 'Off'"></span> •
+                            Prime Tower <span x-text="machineSettings.enable_prime_tower ? 'On' : 'Off'"></span>
                         </p>
                     </div>
 
@@ -518,6 +519,28 @@
                                 <label for="supports" class="ml-2 text-sm font-medium text-gray-700">
                                     Enable Support Structures
                                 </label>
+                            </div>
+
+                            <div class="pt-2 border-t border-gray-200">
+                                <div class="flex items-center mb-3">
+                                    <input type="checkbox" x-model="sliceSettings.enable_prime_tower" id="prime-tower"
+                                           class="h-4 w-4 text-blue-600 rounded">
+                                    <label for="prime-tower" class="ml-2 text-sm font-medium text-gray-700">
+                                        Enable Prime Tower
+                                    </label>
+                                </div>
+                                <div class="grid grid-cols-2 gap-4" x-show="sliceSettings.enable_prime_tower" x-cloak>
+                                    <div>
+                                        <label class="block text-xs text-gray-500 mb-1">Prime Tower Width (mm)</label>
+                                        <input type="number" min="1" x-model.number="sliceSettings.prime_tower_width" placeholder="Auto"
+                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs text-gray-500 mb-1">Prime Tower Brim Width (mm)</label>
+                                        <input type="number" min="0" x-model.number="sliceSettings.prime_tower_brim_width" placeholder="Auto"
+                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -833,6 +856,28 @@
                     <label for="supports-default" class="ml-2 text-sm font-medium text-gray-700">
                         Enable Support Structures by default
                     </label>
+                </div>
+
+                <div class="pt-2 border-t border-gray-200">
+                    <div class="flex items-center mb-3">
+                        <input type="checkbox" x-model="machineSettings.enable_prime_tower" id="prime-tower-default"
+                               class="h-4 w-4 text-blue-600 rounded">
+                        <label for="prime-tower-default" class="ml-2 text-sm font-medium text-gray-700">
+                            Enable Prime Tower by default
+                        </label>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4" x-show="machineSettings.enable_prime_tower" x-cloak>
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">Prime Tower Width (mm)</label>
+                            <input type="number" min="1" x-model.number="machineSettings.prime_tower_width" placeholder="Auto"
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">Prime Tower Brim Width (mm)</label>
+                            <input type="number" min="0" x-model.number="machineSettings.prime_tower_brim_width" placeholder="Auto"
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        </div>
+                    </div>
                 </div>
             </div>
 

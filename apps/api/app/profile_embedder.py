@@ -219,6 +219,7 @@ class ProfileEmbedder:
 
         self._sanitize_index_field(config, 'raft_first_layer_expansion', 0)
         self._sanitize_index_field(config, 'tree_support_wall_count', 0)
+        self._sanitize_index_field(config, 'prime_tower_brim_width', 0)
         self._sanitize_index_field(config, 'solid_infill_filament', 1)
         self._sanitize_index_field(config, 'sparse_infill_filament', 1)
         self._sanitize_index_field(config, 'wall_filament', 1)

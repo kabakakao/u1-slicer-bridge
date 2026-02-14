@@ -51,6 +51,9 @@ function app() {
             wall_count: 3,
             infill_pattern: 'gyroid',
             supports: false,
+            enable_prime_tower: false,
+            prime_tower_width: null,
+            prime_tower_brim_width: null,
             nozzle_temp: null,
             bed_temp: null,
             bed_type: null,
@@ -62,6 +65,9 @@ function app() {
             wall_count: 3,
             infill_pattern: 'gyroid',
             supports: false,
+            enable_prime_tower: false,
+            prime_tower_width: null,
+            prime_tower_brim_width: null,
             nozzle_temp: null,
             bed_temp: null,
             bed_type: null,
@@ -171,6 +177,9 @@ function app() {
                         wall_count: this.machineSettings.wall_count,
                         infill_pattern: this.machineSettings.infill_pattern,
                         supports: this.machineSettings.supports,
+                        enable_prime_tower: this.machineSettings.enable_prime_tower,
+                        prime_tower_width: this.machineSettings.prime_tower_width,
+                        prime_tower_brim_width: this.machineSettings.prime_tower_brim_width,
                         nozzle_temp: this.machineSettings.nozzle_temp,
                         bed_temp: this.machineSettings.bed_temp,
                         bed_type: this.machineSettings.bed_type,
@@ -224,6 +233,9 @@ function app() {
                 wall_count: this.machineSettings.wall_count,
                 infill_pattern: this.machineSettings.infill_pattern,
                 supports: this.machineSettings.supports,
+                enable_prime_tower: this.machineSettings.enable_prime_tower,
+                prime_tower_width: this.machineSettings.prime_tower_width,
+                prime_tower_brim_width: this.machineSettings.prime_tower_brim_width,
                 nozzle_temp: this.machineSettings.nozzle_temp,
                 bed_temp: this.machineSettings.bed_temp,
                 bed_type: this.machineSettings.bed_type,
@@ -651,6 +663,9 @@ function app() {
                     sliceSettings.wall_count = this.sliceSettings.wall_count;
                     sliceSettings.infill_pattern = this.sliceSettings.infill_pattern;
                     sliceSettings.supports = this.sliceSettings.supports;
+                    sliceSettings.enable_prime_tower = this.sliceSettings.enable_prime_tower;
+                    sliceSettings.prime_tower_width = this.sliceSettings.prime_tower_width;
+                    sliceSettings.prime_tower_brim_width = this.sliceSettings.prime_tower_brim_width;
                     sliceSettings.nozzle_temp = this.sliceSettings.nozzle_temp;
                     sliceSettings.bed_temp = this.sliceSettings.bed_temp;
                     sliceSettings.bed_type = this.sliceSettings.bed_type;
@@ -818,6 +833,9 @@ function app() {
             if (this.detectedColors.length === 0) return;
 
             this.selectedFilaments = [];
+            this.sliceSettings.extruder_assignments = this.detectedColors
+                .slice(0, this.maxExtruders)
+                .map((_, idx) => idx);
 
             // For each detected color, find the closest matching filament
             for (const color of this.detectedColors) {
@@ -841,6 +859,57 @@ function app() {
             }
             
             console.log('Auto-assigned filaments:', this.selectedFilaments);
+        },
+
+        /**
+         * Map detected colors to configured extruder preset slots by nearest color.
+         */
+        mapDetectedColorsToPresetSlots(colors) {
+            const presetSlots = this.extruderPresets
+                .map((preset, idx) => ({
+                    slotIdx: idx,
+                    filamentId: preset.filament_id,
+                    colorHex: preset.color_hex || '#FFFFFF',
+                }))
+                .filter((slot) => !!slot.filamentId);
+
+            if (presetSlots.length === 0) {
+                return null;
+            }
+
+            const usedSlots = new Set();
+            const assignments = [];
+            const filamentIds = [];
+            const mappedColors = [];
+
+            for (const detectedColor of colors.slice(0, this.maxExtruders)) {
+                let bestSlot = null;
+                let bestDistance = Infinity;
+
+                for (const slot of presetSlots) {
+                    if (usedSlots.has(slot.slotIdx)) continue;
+                    const distance = this.colorDistance(detectedColor, slot.colorHex);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        bestSlot = slot;
+                    }
+                }
+
+                if (!bestSlot) {
+                    return null;
+                }
+
+                usedSlots.add(bestSlot.slotIdx);
+                assignments.push(bestSlot.slotIdx);
+                filamentIds.push(bestSlot.filamentId);
+                mappedColors.push(bestSlot.colorHex);
+            }
+
+            return {
+                assignments,
+                filamentIds,
+                mappedColors,
+            };
         },
 
         /**
@@ -907,7 +976,6 @@ function app() {
 
             const limitedColors = (colors || []).slice(0, this.maxExtruders);
             const presetColors = this.extruderPresets.map((p) => p.color_hex || '#FFFFFF');
-            const presetFilaments = this.extruderPresets.map((p) => p.filament_id || null);
             this.sliceSettings.filament_colors = limitedColors.length > 0
                 ? limitedColors.map((c, idx) => presetColors[idx] || c || '#FFFFFF')
                 : [...presetColors];
@@ -928,14 +996,15 @@ function app() {
             this.multicolorNotice = null;
             this.selectedFilament = null;
 
-            const configuredPresetFilaments = presetFilaments
-                .slice(0, limitedColors.length)
-                .filter((id) => !!id);
-            if (configuredPresetFilaments.length === limitedColors.length) {
-                this.selectedFilaments = presetFilaments.slice(0, limitedColors.length);
-            } else {
-                this.autoAssignFilaments();
+            const mappedFromPresets = this.mapDetectedColorsToPresetSlots(limitedColors);
+            if (mappedFromPresets && mappedFromPresets.filamentIds.length === limitedColors.length) {
+                this.selectedFilaments = mappedFromPresets.filamentIds;
+                this.sliceSettings.extruder_assignments = mappedFromPresets.assignments;
+                this.sliceSettings.filament_colors = mappedFromPresets.mappedColors;
+                return;
             }
+
+            this.autoAssignFilaments();
         },
 
         /**
