@@ -80,6 +80,18 @@
 - **Readability improvement**: Override controls now display inline `(... printer default)` hints so users can compare quickly.
 - **Multicolour placement**: Filament/extruder override controls are shown inside job overrides, not in the detected-colors header.
 
+### Filament Library Tidy-Up (2026-02-14)
+
+- **Symptom**: Users were unsure where filament profiles came from and why unexpected material (e.g., ABS) could appear in defaults.
+- **Root causes**:
+  - API filament list was plain name-sort, so non-PLA entries could become first fallback candidates.
+  - Fallback order in frontend did not explicitly prefer PLA after preset/default lookups.
+- **Fixes**:
+  - API ordering: defaults first, then PLA-first, then name-sort.
+  - Frontend fallback order: extruder preset -> `is_default` -> first PLA -> first available.
+  - Settings UX renamed and clarified as `Filament Library` with starter-library messaging.
+- **Result**: More predictable material defaults and clearer mental model for filament source/purpose.
+
 ### Additional Prime Tower Controls (2026-02-14)
 
 - Added support for:

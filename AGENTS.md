@@ -495,6 +495,16 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Files**: `app.js`, `index.html`
 - **Result**: Clearer defaults model and faster per-job tuning with less accidental mismatch.
 
+**Tidied: Filament Library UX + Default Fallbacks**
+- **Problem**: Filament source/default behavior felt unclear, and fallback could appear to choose unexpected materials.
+- **What changed**:
+  1. `GET /filaments` ordering now prioritizes defaults and PLA entries before name-sort.
+  2. Frontend filament fallback now prefers: extruder preset -> `is_default` -> first PLA -> first available.
+  3. Settings section renamed to `Filament Library` with explicit starter-library explanation and `Initialize Starter Library` label.
+  4. Filament cards now show `Default` badge and target extruder preset slot (`E1-E4`) for clarity.
+- **Files**: `main.py`, `app.js`, `index.html`
+- **Result**: More predictable automatic filament selection and clearer understanding of where library entries come from.
+
 **Expanded: Prime Tower Defaults/Overrides**
 - **What changed**: Added additional prime tower controls in Settings + per-job overrides:
   - `prime_volume`

@@ -212,7 +212,13 @@ async def get_filaments():
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default FROM filaments ORDER BY name"
+            """
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default
+            FROM filaments
+            ORDER BY is_default DESC,
+                     CASE WHEN UPPER(material) = 'PLA' THEN 0 ELSE 1 END,
+                     name
+            """
         )
 
         filaments = [

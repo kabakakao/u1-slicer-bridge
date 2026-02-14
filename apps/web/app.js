@@ -1034,8 +1034,13 @@ function app() {
         getFallbackFilamentId() {
             const e1Preset = this.extruderPresets?.[0]?.filament_id;
             if (e1Preset) return e1Preset;
+
             const defaultFilament = this.filaments.find(f => f.is_default);
             if (defaultFilament) return defaultFilament.id;
+
+            const plaFilament = this.filaments.find(f => (f.material || '').toUpperCase() === 'PLA');
+            if (plaFilament) return plaFilament.id;
+
             return this.filaments?.[0]?.id || null;
         },
 
@@ -1107,9 +1112,21 @@ function app() {
                 this.selectedFilament = presetFilamentId;
                 return;
             }
+
             const defaultFilament = this.filaments.find(f => f.is_default);
             if (defaultFilament) {
                 this.selectedFilament = defaultFilament.id;
+                return;
+            }
+
+            const plaFilament = this.filaments.find(f => (f.material || '').toUpperCase() === 'PLA');
+            if (plaFilament) {
+                this.selectedFilament = plaFilament.id;
+                return;
+            }
+
+            if (this.filaments.length > 0) {
+                this.selectedFilament = this.filaments[0].id;
             }
         },
 
