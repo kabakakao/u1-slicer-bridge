@@ -49,6 +49,7 @@ ALTER TABLE filaments ADD COLUMN IF NOT EXISTS color_hex VARCHAR(7) DEFAULT '#FF
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS extruder_index INTEGER DEFAULT 0;
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'manual';
+ALTER TABLE filaments ADD COLUMN IF NOT EXISTS slicer_settings TEXT;  -- JSON blob of OrcaSlicer-native filament settings
 
 -- ============================================================================
 -- OLD TABLES (removed - plate-based workflow)

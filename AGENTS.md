@@ -59,7 +59,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 
 ### Slicing Controls & Profiles
 ✅ M7.2 build plate type & temperature overrides - Set bed type per filament and override temps at slice time  
-❌ M13 custom filament profiles - Upload and use user-provided filament profiles  
+✅ M13 custom filament profiles - Import/export OrcaSlicer JSON profiles with advanced slicer settings passthrough  
 ✅ M24 extruder presets - Preconfigure default slicing settings and filament color/type per extruder
 ❌ M19 slicer selection - Choose between OrcaSlicer and Snapmaker Orca for slicing
 ✅ M23 common slicing options - Allow changing wall count, infill pattern, and infill density (%)
@@ -67,7 +67,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 
-**Current:** 19.7 / 24 complete (82%)
+**Current:** 20.7 / 24 complete (86%)
 
 ---
 
@@ -153,25 +153,37 @@ Avoid:
 
 ### Regression Testing
 
-**Before submitting any changes, verify existing functionality still works:**
+**Before submitting any changes, run the automated test suite:**
 
-1. **Test the core workflow:**
-   - Upload a .3mf file → should appear in Recent Uploads
-   - Click upload → should go to Configure step
-   - Slice → should generate G-code
-   - View/Download → should work
+```bash
+# Quick smoke tests (always run, ~15 seconds, no slicer needed)
+npm run test:smoke
 
-2. **Test file management:**
-   - Checkboxes for multi-select work
-   - Shift-click for range select works
-   - Delete single file works
-   - Delete multiple selected files works
+# Run all tests (requires Docker services running with slicer)
+npm test
+```
 
-3. **Common regressions to watch for:**
-   - Click handlers broken after UI changes
-   - Event propagation issues (@click.stop)
-   - State not updating after async operations
-   - API endpoints returning wrong data types
+**When to run which tests:**
+
+| Changed files | Run these tests |
+|--------------|-----------------|
+| Any web file (`index.html`, `app.js`, `api.js`, `viewer.js`) | `npm run test:smoke` + relevant feature suite |
+| API routes or backend logic | `npm run test:smoke` + `npm run test:slice` |
+| Upload/parser changes | `npm run test:upload` + `npm run test:multiplate` |
+| Filament/preset changes | `npm run test:settings` |
+| Viewer changes | `npm run test:viewer` |
+| Multicolour/profile embedder | `npm run test:multicolour` + `npm run test:slice` |
+| File deletion or management | `npm run test:files` |
+| Any significant change | `npm test` (full suite) |
+
+**After rebuilding web container** (`docker compose build web && docker compose up -d web`), always run at least `npm run test:smoke` to verify the UI still loads.
+
+**Common regressions to watch for:**
+- Click handlers broken after UI changes
+- Event propagation issues (@click.stop)
+- State not updating after async operations
+- API endpoints returning wrong data types
+- Alpine.js x-show/x-if conditions becoming stale
 
 ---
 
@@ -621,6 +633,55 @@ Added ability to set build plate type per filament and override temperatures at 
 
 ---
 
+## Custom Filament Profiles (M13)
+
+Full import/export of OrcaSlicer-compatible filament profiles with advanced slicer settings passthrough.
+
+### Implementation
+1. **Import with Slicer Settings Passthrough**:
+   - `POST /filaments/import/preview` — Previews profile before import, reports `is_recognized`, `has_slicer_settings`, `slicer_setting_count`, `color_hex`
+   - `POST /filaments/import` — Stores profile with advanced settings JSON blob in `slicer_settings` column
+   - ~35 OrcaSlicer-native keys are recognized and stored (retraction, fan, flow, density, cost, plate temps, etc.)
+
+2. **Export**:
+   - `GET /filaments/{id}/export` — Exports OrcaSlicer-compatible JSON with stored slicer_settings merged back in
+   - Round-trip compatible: export -> re-import preserves all settings
+
+3. **Slicer Passthrough**:
+   - Both `/uploads/{id}/slice` and `/uploads/{id}/slice-plate` merge stored `slicer_settings` into `filament_settings`
+   - `_merge_slicer_settings()` helper handles multi-extruder array broadcasting
+   - Settings flow through `profile_embedder.py` into OrcaSlicer config
+   - Explicit filament_settings (temps, bed type) take priority over passthrough keys
+
+4. **Frontend**:
+   - Import preview shows color swatch, recognition status, slicer settings count badge
+   - Unrecognized profiles show amber warning
+   - Each filament card has Export button and "Slicer Settings" badge
+   - `api.exportFilamentProfile()` triggers browser download of JSON file
+
+### Passthrough Keys (~35)
+Retraction: `filament_retraction_length`, `filament_retraction_speed`, `filament_deretraction_speed`, `filament_retract_before_wipe`, `filament_retract_restart_extra`, `filament_retraction_minimum_travel`, `filament_retract_when_changing_layer`, `filament_wipe`, `filament_wipe_distance`, `filament_z_hop`, `filament_z_hop_types`
+
+Fan: `fan_max_speed`, `fan_min_speed`, `overhang_fan_speed`, `overhang_fan_threshold`, `close_fan_the_first_x_layers`, `full_fan_speed_layer`, `reduce_fan_stop_start_freq`, `additional_cooling_fan_speed`
+
+Flow/Material: `filament_max_volumetric_speed`, `filament_flow_ratio`, `filament_density`, `filament_cost`, `filament_shrink`, `slow_down_layer_time`
+
+G-code: `filament_start_gcode`, `filament_end_gcode`
+
+Plate temps: `cool_plate_temp`, `cool_plate_temp_initial_layer`, `textured_plate_temp`, `textured_plate_temp_initial_layer`, `nozzle_temperature_initial_layer`, `bed_temperature_initial_layer`, `bed_temperature_initial_layer_single`
+
+### Files Modified
+- `apps/api/app/schema.sql` — Added `slicer_settings TEXT` column
+- `apps/api/app/main.py` — Import/export endpoints, `_SLICER_PASSTHROUGH_KEYS`, parser updates
+- `apps/api/app/routes_slice.py` — `_merge_slicer_settings()` helper, both slice endpoints updated
+- `apps/web/api.js` — `exportFilamentProfile()` with browser download
+- `apps/web/app.js` — `exportFilamentProfile()` action
+- `apps/web/index.html` — Import preview enhancements, export button, slicer settings badge
+- `tests/settings.spec.ts` — Import/export test cases
+- `test-data/test-filament-profile.json` — Test fixture
+
+---
+
 ## Logging contract
 
 All subprocess output must go to `/data/logs`.
@@ -629,31 +690,84 @@ All subprocess output must go to `/data/logs`.
 
 ## Testing Strategy
 
-### Browser Testing Approach
+### Automated Tests (Playwright)
 
-**Primary: Native Browser Integration**
-- Use native browser integration for all UI testing
-- Direct DOM access for complex G-code canvas interactions
-- Better debugging of visual rendering issues
-- Simpler setup for local development
+All tests use Playwright and live in `tests/`. Config is in `playwright.config.ts`.
 
-**When to Use Native Browser:**
-- G-code viewer component testing (canvas rendering)
-- Complex UI interactions and visual validation
-- Performance profiling and debugging
-- Quick iteration during development
+**Prerequisites:** Docker services running, `npm install`, `npx playwright install chromium`.
 
-**Testing Requirements:**
-- Test multi-plate selection UI interactions
-- Validate G-code preview rendering
-- Check responsive design across viewports
-- Verify API integration from browser perspective
-- Test file upload and preview workflow
+```bash
+npm test                  # Run ALL tests
+npm run test:smoke        # Quick smoke tests (~15s, no slicer needed)
+npm run test:upload       # Upload workflow
+npm run test:slice        # Slicing end-to-end (slow, needs slicer)
+npm run test:viewer       # G-code viewer
+npm run test:multiplate   # Multi-plate detection and selection
+npm run test:multicolour  # Multicolour detection and overrides
+npm run test:settings     # Settings tab, presets, filament CRUD
+npm run test:files        # File management (delete)
+npm run test:report       # View HTML test report
+```
 
-**Test Environment:**
-- Run against `http://localhost:8080` (web container)
-- Ensure API container running on `http://localhost:8000`
-- Test with real 3MF files from `test/` directory
-- Use browser dev tools for debugging
+### Test File Structure
 
-**Note:** Existing Playwright tests remain available but native browser integration is preferred for this app's visual testing needs.
+```
+tests/
+  helpers.ts              Shared utilities (waitForApp, uploadFile, fixture, etc.)
+  smoke.spec.ts           Page load, Alpine.js init, tabs, API health
+  api.spec.ts             API endpoint availability and response shapes
+  responsive.spec.ts      Desktop/tablet/mobile viewport rendering
+  upload.spec.ts          Upload workflow (file → configure → back)
+  slicing.spec.ts         Slice end-to-end (configure → slice → complete)
+  viewer.spec.ts          G-code viewer canvas, controls, metadata API
+  multiplate.spec.ts      Multi-plate detection, plate cards, selection
+  multicolour.spec.ts     Colour detection, overrides, >4 colour guard
+  file-management.spec.ts Upload/job deletion, preview endpoints
+  settings.spec.ts        Settings tab, extruder presets, filament CRUD
+```
+
+### Test Fixtures
+
+Test 3MF files live in `test-data/`:
+
+| File | Purpose |
+|------|---------|
+| `calib-cube-10-dual-colour-merged.3mf` | Dual-colour calibration cube (fast slice, multicolour) |
+| `Dragon Scale infinity.3mf` | Multi-plate file with 3 plates |
+| `Dragon Scale infinity-1-plate-2-colours.3mf` | Single plate, 2 colours |
+| `Dragon Scale infinity-1-plate-2-colours-new-plate.3mf` | Variant for plater_name bug |
+| `Pokerchips-smaller.3mf` | Multicolour + extruder assignment |
+
+### Test Speed Categories
+
+| Suite | Speed | Needs Slicer | Coverage |
+|-------|-------|-------------|----------|
+| smoke | Fast | No | Page load, Alpine init, tabs, API health |
+| api | Fast | No | All API endpoint shapes and error handling |
+| responsive | Fast | No | 3 viewport sizes render correctly |
+| upload | Medium | No | Upload flow, configure step, navigation |
+| settings | Medium | No | Presets, filament CRUD, form interactions |
+| multicolour | Medium | No | Colour detection, overrides, fallbacks |
+| multiplate | Slow | No | Plate detection, cards, selection |
+| file-management | Medium | Yes* | Upload/job deletion lifecycle |
+| slicing | Slow | Yes | Full slice end-to-end, metadata, download |
+| viewer | Slow | Yes | Canvas rendering, layer controls, API |
+
+*file-management creates and deletes its own test data
+
+### Writing New Tests
+
+- Put new spec files in `tests/` following the `*.spec.ts` naming convention.
+- Use helpers from `tests/helpers.ts` (`waitForApp`, `uploadFile`, `getAppState`, `fixture`, `waitForSliceComplete`).
+- The UI has **no `data-testid` attributes**. Use `getByRole`, `getByText`, `getByLabel`, or `locator` with CSS selectors.
+- Alpine.js state can be inspected via `getAppState(page, 'variableName')` from helpers.
+- Tests run sequentially (`workers: 1`) since they share Docker services and DB state.
+- Slicing tests need up to 2 minutes per slice — use the 120s default timeout or `test.setTimeout()` for longer.
+
+### When to Add Tests
+
+When implementing a new feature or fixing a bug:
+1. Add test cases to the relevant existing spec file.
+2. If the feature opens a new area (e.g., print control), create a new spec file.
+3. Run at least `npm run test:smoke` before committing.
+4. Run the relevant feature suite to confirm coverage.

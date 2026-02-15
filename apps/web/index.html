@@ -965,6 +965,40 @@
             </p>
             <input id="import-filament-input" type="file" accept=".json" @change="importFilamentFromFile($event)" class="hidden">
 
+            <div x-show="importPreviewOpen && importPreviewData" x-cloak class="mb-4 p-3 border border-indigo-200 bg-indigo-50 rounded-lg">
+                <h3 class="text-sm font-medium text-indigo-900 mb-2">Import Profile Preview</h3>
+                <p class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2" x-show="importPreviewData?.preview && !importPreviewData?.preview?.is_recognized" x-cloak>
+                    This file was not recognized as an OrcaSlicer/Bambu profile. Basic settings were extracted but advanced slicer parameters may be missing.
+                </p>
+                <p class="text-xs text-indigo-800 mb-2" x-show="importPreviewData?.would_conflict">
+                    A profile with this name already exists. Import will auto-rename with a numeric suffix.
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs text-gray-700">
+                    <div class="flex items-center gap-2">
+                        <span class="font-medium">Name:</span>
+                        <span x-text="importPreviewData?.preview?.name"></span>
+                        <span x-show="importPreviewData?.preview?.color_hex"
+                              class="inline-block w-4 h-4 rounded-full border border-gray-300 flex-shrink-0"
+                              :style="`background-color: ${importPreviewData?.preview?.color_hex || '#FFFFFF'}`"></span>
+                    </div>
+                    <div><span class="font-medium">Material:</span> <span x-text="importPreviewData?.preview?.material"></span></div>
+                    <div><span class="font-medium">Nozzle:</span> <span x-text="`${importPreviewData?.preview?.nozzle_temp}°C`"></span></div>
+                    <div><span class="font-medium">Bed:</span> <span x-text="`${importPreviewData?.preview?.bed_temp}°C`"></span></div>
+                    <div><span class="font-medium">Speed:</span> <span x-text="`${importPreviewData?.preview?.print_speed} mm/s`"></span></div>
+                    <div><span class="font-medium">Bed Type:</span> <span x-text="importPreviewData?.preview?.bed_type"></span></div>
+                </div>
+                <div class="mt-2 flex items-center gap-2" x-show="importPreviewData?.preview?.has_slicer_settings" x-cloak>
+                    <span class="inline-flex items-center px-2 py-0.5 text-[10px] bg-green-100 text-green-700 rounded">
+                        <span x-text="`${importPreviewData?.preview?.slicer_setting_count || 0} advanced slicer settings`"></span>
+                    </span>
+                    <span class="text-[10px] text-gray-500">Retraction, fan, flow ratio, etc. will be passed to OrcaSlicer</span>
+                </div>
+                <div class="mt-3 flex gap-2">
+                    <button @click="confirmImportFilament()" class="px-3 py-1 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700">Import</button>
+                    <button @click="cancelImportPreview()" class="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+                </div>
+            </div>
+
             <div x-show="showFilamentForm" x-cloak class="mb-4 p-3 border border-blue-200 bg-blue-50 rounded-lg space-y-3">
                 <h3 class="text-sm font-medium text-blue-900" x-text="editingFilamentId ? 'Edit Filament' : 'Add Filament'"></h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1038,6 +1072,7 @@
                                 <span x-show="filament.is_default" class="ml-2 px-2 py-0.5 text-[10px] bg-blue-100 text-blue-700 rounded">Default</span>
                                 <span x-show="filament.source_type === 'custom'" class="ml-2 px-2 py-0.5 text-[10px] bg-indigo-100 text-indigo-700 rounded">Custom</span>
                                 <span x-show="filament.source_type === 'starter'" class="ml-2 px-2 py-0.5 text-[10px] bg-gray-200 text-gray-700 rounded">Starter</span>
+                                <span x-show="filament.has_slicer_settings" class="ml-1 px-2 py-0.5 text-[10px] bg-green-100 text-green-700 rounded">Slicer Settings</span>
                             </p>
                             <p class="text-xs text-gray-500" x-text="`${filament.material} - ${filament.nozzle_temp}°C / ${filament.bed_temp}°C - ${filament.bed_type || 'PEI'}`"></p>
                         </div>
@@ -1046,6 +1081,7 @@
                             <span class="text-[10px] text-gray-400" x-text="`E${(filament.extruder_index ?? 0) + 1} preset slot`"></span>
                             <div class="mt-1 flex gap-1 justify-end">
                                 <button x-show="!filament.is_default" @click="makeDefaultFilament(filament.id)" class="px-2 py-1 text-[10px] bg-blue-100 text-blue-700 rounded hover:bg-blue-200">Set Default</button>
+                                <button @click="exportFilamentProfile(filament.id)" class="px-2 py-1 text-[10px] bg-green-100 text-green-700 rounded hover:bg-green-200">Export</button>
                                 <button @click="startEditFilament(filament)" class="px-2 py-1 text-[10px] bg-gray-200 text-gray-700 rounded hover:bg-gray-300">Edit</button>
                                 <button @click="deleteFilament(filament.id, filament.name)" class="px-2 py-1 text-[10px] bg-red-100 text-red-700 rounded hover:bg-red-200">Delete</button>
                             </div>
@@ -1071,8 +1107,8 @@
         </div>
     </div>
 
-    <script src="api.js?v=20260214g"></script>
-    <script src="viewer.js?v=20260214g"></script>
-    <script src="app.js?v=20260214g"></script>
+    <script src="api.js?v=20260214i"></script>
+    <script src="viewer.js?v=20260214i"></script>
+    <script src="app.js?v=20260214i"></script>
 </body>
 </html>

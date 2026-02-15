@@ -56,6 +56,10 @@ Thumbs.db
 # Claude Code user-specific settings
 .claude/settings.local.json
 
+# OpenCode editor config
+.opencode/
+opencode.json
+
 # Docker
 *.log
 docker-compose.override.yml
@@ -69,9 +73,7 @@ temp/
 # Testing artifacts
 node_modules/
 test-results/
-screenshots/
 playwright-report/
-PLAYWRIGHT-TEST-REPORT.md
 
 # Old/backup files
 *_old.py

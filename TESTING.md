@@ -1,213 +1,237 @@
 # Testing Guide
 
-## Quick Test
+## Automated Tests (Playwright)
 
-1. **Download a test file** from MakerWorld:
-   - [Simple Cube](https://makerworld.com/en/models/1204272-a-simple-cube-test-print)
-   - [Test Cube with Labels](https://makerworld.com/en/models/705572-test-cube)
-   - [Calibration Cube V3](https://makerworld.com/en/models/417128-simple-calibration-cube-v3)
+### Prerequisites
 
-2. **Run the test script**:
-   ```bash
-   ./test_workflow.sh ~/Downloads/test_cube.3mf
-   ```
+- Docker services running: `docker compose up -d --build`
+- Node dependencies installed: `npm install`
+- Playwright browsers installed: `npx playwright install chromium`
 
-That's it! The script will test the full workflow automatically.
+### Running Tests
 
-## What Gets Tested
+```bash
+# Run all tests
+npm test
 
-The test script validates the complete workflow:
+# Run quick smoke tests only (no slicing, ~15 seconds)
+npm run test:smoke
+
+# Run specific test suites
+npm run test:upload        # Upload workflow
+npm run test:slice         # Slicing end-to-end (slow, requires slicer)
+npm run test:viewer        # G-code viewer rendering
+npm run test:multiplate    # Multi-plate detection and selection
+npm run test:multicolour   # Multicolour detection and overrides
+npm run test:settings      # Settings tab, presets, filament CRUD
+npm run test:files         # File management (upload/job delete)
+
+# View HTML test report
+npm run test:report
+```
+
+### Test Structure
 
 ```
-Upload 3MF → Validate Plate → Slice → G-code
+tests/
+  helpers.ts              Shared utilities (waitForApp, uploadFile, etc.)
+  smoke.spec.ts           Page load, Alpine.js init, tabs, API health
+  api.spec.ts             API endpoint availability and response shapes
+  responsive.spec.ts      Desktop/tablet/mobile viewport rendering
+  upload.spec.ts          Upload workflow (file → configure → back)
+  slicing.spec.ts         Slice end-to-end (configure → slice → complete)
+  viewer.spec.ts          G-code viewer canvas, controls, metadata
+  multiplate.spec.ts      Multi-plate detection, plate cards, selection
+  multicolour.spec.ts     Colour detection, overrides, >4 colour guard
+  file-management.spec.ts Upload/job deletion, preview endpoints
+  settings.spec.ts        Settings tab, extruder presets, filament CRUD
 ```
 
-### API Endpoints Tested
-- ✓ `POST /upload` - Upload 3MF file (validates plate bounds)
-- ✓ `GET /upload` - List uploads
-- ✓ `GET /upload/{id}` - Retrieve upload details
-- ✓ `GET /filaments` - List available filaments
-- ✓ `POST /uploads/{id}/slice` - Slice upload with settings
-- ✓ `GET /jobs/{job_id}` - Check slicing job status
-- ✓ `GET /jobs/{job_id}/download` - Download G-code
-- ✓ `GET /jobs/{job_id}/gcode/metadata` - Viewer metadata
-- ✓ `GET /jobs/{job_id}/gcode/layers` - Layer geometry
+### Test Fixtures
 
-### Validation Steps
-1. **Health Check** - API responding
-2. **Upload** - 3MF file parsed, plate bounds validated (270x270x270mm)
-3. **Filament Selection** - Choose PLA/PETG/ABS/TPU profile
-4. **Slicing** - Snapmaker OrcaSlicer generates G-code
-5. **Metadata Extraction** - Print time, filament usage, layer count
-6. **G-code Validation** - File exists and contains expected headers
-7. **Viewer Data** - Layer geometry extracted for preview
+Test 3MF files live in `test-data/`:
+
+| File | Purpose |
+|------|---------|
+| `calib-cube-10-dual-colour-merged.3mf` | Dual-colour calibration cube (fast slice, multicolour) |
+| `Dragon Scale infinity.3mf` | Multi-plate file with 3 plates |
+| `Dragon Scale infinity-1-plate-2-colours.3mf` | Single plate, 2 colours |
+| `Dragon Scale infinity-1-plate-2-colours-new-plate.3mf` | Variant for plater_name bug |
+| `Pokerchips-smaller.3mf` | Multicolour + extruder assignment |
+
+### Test Categories
+
+| Suite | Speed | Needs Slicer | What it covers |
+|-------|-------|-------------|----------------|
+| smoke | Fast | No | Page load, Alpine init, tabs, API health |
+| api | Fast | No | All API endpoint shapes and error handling |
+| responsive | Fast | No | 3 viewport sizes render correctly |
+| upload | Medium | No | Upload flow, configure step, navigation |
+| settings | Medium | No | Presets, filament CRUD, form interactions |
+| file-management | Medium | Yes* | Upload/job deletion lifecycle |
+| multiplate | Slow | No | Plate detection, cards, selection |
+| multicolour | Medium | No | Colour detection, overrides, fallbacks |
+| slicing | Slow | Yes | Full slice end-to-end, metadata, download |
+| viewer | Slow | Yes | Canvas rendering, layer controls, API |
+
+*file-management deletes test data created during the test
+
+---
 
 ## Manual Testing
 
-If you prefer to test manually with `curl`:
+### Core Workflow Regression Checklist
 
-### 1. Upload 3MF
+Before submitting changes, verify these still work:
+
+1. **Upload** - Upload a .3mf file, appears in Recent Uploads
+2. **Configure** - Click upload, reaches Configure step with filament selection
+3. **Slice** - Slice completes, G-code generated
+4. **Preview** - View G-code in 2D layer viewer, download works
+5. **File management** - Checkboxes, shift-click range select, delete single/multiple files
+6. **Multi-plate** - Upload multi-plate file, see plate cards with previews, select and slice one plate
+7. **Multicolour** - Upload multi-colour file, see detected colours, override colours, slice
+8. **Settings** - Extruder presets save/load, filament library CRUD, slicing defaults persist
+
+### Quick Manual Test
+
+1. Start services: `docker compose up -d --build`
+2. Verify health: `curl http://localhost:8000/healthz`
+3. Open http://localhost:8080
+4. Upload a `.3mf` file and walk through: Upload → Configure → Slice → Preview
+
+---
+
+## API Endpoints
+
+### Health & Status
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/healthz` | Health check |
+| GET | `/printer/status` | Moonraker printer status |
+
+### Uploads
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/upload` | Upload 3MF file (validates plate bounds) |
+| GET | `/upload` | List all uploads |
+| GET | `/upload/{id}` | Get upload details (re-validates bounds) |
+| DELETE | `/upload/{id}` | Delete upload and associated files |
+| GET | `/uploads/{id}/preview` | Get embedded 3MF preview image |
+
+### Plates (multi-plate files)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/uploads/{id}/plates` | Get plate info for multi-plate files |
+| GET | `/uploads/{id}/plates/{plate_id}/preview` | Get plate preview image |
+
+### Slicing
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/uploads/{id}/slice` | Slice full upload |
+| POST | `/uploads/{id}/slice-plate` | Slice specific plate from multi-plate file |
+
+### Jobs (sliced files)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/jobs` | List all slicing jobs |
+| GET | `/jobs/{job_id}` | Get job status and metadata |
+| GET | `/jobs/{job_id}/download` | Download G-code file |
+| GET | `/jobs/{job_id}/gcode/metadata` | Get G-code metadata (bounds, layers, tools) |
+| GET | `/jobs/{job_id}/gcode/layers` | Get layer geometry for viewer |
+| DELETE | `/jobs/{job_id}` | Delete job and G-code file |
+
+### Filaments
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/filaments` | List filament profiles |
+| POST | `/filaments` | Create filament profile |
+| PUT | `/filaments/{id}` | Update filament profile |
+| DELETE | `/filaments/{id}` | Delete filament profile |
+| POST | `/filaments/{id}/default` | Set filament as default |
+| POST | `/filaments/init-defaults` | Initialize starter filament library |
+| POST | `/filaments/import` | Import JSON filament profile |
+| POST | `/filaments/import/preview` | Preview JSON profile before import |
+
+### Presets
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/presets/extruders` | Get extruder presets and slicing defaults |
+| PUT | `/presets/extruders` | Save extruder presets and slicing defaults |
+
+---
+
+## Manual curl Examples
+
+### Upload 3MF
 ```bash
-curl -X POST http://localhost:8000/upload \
-  -F "file=@test.3mf" \
-  | jq
+curl -X POST http://localhost:8000/upload -F "file=@test.3mf" | jq
 ```
 
-**Expected output:**
-```json
-{
-  "upload_id": 1,
-  "filename": "test.3mf",
-  "file_size": 123456,
-  "objects": [
-    {
-      "name": "cube",
-      "object_id": "1",
-      "vertices": 8,
-      "triangles": 12
-    }
-  ]
-}
-```
-
-### 2. List Filaments
+### List Filaments
 ```bash
 curl http://localhost:8000/filaments | jq
 ```
 
-**Expected output:**
-```json
-{
-  "filaments": [
-    {
-      "id": 1,
-      "name": "Snapmaker Generic PLA",
-      "material": "PLA",
-      "nozzle_temp": 210,
-      "bed_temp": 60,
-      "print_speed": 60,
-      "is_default": true
-    }
-  ]
-}
-```
-
-### 3. Slice Upload
+### Slice Upload
 ```bash
-# Use upload_id from step 1
 curl -X POST http://localhost:8000/uploads/1/slice \
   -H "Content-Type: application/json" \
-  -d '{
-    "filament_id": 1,
-    "layer_height": 0.2,
-    "infill_density": 15,
-    "supports": false
-  }' \
-  | jq
+  -d '{"filament_id": 1, "layer_height": 0.2, "infill_density": 15, "supports": false}' | jq
 ```
 
-**Expected output:**
-```json
-{
-  "job_id": "slice_abc123",
-  "upload_id": 1,
-  "status": "completed",
-  "gcode_path": "/data/slices/slice_abc123.gcode",
-  "gcode_size_mb": 18.5,
-  "metadata": {
-    "estimated_time_seconds": 28800,
-    "filament_used_mm": 29900,
-    "layer_count": 158
-  }
-}
-```
-
-### 4. Download G-code
+### Download G-code
 ```bash
 curl -o output.gcode http://localhost:8000/jobs/slice_abc123/download
 ```
 
-### 5. Get Viewer Metadata
+### Get Viewer Data
 ```bash
 curl http://localhost:8000/jobs/slice_abc123/gcode/metadata | jq
+curl "http://localhost:8000/jobs/slice_abc123/gcode/layers?start=0&count=10" | jq
 ```
 
-### 6. Get Layer Data
-```bash
-curl http://localhost:8000/jobs/slice_abc123/gcode/layers?start=0&count=10 | jq
-```
+---
 
 ## Viewing Logs
 
-Check slicing logs:
 ```bash
-docker exec u1-slicer-bridge-api-1 tail -f /data/logs/slice_xyz123.log
-```
-
-Check G-code output:
-```bash
-docker exec u1-slicer-bridge-api-1 head -n 50 /data/slices/slice_xyz123.gcode
+docker logs u1-slicer-bridge-api-1                            # API logs
+docker exec u1-slicer-bridge-api-1 cat /data/logs/slice_*.log # Per-job logs
 ```
 
 ## Troubleshooting
 
 ### Upload fails with "No valid objects found"
-- File is not a valid 3MF
-- 3MF contains no meshes
+- File is not a valid 3MF or contains no meshes
 - Check logs: `docker logs u1-slicer-bridge-api-1`
 
 ### Upload shows bounds warning
 - Plate exceeds Snapmaker U1 build volume (270x270x270mm)
-- Warning returned in upload response
-- You can still attempt to slice (may fail)
+- For multi-plate files, individual plates may still fit even if combined scene exceeds bounds
 
-### Slicing fails
-- Plate exceeds build volume
-- Snapmaker OrcaSlicer error (check job logs)
-- Invalid filament_id or settings
+### Slicing fails or crashes
+- Check per-job log in `/data/logs/`
+- Multicolour files with >4 detected colours will be rejected (U1 supports max 4 extruders)
+- Some Bambu files can trigger slicer crashes on multicolour path - try single-filament mode
 
 ### Check Docker containers
 ```bash
-docker ps  # All containers should be "Up"
-docker logs u1-slicer-bridge-api-1  # API logs
+docker ps                              # All containers should be "Up"
+docker logs u1-slicer-bridge-api-1     # API logs
+docker logs u1-slicer-bridge-web-1     # Web/nginx logs
 ```
 
-### Verify Snapmaker OrcaSlicer installation
+### Verify OrcaSlicer installation
 ```bash
 docker exec u1-slicer-bridge-api-1 xvfb-run -a orca-slicer --version
+# Expected: OrcaSlicer 2.2.4
 ```
-
-**Expected output:**
-```
-OrcaSlicer 2.2.4
-```
-
-## Expected Results
-
-After a successful test run, you should have:
-1. ✅ Upload record in database with plate bounds
-2. ✅ 3MF file stored in `/data/uploads/`
-3. ✅ Slicing job record with status
-4. ✅ Valid G-code file in `/data/slices/`
-5. ✅ G-code metadata (time, filament, layers)
-6. ✅ Job log in `/data/logs/`
 
 ## Performance Benchmarks
 
 Typical timing for a simple cube:
 - Upload + validation: < 1 second
 - Slicing: 30-60 seconds (depends on complexity)
+- Multi-plate parsing: ~30 seconds for large files (3-4MB)
 - Viewer metadata extraction: 1-2 seconds
-
-## Next Steps After Testing
-
-Current status:
-1. ✅ Web UI complete (M7) - 3-step workflow at http://localhost:8080
-2. ✅ G-code preview complete - Interactive 2D layer viewer
-3. ⚠️ Moonraker integration partial (M2) - Health check only
-4. ❌ Print control not implemented (M8) - No upload/start print endpoints
-
-Next steps:
-1. Implement M8 print control (upload G-code to printer, start/stop/pause)
-2. Add WebSocket for real-time job updates (optional)
-3. Add print queue management (optional)

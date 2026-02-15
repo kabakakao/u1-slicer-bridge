@@ -139,23 +139,9 @@ docker compose build web && docker compose up -d web
 ```
 Then hard refresh browser (Ctrl+Shift+R).
 
-## Test Results
-
-### Working Features
-- ✅ Multi-plate detection (Dragon Scale infinity.3mf shows 3 plates)
-- ✅ Correct bounding box calculation (shows "Fits build volume")
-- ✅ Plate selection UI (radio buttons, selection highlighting)
-- ✅ Slice specific plate functionality
-- ✅ Existing upload selection workflow
-
-### Test Files Created
-- `test-e2e-multiplates.spec.js` - Full E2E Playwright tests
-- `test-data/Dragon Scale infinity.3mf` - Test file
-
 ## Known Limitations
 
 1. **Upload Performance**: Large multi-plate files take ~30s to parse
-2. **Playwright Upload**: File upload tests have limitations with Playwright's setInputFiles()
 
 ### Multicolour Slicing (Critical)
 
@@ -202,11 +188,8 @@ Then hard refresh browser (Ctrl+Shift+R).
 
 #### Working Theory
 - Trimesh rebuild path is stable but drops semantics needed for per-object extruder tool changes.
-- Preserving assignment metadata can work when paired with selective project-settings sanitization and Snapmaker-safe custom G-code replacement.
-
-#### Next Practical Direction
-- Continue matrix expansion with minimal, targeted metadata preservation for additional model variants.
-- Treat any run without `T1+` as failure for multicolour requests.
+- Preserving assignment metadata works when paired with selective project-settings sanitization and Snapmaker-safe custom G-code replacement.
+- This is now the production multicolour path used by `profile_embedder.py`.
 
 ### Viewer + Upload Regression Notes
 
@@ -316,3 +299,19 @@ Then hard refresh browser (Ctrl+Shift+R).
 
 - **Cause**: Frontend slot gap-fill used first global default filament (`is_default`) which could be a different material than selected filaments.
 - **Fix**: Gap-fill now prefers the first selected filament for the current slice, preventing mixed-material placeholder slots.
+
+### Custom Filament Profiles (M13) - Slicer Settings Passthrough
+
+- **Feature**: Imported OrcaSlicer JSON profiles now pass ~35 advanced slicer-native settings through to the slicing engine.
+- **Architecture**:
+  - On import: `_parse_filament_profile_payload()` extracts passthrough keys from `_SLICER_PASSTHROUGH_KEYS` set and stores them as JSON in `slicer_settings` column.
+  - On slice: `_merge_slicer_settings()` in `routes_slice.py` reads the JSON blob and merges it into `filament_settings` dict (both `/slice` and `/slice-plate` endpoints).
+  - For multi-extruder: scalar values are broadcast to arrays matching `extruder_count`.
+  - Priority: explicit filament_settings (temps, bed type) are NOT overwritten by passthrough keys.
+- **Export**: `GET /filaments/{id}/export` returns OrcaSlicer-compatible JSON with stored slicer_settings merged back in.
+- **Round-trip**: Export -> re-import preserves all stored settings.
+- **Frontend**:
+  - Import preview shows color swatch, `is_recognized` status (amber warning if unrecognized), slicer settings count badge.
+  - Each filament card shows green "Slicer Settings" badge when profile has advanced settings.
+  - Export button on each filament card triggers browser JSON download via `api.exportFilamentProfile()`.
+- **Key implementation detail**: The merge only applies the **primary filament's** (first in `filaments` list) slicer_settings. This avoids complexity when different filaments in a multi-extruder job have conflicting advanced settings.

@@ -170,6 +170,53 @@ def setup_job_logging(job_id: str) -> logging.Logger:
     return job_logger
 
 
+def _merge_slicer_settings(filament_row, filament_settings: dict, extruder_count: int, job_logger) -> None:
+    """Merge OrcaSlicer-native settings from an imported filament profile into filament_settings.
+
+    This enables M13 custom filament profiles: advanced slicer parameters (retraction,
+    fan speeds, flow ratio, etc.) stored during JSON import are passed through to the
+    slicer engine.
+
+    For multi-extruder jobs, scalar values are broadcast into arrays matching
+    extruder_count so OrcaSlicer receives properly shaped config.
+    """
+    raw = filament_row.get("slicer_settings") if hasattr(filament_row, "get") else filament_row["slicer_settings"]
+    if not raw:
+        return
+
+    try:
+        settings = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        job_logger.warning("Failed to parse slicer_settings JSON from filament profile")
+        return
+
+    if not isinstance(settings, dict) or not settings:
+        return
+
+    merged_count = 0
+    for key, value in settings.items():
+        # Skip keys already explicitly set in filament_settings (temps, bed type, etc.)
+        if key in filament_settings:
+            continue
+
+        # OrcaSlicer expects array values for multi-extruder; broadcast scalars.
+        if extruder_count > 1:
+            if isinstance(value, list):
+                # Pad or trim to extruder_count
+                if len(value) < extruder_count:
+                    value = value + [value[-1]] * (extruder_count - len(value))
+                elif len(value) > extruder_count:
+                    value = value[:extruder_count]
+            else:
+                value = [value] * extruder_count
+
+        filament_settings[key] = value
+        merged_count += 1
+
+    if merged_count > 0:
+        job_logger.info(f"Merged {merged_count} slicer-native settings from custom filament profile")
+
+
 @router.post("/uploads/{upload_id}/slice")
 async def slice_upload(upload_id: int, request: SliceRequest):
     """Slice an upload directly, preserving plate layout.
@@ -228,7 +275,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Validate all filaments exist and fetch their settings
         filament_rows = await conn.fetch(
             """
-            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, slicer_settings
             FROM filaments
             WHERE id = ANY($1)
             """,
@@ -380,6 +427,11 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Add bed type if specified in request
         if bed_type:
             filament_settings["default_bed_type"] = bed_type
+
+        # Merge slicer-native settings from imported filament profiles (M13).
+        # Only the first filament's advanced settings are applied (primary extruder).
+        primary_filament = filaments[0]
+        _merge_slicer_settings(primary_filament, filament_settings, extruder_count, job_logger)
 
         job_logger.info(f"Using temps: nozzle={nozzle_temps}, bed={bed_temps}, bed_type={bed_type}, extruders={extruder_count}")
 
@@ -696,7 +748,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         # Validate all filaments exist and fetch their settings
         filament_rows = await conn.fetch(
             """
-            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, slicer_settings
             FROM filaments
             WHERE id = ANY($1)
             """,
@@ -838,6 +890,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         # Add bed type if specified in request
         if bed_type:
             filament_settings["default_bed_type"] = bed_type
+
+        # Merge slicer-native settings from imported filament profiles (M13).
+        # Only the first filament's advanced settings are applied (primary extruder).
+        primary_filament = filaments[0]
+        _merge_slicer_settings(primary_filament, filament_settings, extruder_count, job_logger)
 
         job_logger.info(f"Using temps: nozzle={nozzle_temps}, bed={bed_temps}, bed_type={bed_type}, extruders={extruder_count}")
 

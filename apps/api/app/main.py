@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from pydantic import BaseModel
 from typing import Optional, List
 import json
@@ -120,6 +120,7 @@ class FilamentUpdate(BaseModel):
 
 async def _ensure_filament_schema(conn):
     await conn.execute("ALTER TABLE filaments ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'manual'")
+    await conn.execute("ALTER TABLE filaments ADD COLUMN IF NOT EXISTS slicer_settings TEXT")
 
 
 class ExtruderPreset(BaseModel):
@@ -233,7 +234,7 @@ async def get_filaments():
         await _ensure_filament_schema(conn)
         rows = await conn.fetch(
             """
-            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type, slicer_settings
             FROM filaments
             ORDER BY is_default DESC,
                      CASE WHEN UPPER(material) = 'PLA' THEN 0 ELSE 1 END,
@@ -254,6 +255,7 @@ async def get_filaments():
                 "extruder_index": row["extruder_index"] or 0,
                 "is_default": row["is_default"],
                 "source_type": row["source_type"] or "manual",
+                "has_slicer_settings": bool(row["slicer_settings"]),
             }
             for row in rows
         ]
@@ -569,8 +571,105 @@ def _extract_profile_value(data, keys: List[str], default=None):
     return default
 
 
+def _normalize_color_hex(value) -> str:
+    color_hex = str(value or "#FFFFFF").strip()
+    if not color_hex.startswith("#"):
+        color_hex = f"#{color_hex}"
+    if len(color_hex) == 4:
+        color_hex = f"#{color_hex[1]*2}{color_hex[2]*2}{color_hex[3]*2}"
+    return color_hex[:7]
+
+
+def _clamp(value: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, value))
+
+
+# OrcaSlicer filament keys that should be preserved and passed through to the slicer.
+# These control advanced behavior that basic temp/speed fields don't capture.
+_SLICER_PASSTHROUGH_KEYS = {
+    "filament_max_volumetric_speed",
+    "filament_flow_ratio",
+    "filament_density",
+    "filament_cost",
+    "filament_shrink",
+    "slow_down_layer_time",
+    "fan_max_speed",
+    "fan_min_speed",
+    "overhang_fan_speed",
+    "overhang_fan_threshold",
+    "close_fan_the_first_x_layers",
+    "full_fan_speed_layer",
+    "reduce_fan_stop_start_freq",
+    "additional_cooling_fan_speed",
+    "filament_start_gcode",
+    "filament_end_gcode",
+    "filament_retraction_length",
+    "filament_retract_before_wipe",
+    "filament_retraction_speed",
+    "filament_deretraction_speed",
+    "filament_retract_restart_extra",
+    "filament_retraction_minimum_travel",
+    "filament_retract_when_changing_layer",
+    "filament_wipe",
+    "filament_wipe_distance",
+    "filament_z_hop",
+    "filament_z_hop_types",
+    "cool_plate_temp",
+    "cool_plate_temp_initial_layer",
+    "textured_plate_temp",
+    "textured_plate_temp_initial_layer",
+    "nozzle_temperature_initial_layer",
+    "bed_temperature_initial_layer",
+    "bed_temperature_initial_layer_single",
+}
+
+
+def _parse_filament_profile_payload(file_name: str, payload: dict) -> dict:
+    root = payload.get("filament") if isinstance(payload.get("filament"), dict) else payload
+
+    profile_name = str(
+        _extract_profile_value(root, ["name", "filament_name", "profile_name"], None)
+        or file_name.rsplit(".", 1)[0]
+    ).strip()
+
+    material = str(_extract_profile_value(root, ["material", "filament_type", "type"], "PLA")).strip().upper()
+
+    def _as_int(value, fallback: int) -> int:
+        try:
+            return int(float(value))
+        except Exception:
+            return fallback
+
+    nozzle_temp = _clamp(_as_int(_extract_profile_value(root, ["nozzle_temp", "nozzle_temperature", "temperature"], 210), 210), 100, 400)
+    bed_temp = _clamp(_as_int(_extract_profile_value(root, ["bed_temp", "bed_temperature"], 60), 60), 0, 150)
+    print_speed = _clamp(_as_int(_extract_profile_value(root, ["print_speed", "speed"], 60), 60), 5, 600)
+
+    # Detect whether this looks like an OrcaSlicer/Bambu profile
+    is_orca_profile = root.get("type") == "filament" or "nozzle_temperature" in root or "filament_type" in root
+
+    # Extract slicer-native settings for passthrough
+    slicer_settings = {}
+    matched_keys = 0
+    for key in _SLICER_PASSTHROUGH_KEYS:
+        if key in root and root[key] is not None:
+            slicer_settings[key] = root[key]
+            matched_keys += 1
+
+    return {
+        "name": profile_name,
+        "material": material,
+        "nozzle_temp": nozzle_temp,
+        "bed_temp": bed_temp,
+        "print_speed": print_speed,
+        "bed_type": str(_extract_profile_value(root, ["bed_type", "build_plate_type"], "PEI")).strip() or "PEI",
+        "color_hex": _normalize_color_hex(_extract_profile_value(root, ["color_hex", "color", "filament_colour"], "#FFFFFF")),
+        "slicer_settings": slicer_settings if slicer_settings else None,
+        "is_recognized": is_orca_profile or matched_keys > 0,
+    }
+
+
 @app.post("/filaments/import")
-async def import_filament_profile(file: UploadFile = File(...)):
+async def import_filament_profile(file: UploadFile = File(...), rename_on_conflict: bool = Query(True)):
     """Import a filament profile from JSON and add to library."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
@@ -587,30 +686,8 @@ async def import_filament_profile(file: UploadFile = File(...)):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Profile JSON must be an object")
 
-    root = payload.get("filament") if isinstance(payload.get("filament"), dict) else payload
-
-    profile_name = str(
-        _extract_profile_value(root, ["name", "filament_name", "profile_name"], None)
-        or file.filename.rsplit(".", 1)[0]
-    ).strip()
-
-    material = str(_extract_profile_value(root, ["material", "filament_type", "type"], "PLA")).strip().upper()
-    def _as_int(value, fallback: int) -> int:
-        try:
-            return int(float(value))
-        except Exception:
-            return fallback
-
-    nozzle_temp = _as_int(_extract_profile_value(root, ["nozzle_temp", "temperature", "nozzle_temperature"], 210), 210)
-    bed_temp = _as_int(_extract_profile_value(root, ["bed_temp", "bed_temperature"], 60), 60)
-    print_speed = _as_int(_extract_profile_value(root, ["print_speed", "speed"], 60), 60)
-    bed_type = str(_extract_profile_value(root, ["bed_type", "build_plate_type"], "PEI")).strip() or "PEI"
-    color_hex = str(_extract_profile_value(root, ["color_hex", "color"], "#FFFFFF")).strip()
-    if not color_hex.startswith("#"):
-        color_hex = f"#{color_hex}"
-    if len(color_hex) == 4:
-        color_hex = f"#{color_hex[1]*2}{color_hex[2]*2}{color_hex[3]*2}"
-    color_hex = color_hex[:7]
+    parsed = _parse_filament_profile_payload(file.filename, payload)
+    profile_name = parsed["name"]
 
     from db import get_pg_pool
     pool = get_pg_pool()
@@ -618,28 +695,138 @@ async def import_filament_profile(file: UploadFile = File(...)):
         await _ensure_filament_schema(conn)
 
         existing = await conn.fetchrow("SELECT id FROM filaments WHERE name = $1", profile_name)
-        if existing:
+        if existing and not rename_on_conflict:
             raise HTTPException(status_code=409, detail="A filament with this profile name already exists")
+
+        if existing and rename_on_conflict:
+            base_name = profile_name
+            suffix = 2
+            while True:
+                candidate = f"{base_name} ({suffix})"
+                candidate_exists = await conn.fetchrow("SELECT id FROM filaments WHERE name = $1", candidate)
+                if not candidate_exists:
+                    profile_name = candidate
+                    break
+                suffix += 1
+
+        slicer_json = json.dumps(parsed["slicer_settings"]) if parsed["slicer_settings"] else None
 
         row = await conn.fetchrow(
             """
             INSERT INTO filaments (
                 name, material, nozzle_temp, bed_temp, print_speed,
-                bed_type, color_hex, extruder_index, is_default, source_type
+                bed_type, color_hex, extruder_index, is_default, source_type, slicer_settings
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, FALSE, 'custom')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, FALSE, 'custom', $8)
             RETURNING id
             """,
             profile_name,
-            material,
-            nozzle_temp,
-            bed_temp,
-            print_speed,
-            bed_type,
-            color_hex,
+            parsed["material"],
+            parsed["nozzle_temp"],
+            parsed["bed_temp"],
+            parsed["print_speed"],
+            parsed["bed_type"],
+            parsed["color_hex"],
+            slicer_json,
         )
 
-    return {"id": row["id"], "message": "Filament profile imported", "name": profile_name}
+    return {
+        "id": row["id"],
+        "message": "Filament profile imported",
+        "name": profile_name,
+        "has_slicer_settings": bool(parsed["slicer_settings"]),
+        "is_recognized": parsed["is_recognized"],
+    }
+
+
+@app.post("/filaments/import/preview")
+async def preview_filament_profile_import(file: UploadFile = File(...)):
+    """Preview parsed filament profile values before import."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    if not file.filename.lower().endswith(".json"):
+        raise HTTPException(status_code=400, detail="Only JSON filament profiles are supported for now")
+
+    try:
+        raw = await file.read()
+        payload = json.loads(raw.decode("utf-8", errors="ignore"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON profile file")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Profile JSON must be an object")
+
+    parsed = _parse_filament_profile_payload(file.filename, payload)
+
+    from db import get_pg_pool
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
+        existing = await conn.fetchrow("SELECT id, name FROM filaments WHERE name = $1", parsed["name"])
+
+    return {
+        "preview": {
+            "name": parsed["name"],
+            "material": parsed["material"],
+            "nozzle_temp": parsed["nozzle_temp"],
+            "bed_temp": parsed["bed_temp"],
+            "print_speed": parsed["print_speed"],
+            "bed_type": parsed["bed_type"],
+            "color_hex": parsed["color_hex"],
+            "has_slicer_settings": bool(parsed["slicer_settings"]),
+            "slicer_setting_count": len(parsed["slicer_settings"]) if parsed["slicer_settings"] else 0,
+            "is_recognized": parsed["is_recognized"],
+        },
+        "would_conflict": existing is not None,
+        "conflict_name": existing["name"] if existing else None,
+    }
+
+
+@app.get("/filaments/{filament_id}/export")
+async def export_filament_profile(filament_id: int):
+    """Export a filament profile as OrcaSlicer-compatible JSON."""
+    from db import get_pg_pool
+    pool = get_pg_pool()
+
+    async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
+        row = await conn.fetchrow(
+            "SELECT name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, slicer_settings FROM filaments WHERE id = $1",
+            filament_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Filament not found")
+
+    # Build an OrcaSlicer-compatible filament profile
+    profile: dict = {
+        "type": "filament",
+        "name": row["name"],
+        "from": "u1-slicer-bridge",
+        "instantiation": "true",
+        "filament_type": [row["material"]],
+        "nozzle_temperature": [str(row["nozzle_temp"])],
+        "bed_temperature": [str(row["bed_temp"])],
+        "filament_colour": [row["color_hex"] or "#FFFFFF"],
+    }
+
+    # Merge stored slicer-native settings if present
+    if row["slicer_settings"]:
+        try:
+            stored = json.loads(row["slicer_settings"])
+            if isinstance(stored, dict):
+                profile.update(stored)
+        except Exception:
+            pass
+
+    from fastapi.responses import Response
+    return Response(
+        content=json.dumps(profile, indent=2),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{row["name"]}.json"',
+        },
+    )
 
 
 @app.post("/filaments/init-defaults")

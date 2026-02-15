@@ -33,6 +33,9 @@ function app() {
             is_default: false,
             source_type: 'manual',
         },
+        importPreviewOpen: false,
+        importPreviewData: null,
+        importPreviewFile: null,
         selectedIds: {},        // Track selected items { upload_id: bool, job_id: bool }
         lastSelectedIndex: {},  // Track last selected index per list { uploads: num, jobs: num }
         selectedUpload: null,     // Current upload object
@@ -331,13 +334,42 @@ function app() {
             if (!file) return;
 
             try {
-                await api.importFilamentProfile(file);
-                await this.loadFilaments();
+                const preview = await api.previewFilamentProfileImport(file);
+                this.importPreviewData = preview;
+                this.importPreviewFile = file;
+                this.importPreviewOpen = true;
             } catch (err) {
                 this.showError(`Failed to import filament profile: ${err.message}`);
                 console.error(err);
             } finally {
                 event.target.value = '';
+            }
+        },
+
+        cancelImportPreview() {
+            this.importPreviewOpen = false;
+            this.importPreviewData = null;
+            this.importPreviewFile = null;
+        },
+
+        async confirmImportFilament() {
+            if (!this.importPreviewFile) return;
+            try {
+                await api.importFilamentProfile(this.importPreviewFile);
+                await this.loadFilaments();
+                this.cancelImportPreview();
+            } catch (err) {
+                this.showError(`Failed to import filament profile: ${err.message}`);
+                console.error(err);
+            }
+        },
+
+        async exportFilamentProfile(filamentId) {
+            try {
+                await api.exportFilamentProfile(filamentId);
+            } catch (err) {
+                this.showError(`Failed to export filament profile: ${err.message}`);
+                console.error(err);
             }
         },
 

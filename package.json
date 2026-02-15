@@ -1,20 +1,24 @@
 {
   "name": "u1-slicer-bridge",
   "version": "1.0.0",
-  "description": "**Repository:** https://github.com/taylormadearmy/u1-slicer-bridge",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs"
-  },
+  "description": "Self-hostable Docker-first service for Snapmaker U1 3D printing",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npx playwright test",
+    "test:smoke": "npx playwright test tests/smoke.spec.ts tests/api.spec.ts tests/responsive.spec.ts",
+    "test:upload": "npx playwright test tests/upload.spec.ts",
+    "test:slice": "npx playwright test tests/slicing.spec.ts",
+    "test:viewer": "npx playwright test tests/viewer.spec.ts",
+    "test:multiplate": "npx playwright test tests/multiplate.spec.ts",
+    "test:multicolour": "npx playwright test tests/multicolour.spec.ts",
+    "test:settings": "npx playwright test tests/settings.spec.ts",
+    "test:files": "npx playwright test tests/file-management.spec.ts",
+    "test:report": "npx playwright show-report"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/taylormadearmy/u1-slicer-bridge.git"
   },
-  "keywords": [],
-  "author": "",
+  "author": "taylormadearmy",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {

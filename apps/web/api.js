@@ -282,6 +282,50 @@ class ApiClient {
     }
 
     /**
+     * Export filament profile as OrcaSlicer-compatible JSON
+     * @param {number} filamentId - The filament ID to export
+     */
+    async exportFilamentProfile(filamentId) {
+        const response = await fetch(`${this.baseUrl}/filaments/${filamentId}/export`);
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: response.statusText }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        // Trigger download as JSON file
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${data.name || 'filament'}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        return data;
+    }
+
+    /**
+     * Preview filament profile import without saving
+     */
+    async previewFilamentProfileImport(file) {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const response = await fetch(`${this.baseUrl}/filaments/import/preview`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: response.statusText }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        return await response.json();
+    }
+
+    /**
      * Get extruder presets + default slicing settings
      */
     async getExtruderPresets() {
