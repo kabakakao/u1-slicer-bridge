@@ -30,8 +30,10 @@ test.describe('API Endpoints', () => {
     const res = await request.get(`${API}/jobs`);
     expect(res.ok()).toBe(true);
     const body = await res.json();
-    // API returns a bare array, not { jobs: [...] }
-    expect(Array.isArray(body)).toBe(true);
+    expect(body).toHaveProperty('jobs');
+    expect(Array.isArray(body.jobs)).toBe(true);
+    expect(body).toHaveProperty('total');
+    expect(body).toHaveProperty('has_more');
   });
 
   test('GET /presets/extruders returns presets', async ({ request }) => {

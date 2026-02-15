@@ -6,16 +6,17 @@ export const API = 'http://localhost:8000';
 
 /** Wait for Alpine.js to fully initialize the app */
 export async function waitForApp(page: Page) {
-  await page.goto('/');
-  await page.waitForLoadState('networkidle');
-  // Wait for Alpine.js v3 to mount (uses _x_dataStack instead of v2's __x)
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  // Wait for Alpine.js v3 to mount (uses _x_dataStack instead of v2's __x).
+  // Don't rely on 'networkidle' — pages with many uploads fire 50+ preview
+  // requests that keep the network busy long after the app is interactive.
   await page.waitForFunction(() => {
     const body = document.querySelector('body');
     return body && (
       (body as any)._x_dataStack !== undefined ||
       (body as any).__x !== undefined
     );
-  }, { timeout: 10_000 });
+  }, undefined, { timeout: 15_000 });
 }
 
 /** Get Alpine.js app state */
@@ -44,7 +45,9 @@ export async function uploadFile(page: Page, fixtureName: string) {
   const filePath = fixture(fixtureName);
   const fileInput = page.locator('input[type="file"][accept=".3mf"]');
   await fileInput.setInputFiles(filePath);
-  // Wait for upload to complete and move to configure step
+  // Wait for upload to complete and move to configure step.
+  // Large multi-plate files (e.g. Dragon Scale 3.6MB) need ~40s for
+  // server-side parsing + per-plate validation, so allow 60s.
   await page.waitForFunction((expected) => {
     const body = document.querySelector('body') as any;
     if (body?._x_dataStack) {
@@ -53,14 +56,24 @@ export async function uploadFile(page: Page, fixtureName: string) {
       }
     }
     return body?.__x?.$data?.currentStep === expected;
-  }, 'configure', { timeout: 30_000 });
+  }, 'configure', { timeout: 60_000 });
 }
 
 /** Navigate to the configure step for an already-uploaded file by filename */
 export async function selectUploadByName(page: Page, filename: string) {
-  // Find the upload row containing this filename and click its Slice button
+  // Wait for the uploads list to be populated (API fetch after Alpine init)
+  await page.waitForFunction(() => {
+    const body = document.querySelector('body') as any;
+    if (body?._x_dataStack) {
+      for (const scope of body._x_dataStack) {
+        if ('uploads' in scope) return scope.uploads?.length > 0;
+      }
+    }
+    return false;
+  }, undefined, { timeout: 30_000 });
+  // Find the upload row containing this filename and click it
   const row = page.locator(`text=${filename}`).first();
-  await expect(row).toBeVisible({ timeout: 5_000 });
+  await expect(row).toBeVisible({ timeout: 10_000 });
   // Click the row to select it — the row itself is clickable
   await row.click();
   // Wait for configure step

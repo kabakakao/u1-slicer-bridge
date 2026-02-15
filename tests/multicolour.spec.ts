@@ -50,7 +50,7 @@ test.describe('Multicolour Support', () => {
         }
       }
       return false;
-    }, { timeout: 60_000 });
+    }, undefined, { timeout: 60_000 });
 
     const notice = await getAppState(page, 'multicolorNotice');
     const colors = await getAppState(page, 'detectedColors') as string[];

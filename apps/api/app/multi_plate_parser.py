@@ -72,15 +72,73 @@ def parse_multi_plate_3mf(file_path: Path) -> Tuple[List[PlateInfo], bool]:
                 "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
             }
             
-            # Build object ID -> name map from resources (if available)
+            # --- Bambu metadata: plate names and object names ---
+            # model_settings.config has <plate> elements with plater_name
+            # and <object> elements with name metadata.
+            bambu_plate_names: Dict[int, str] = {}  # plater_id -> plater_name
+            bambu_object_names: Dict[str, str] = {}  # object id -> name
+            try:
+                if "Metadata/model_settings.config" in zf.namelist():
+                    ms_root = ET.fromstring(zf.read("Metadata/model_settings.config"))
+                    for plate_elem in ms_root.findall("plate"):
+                        pid_meta = plate_elem.find("metadata[@key='plater_id']")
+                        pname_meta = plate_elem.find("metadata[@key='plater_name']")
+                        if pid_meta is not None and pname_meta is not None:
+                            pid = int(pid_meta.get("value", "0"))
+                            pname = (pname_meta.get("value") or "").strip()
+                            if pid and pname:
+                                bambu_plate_names[pid] = pname
+                    for obj_elem in ms_root.findall("object"):
+                        oid = obj_elem.get("id")
+                        name_meta = obj_elem.find("metadata[@key='name']")
+                        if oid and name_meta is not None:
+                            oname = (name_meta.get("value") or "").strip()
+                            if oname:
+                                bambu_object_names[oid] = oname
+                    if bambu_plate_names:
+                        logger.info(f"Bambu plate names: {bambu_plate_names}")
+                    if bambu_object_names:
+                        logger.info(f"Bambu object names: {bambu_object_names}")
+            except Exception as e:
+                logger.debug(f"Could not parse model_settings.config: {e}")
+
+            # Build object ID -> name map from 3MF resources (fallback)
             object_names: Dict[str, str] = {}
             resources = root.find("m:resources", ns)
             if resources is not None:
+                p_ns_uri = ns["p"]
                 for obj in resources.findall("m:object", ns):
                     obj_id = obj.get("id")
                     obj_name = (obj.get("name") or "").strip()
                     if obj_id and obj_name:
                         object_names[obj_id] = obj_name
+                    elif obj_id:
+                        # Bambu exports: container objects have no name attr;
+                        # resolve from component p:path sub-model references.
+                        components = obj.find("m:components", ns)
+                        if components is not None:
+                            for comp in components.findall("m:component", ns):
+                                p_path = comp.get(f"{{{p_ns_uri}}}path")
+                                if not p_path:
+                                    continue
+                                ref_path = p_path.lstrip("/")
+                                try:
+                                    ref_xml = zf.read(ref_path)
+                                    ref_root = ET.fromstring(ref_xml)
+                                    ref_resources = ref_root.find("m:resources", ns)
+                                    if ref_resources is not None:
+                                        for ref_obj in ref_resources.findall("m:object", ns):
+                                            ref_name = (ref_obj.get("name") or "").strip()
+                                            if ref_name:
+                                                object_names[obj_id] = ref_name
+                                                break
+                                except Exception:
+                                    pass
+                                if obj_id not in object_names:
+                                    stem = Path(p_path).stem
+                                    if stem:
+                                        object_names[obj_id] = stem
+                                break  # first component is enough
 
             # Find build section which contains plate items
             build = root.find("m:build", ns)
@@ -117,12 +175,20 @@ def parse_multi_plate_3mf(file_path: Path) -> Tuple[List[PlateInfo], bool]:
                     logger.warning(f"Invalid transform matrix for plate {i+1} (got {len(transform_values)} values), using identity")
                     transform_values = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0]
                 
+                # Name priority: Bambu plate name > Bambu object name > 3MF object name > "Plate N"
+                plate_num = i + 1
+                resolved_name = (
+                    bambu_plate_names.get(plate_num)
+                    or bambu_object_names.get(object_id)
+                    or object_names.get(object_id)
+                    or f"Plate {plate_num}"
+                )
                 plate = PlateInfo(
-                    plate_id=i + 1,  # 1-based plate numbering
+                    plate_id=plate_num,
                     object_id=object_id,
                     transform=transform_values,
                     printable=printable,
-                    plate_name=object_names.get(object_id, f"Plate {i + 1}")
+                    plate_name=resolved_name
                 )
                 plates.append(plate)
                 

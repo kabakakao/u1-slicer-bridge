@@ -9,7 +9,7 @@ import zipfile
 import mimetypes
 from pathlib import Path
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from typing import Optional, List, Dict
@@ -20,7 +20,7 @@ from slicer import OrcaSlicer, SlicingError
 from profile_embedder import ProfileEmbedder, ProfileEmbedError
 from multi_plate_parser import parse_multi_plate_3mf, extract_plate_objects, get_plate_bounds
 from plate_validator import PlateValidator
-from parser_3mf import detect_colors_from_3mf, detect_active_extruders_from_3mf
+from parser_3mf import detect_colors_from_3mf, detect_active_extruders_from_3mf, detect_colors_per_plate
 
 
 router = APIRouter(tags=["slicing"])
@@ -1186,21 +1186,35 @@ async def get_upload_plates(upload_id: int):
                 "plates": []
             }
 
-        # Get validation info for each plate
+        # Get validation info and per-plate colors
         printer_profile = get_printer_profile("snapmaker_u1")
         validator = PlateValidator(printer_profile)
         preview_assets = _index_preview_assets(source_3mf)
         preview_map_obj = preview_assets.get("by_plate")
         preview_map: Dict[int, str] = preview_map_obj if isinstance(preview_map_obj, dict) else {}
         has_generic_preview = isinstance(preview_assets.get("best"), str)
-        
+
+        # Per-plate color detection (falls back to global colors)
+        try:
+            colors_per_plate = detect_colors_per_plate(source_3mf)
+        except Exception:
+            colors_per_plate = {}
+        global_colors: List[str] = []
+        if not colors_per_plate:
+            try:
+                global_colors = detect_colors_from_3mf(source_3mf)
+            except Exception:
+                pass
+
         plate_info = []
         for plate in plates:
             try:
                 validation = validator.validate_3mf_bounds(source_3mf, plate.plate_id)
                 
                 plate_dict = plate.to_dict()
+                plate_colors = colors_per_plate.get(plate.plate_id, global_colors)
                 plate_dict.update({
+                    "detected_colors": plate_colors,
                     "preview_url": (
                         f"/api/uploads/{upload_id}/plates/{plate.plate_id}/preview"
                         if plate.plate_id in preview_map
@@ -1213,11 +1227,13 @@ async def get_upload_plates(upload_id: int):
                     }
                 })
                 plate_info.append(plate_dict)
-                
+
             except Exception as e:
                 logger.error(f"Failed to validate plate {plate.plate_id}: {str(e)}")
                 plate_dict = plate.to_dict()
+                plate_colors = colors_per_plate.get(plate.plate_id, global_colors)
                 plate_dict.update({
+                    "detected_colors": plate_colors,
                     "preview_url": (
                         f"/api/uploads/{upload_id}/plates/{plate.plate_id}/preview"
                         if plate.plate_id in preview_map
@@ -1609,12 +1625,18 @@ def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
 
 
 @router.get("/jobs")
-async def list_all_jobs():
+async def list_all_jobs(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
     """List all slicing jobs with upload information."""
     pool = get_pg_pool()
     async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            "SELECT COUNT(*) FROM slicing_jobs sj JOIN uploads u ON sj.upload_id = u.id"
+        )
         jobs = await conn.fetch("""
-            SELECT 
+            SELECT
                 sj.job_id,
                 sj.upload_id,
                 u.filename,
@@ -1628,9 +1650,10 @@ async def list_all_jobs():
             FROM slicing_jobs sj
             JOIN uploads u ON sj.upload_id = u.id
             ORDER BY sj.completed_at DESC NULLS LAST
-        """)
-        
-        return [{
+            LIMIT $1 OFFSET $2
+        """, limit, offset)
+
+        job_list = [{
             "job_id": job["job_id"],
             "upload_id": job["upload_id"],
             "filename": job["filename"],
@@ -1642,6 +1665,14 @@ async def list_all_jobs():
             "started_at": job["started_at"].isoformat() if job["started_at"] else None,
             "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None
         } for job in jobs]
+
+        return {
+            "jobs": job_list,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + limit < total,
+        }
 
 
 @router.delete("/jobs/{job_id}")

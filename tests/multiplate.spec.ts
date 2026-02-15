@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, getAppState, API, apiUpload } from './helpers';
+import { waitForApp, uploadFile, selectUploadByName, getAppState, API, apiUpload } from './helpers';
 
 test.describe('Multi-Plate Support', () => {
   test.beforeEach(async ({ page }) => {
@@ -13,7 +13,8 @@ test.describe('Multi-Plate Support', () => {
   });
 
   test('plate selection cards are shown for multi-plate files', async ({ page }) => {
-    await uploadFile(page, 'Dragon Scale infinity.3mf');
+    // Reuse the Dragon Scale upload from previous test (server retains uploads)
+    await selectUploadByName(page, 'Dragon Scale infinity.3mf');
     // Wait for plates to load using Alpine v3 API
     await page.waitForFunction(() => {
       const body = document.querySelector('body') as any;
@@ -23,7 +24,7 @@ test.describe('Multi-Plate Support', () => {
         }
       }
       return false;
-    }, { timeout: 60_000 });
+    }, undefined, { timeout: 60_000 });
 
     // Should have plate cards visible
     const plates = await getAppState(page, 'plates') as any[];
@@ -31,7 +32,8 @@ test.describe('Multi-Plate Support', () => {
   });
 
   test('clicking a plate selects it', async ({ page }) => {
-    await uploadFile(page, 'Dragon Scale infinity.3mf');
+    // Reuse the Dragon Scale upload from previous test
+    await selectUploadByName(page, 'Dragon Scale infinity.3mf');
     // Wait for plates using Alpine v3 API
     await page.waitForFunction(() => {
       const body = document.querySelector('body') as any;
@@ -41,7 +43,7 @@ test.describe('Multi-Plate Support', () => {
         }
       }
       return false;
-    }, { timeout: 60_000 });
+    }, undefined, { timeout: 60_000 });
 
     // Click first plate radio button
     const firstPlate = page.locator('input[type="radio"][name="plate"]').first();

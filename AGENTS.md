@@ -124,11 +124,14 @@ Prefer:
 - minimal moving parts
 - explicit over magic
 - worker for heavy tasks
+- **always run regression tests after code changes** (deploy first, then test)
+- offer targeted vs full test suite choice to the user
 
 Avoid:
 - new infra unless necessary
 - hidden state
 - plaintext secrets
+- skipping tests after changes (even "small" ones can break things)
 
 ### Documentation Maintenance
 
@@ -151,9 +154,20 @@ Avoid:
 
 ---
 
-### Regression Testing
+### Regression Testing (MANDATORY)
 
-**Before submitting any changes, run the automated test suite:**
+**You MUST run regression tests after every code change.** Do not skip this step. Deploy changes to Docker containers first, then test against live services.
+
+**Testing workflow:**
+1. Make code changes
+2. Deploy to Docker (`docker compose build --no-cache <service> && docker compose up -d <service>`)
+3. Run the appropriate tests (see table below)
+4. If tests fail, fix and re-run — do not leave failing tests
+
+**After making changes, offer the user a choice:**
+- "I can run the **targeted tests** (`npm run test:<suite>`) for a quick check, or the **full suite** (`npm test`, ~12 min). Which do you prefer?"
+- For very targeted changes (1-2 files, clear scope), default to running targeted tests unless the user asks for full suite.
+- For broad changes (multiple files, API + frontend, refactors), recommend running the full suite.
 
 ```bash
 # Quick smoke tests (always run, ~15 seconds, no slicer needed)
@@ -174,9 +188,15 @@ npm test
 | Viewer changes | `npm run test:viewer` |
 | Multicolour/profile embedder | `npm run test:multicolour` + `npm run test:slice` |
 | File deletion or management | `npm run test:files` |
-| Any significant change | `npm test` (full suite) |
+| Test file changes only | The affected suite(s) |
+| Any significant or cross-cutting change | `npm test` (full suite) |
 
 **After rebuilding web container** (`docker compose build web && docker compose up -d web`), always run at least `npm run test:smoke` to verify the UI still loads.
+
+**When to add new tests:**
+- Every bug fix should have a test that would have caught it
+- Every new feature should have at least one happy-path test
+- Add tests to existing spec files when possible; create new spec files only for new feature areas
 
 **Common regressions to watch for:**
 - Click handlers broken after UI changes
@@ -184,6 +204,7 @@ npm test
 - State not updating after async operations
 - API endpoints returning wrong data types
 - Alpine.js x-show/x-if conditions becoming stale
+- `page.waitForFunction(fn, arg, options)` — second param is `arg`, not `options`
 
 ---
 
@@ -784,5 +805,6 @@ Test 3MF files live in `test-data/`:
 When implementing a new feature or fixing a bug:
 1. Add test cases to the relevant existing spec file.
 2. If the feature opens a new area (e.g., print control), create a new spec file.
-3. Run at least `npm run test:smoke` before committing.
-4. Run the relevant feature suite to confirm coverage.
+3. Every bug fix should include a test that would have caught the bug.
+4. After changes, deploy to Docker and run at least the targeted test suite.
+5. Offer the user a choice: targeted tests (fast) or full suite (~12 min).

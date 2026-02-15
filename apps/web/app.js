@@ -17,7 +17,11 @@ function app() {
 
         // Data
         uploads: [],
+        uploadsTotal: 0,
+        uploadsHasMore: false,
         jobs: [],               // All slicing jobs
+        jobsTotal: 0,
+        jobsHasMore: false,
         filaments: [],
         showFilamentForm: false,
         editingFilamentId: null,
@@ -467,9 +471,25 @@ function app() {
             try {
                 const response = await api.listUploads();
                 this.uploads = response.uploads || [];
-                console.log(`Loaded ${this.uploads.length} recent uploads`);
+                this.uploadsTotal = response.total || this.uploads.length;
+                this.uploadsHasMore = response.has_more || false;
+                console.log(`Loaded ${this.uploads.length} of ${this.uploadsTotal} uploads`);
             } catch (err) {
                 this.showError('Failed to load uploads');
+                console.error(err);
+            }
+        },
+
+        async loadMoreUploads() {
+            try {
+                const response = await api.listUploads(20, this.uploads.length);
+                const more = response.uploads || [];
+                this.uploads = [...this.uploads, ...more];
+                this.uploadsTotal = response.total || this.uploads.length;
+                this.uploadsHasMore = response.has_more || false;
+                console.log(`Loaded ${more.length} more uploads (${this.uploads.length} of ${this.uploadsTotal})`);
+            } catch (err) {
+                this.showError('Failed to load more uploads');
                 console.error(err);
             }
         },
@@ -479,10 +499,27 @@ function app() {
          */
         async loadJobs() {
             try {
-                this.jobs = await api.getJobs();
-                console.log(`Loaded ${this.jobs.length} jobs`);
+                const response = await api.getJobs();
+                this.jobs = response.jobs || [];
+                this.jobsTotal = response.total || this.jobs.length;
+                this.jobsHasMore = response.has_more || false;
+                console.log(`Loaded ${this.jobs.length} of ${this.jobsTotal} jobs`);
             } catch (err) {
                 this.showError('Failed to load jobs');
+                console.error(err);
+            }
+        },
+
+        async loadMoreJobs() {
+            try {
+                const response = await api.getJobs(20, this.jobs.length);
+                const more = response.jobs || [];
+                this.jobs = [...this.jobs, ...more];
+                this.jobsTotal = response.total || this.jobs.length;
+                this.jobsHasMore = response.has_more || false;
+                console.log(`Loaded ${more.length} more jobs (${this.jobs.length} of ${this.jobsTotal})`);
+            } catch (err) {
+                this.showError('Failed to load more jobs');
                 console.error(err);
             }
         },
@@ -709,59 +746,55 @@ function app() {
          */
         async selectUpload(upload) {
             console.log('Selected upload:', upload.upload_id);
+
+            // Re-selecting the same upload preserves all configure state
+            if (this.selectedUpload && this.selectedUpload.upload_id === upload.upload_id) {
+                this.currentStep = 'configure';
+                this.activeTab = 'upload';
+                return;
+            }
+
             this.selectedUpload = upload;
-            this.selectedPlate = null;  // Reset plate selection
-            this.plates = [];          // Reset plates list
-            this.platesLoading = true; // Set loading state
-            
-            // Fetch full upload details to get detected colors and warnings
-            try {
-                const uploadDetails = await api.getUpload(upload.upload_id);
-                // Merge upload details with selected upload
+            this.selectedPlate = null;
+            this.plates = [];
+            this.platesLoading = true;
+            this.filamentOverride = false;
+            this.resetJobOverrideSettings();
+
+            // Transition immediately so the user sees the configure step
+            // with its loading indicator instead of a blank stare.
+            this.currentStep = 'configure';
+            this.activeTab = 'upload';
+
+            // Fetch upload details and plates in parallel to cut wall time.
+            const uploadId = upload.upload_id;
+            const detailsPromise = api.getUpload(uploadId).catch(e => {
+                console.warn('Could not fetch upload details:', e);
+                return null;
+            });
+            const platesPromise = api.getUploadPlates(uploadId).catch(e => {
+                console.warn('Could not load plates:', e);
+                return null;
+            });
+
+            const [uploadDetails, platesData] = await Promise.all([detailsPromise, platesPromise]);
+
+            // Apply upload details (detected colors, warnings, bounds)
+            if (uploadDetails) {
                 this.selectedUpload = { ...this.selectedUpload, ...uploadDetails };
                 this.applyDetectedColors(uploadDetails.detected_colors || []);
-            } catch (e) {
-                console.warn('Could not fetch upload details:', e);
+            } else {
                 this.applyDetectedColors([]);
             }
 
-            this.filamentOverride = false;
-            this.resetJobOverrideSettings();
-            
-            this.currentStep = 'configure';
-            this.activeTab = 'upload';
-            
-            // Try to load plates - this works for both multi-plate and single-plate files
-            // If it's multi-plate, we'll get plates data; if single, we'll get empty plates
-            try {
-                console.log('Loading plates for upload:', upload.upload_id);
-                
-                // Add timeout wrapper
-                const platesDataPromise = api.getUploadPlates(upload.upload_id);
-                const timeoutPromise = new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('API timeout')), 10000)
-                );
-                
-                const platesData = await Promise.race([platesDataPromise, timeoutPromise]);
-                console.log('Plates data received:', platesData);
-                this.platesLoading = false;
-                
-                if (platesData.is_multi_plate && platesData.plates && platesData.plates.length > 0) {
-                    // Update the selected upload with multi-plate info
-                    this.selectedUpload.is_multi_plate = true;
-                    this.selectedUpload.plate_count = platesData.plate_count;
-                    this.plates = platesData.plates;
-                    console.log(`✅ Loaded ${this.plates.length} plates for upload ${upload.upload_id}`);
-                } else {
-                    // Single plate file - that's fine
-                    this.selectedUpload.is_multi_plate = false;
-                    this.plates = [];
-                    console.log('Single plate file - no plates to load');
-                    console.log('Single plate file');
-                }
-            } catch (err) {
-                console.error('❌ Could not load plates:', err.message, err);
-                this.platesLoading = false;
+            // Apply plates data
+            this.platesLoading = false;
+            if (platesData && platesData.is_multi_plate && platesData.plates && platesData.plates.length > 0) {
+                this.selectedUpload.is_multi_plate = true;
+                this.selectedUpload.plate_count = platesData.plate_count;
+                this.plates = platesData.plates;
+                console.log(`Loaded ${this.plates.length} plates for upload ${uploadId}`);
+            } else {
                 this.selectedUpload.is_multi_plate = false;
                 this.plates = [];
             }
@@ -788,11 +821,11 @@ function app() {
                 // Auto-select the first plate that fits and is printable
                 const firstFitPlate = this.plates.find(p => p.validation && p.validation.fits && p.printable);
                 if (firstFitPlate) {
-                    this.selectedPlate = firstFitPlate.plate_id;
+                    this.selectPlate(firstFitPlate.plate_id);
                     console.log('Auto-selected first valid plate:', firstFitPlate.plate_id);
                 } else if (this.plates.length > 0) {
                     // Fallback to first plate if none fit
-                    this.selectedPlate = this.plates[0].plate_id;
+                    this.selectPlate(this.plates[0].plate_id);
                     console.log('No plates fit build volume, selected first plate:', this.selectedPlate);
                 }
             } catch (err) {
@@ -806,6 +839,11 @@ function app() {
          */
         selectPlate(plateId) {
             this.selectedPlate = plateId;
+            // Update detected colors from the selected plate's per-plate colors
+            const plate = this.plates.find(p => p.plate_id === plateId);
+            if (plate && plate.detected_colors && plate.detected_colors.length > 0) {
+                this.detectedColors = plate.detected_colors;
+            }
             console.log('Selected plate:', plateId);
         },
 
@@ -987,6 +1025,21 @@ function app() {
             this.uploadProgress = 0;
             this.uploadPhase = 'idle';
             this.resetJobOverrideSettings();
+
+            if (this.sliceInterval) {
+                clearInterval(this.sliceInterval);
+                this.sliceInterval = null;
+            }
+        },
+
+        /**
+         * Return to configure step with all settings preserved (for reslicing).
+         */
+        goBackToConfigure() {
+            this.sliceResult = null;
+            this.sliceProgress = 0;
+            this.currentStep = 'configure';
+            this.activeTab = 'upload';
 
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);

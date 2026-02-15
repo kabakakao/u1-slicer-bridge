@@ -114,8 +114,8 @@ class ApiClient {
     /**
      * List all uploads
      */
-    async listUploads() {
-        return this.fetch('/upload');
+    async listUploads(limit = 20, offset = 0) {
+        return this.fetch(`/upload?limit=${limit}&offset=${offset}`);
     }
 
     /**
@@ -391,8 +391,8 @@ class ApiClient {
      * List all slicing jobs
      * @returns {Promise<Array>}
      */
-    async getJobs() {
-        return this.fetch('/jobs');
+    async getJobs(limit = 20, offset = 0) {
+        return this.fetch(`/jobs?limit=${limit}&offset=${offset}`);
     }
 
     /**

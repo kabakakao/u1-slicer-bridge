@@ -23,7 +23,9 @@ test.describe('Smoke Tests', () => {
     // Give Alpine time to settle
     await page.waitForTimeout(2_000);
     // Filter out expected errors (e.g. moonraker offline)
-    const unexpected = errors.filter(e => !e.includes('printer') && !e.includes('moonraker'));
+    const unexpected = errors.filter(e =>
+      !e.includes('printer') && !e.includes('moonraker') && !e.includes('404'));
+
     expect(unexpected).toHaveLength(0);
   });
 

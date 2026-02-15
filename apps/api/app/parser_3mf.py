@@ -426,3 +426,101 @@ def detect_colors_from_3mf(file_path: Path) -> List[str]:
             unique_colors.append(c)
     
     return unique_colors
+
+
+def detect_colors_per_plate(file_path: Path) -> Dict[int, List[str]]:
+    """Detect colors used by each plate in a multi-plate 3MF.
+
+    Returns a dict mapping plate_id (1-based) to a list of color hex codes.
+    Empty dict if per-plate detection is not possible.
+    """
+    result: Dict[int, List[str]] = {}
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            # Get filament colour palette from project_settings
+            filament_colors: List[str] = []
+            try:
+                settings = json.loads(zf.read("Metadata/project_settings.config"))
+                filament_colors = settings.get("filament_colour", [])
+                if not isinstance(filament_colors, list):
+                    filament_colors = []
+            except (KeyError, ValueError):
+                pass
+
+            if not filament_colors:
+                return result
+
+            # Source 1: Layer tool changes (per-plate extruder indices)
+            layer_changes = detect_layer_tool_changes(file_path)
+            if layer_changes:
+                for plate_id, changes in layer_changes.items():
+                    ext_indices = {1}
+                    for ch in changes:
+                        ext_indices.add(ch.get("extruder", 1))
+                    plate_colors = []
+                    for ext in sorted(ext_indices):
+                        idx = ext - 1
+                        if 0 <= idx < len(filament_colors):
+                            c = filament_colors[idx]
+                            if c and c not in plate_colors:
+                                plate_colors.append(c)
+                    if plate_colors:
+                        result[plate_id] = plate_colors
+
+            # Source 2: Per-object extruder from model_settings.config
+            # Each <object id="N"> has <metadata key="extruder" value="M"/>
+            # Build items map plate_id → object_id, so we can get per-plate extruder.
+            if not result:
+                try:
+                    if "Metadata/model_settings.config" in zf.namelist():
+                        ms_root = ET.fromstring(zf.read("Metadata/model_settings.config"))
+                        obj_extruders: Dict[str, set] = {}
+                        for obj_elem in ms_root.findall("object"):
+                            oid = obj_elem.get("id")
+                            if not oid:
+                                continue
+                            exts: set = set()
+                            # Object-level extruder
+                            ext_meta = obj_elem.find("metadata[@key='extruder']")
+                            if ext_meta is not None:
+                                try:
+                                    exts.add(int(ext_meta.get("value", "1")))
+                                except ValueError:
+                                    pass
+                            # Part-level extruders
+                            for part in obj_elem.findall("part"):
+                                part_ext = part.find("metadata[@key='extruder']")
+                                if part_ext is not None:
+                                    try:
+                                        exts.add(int(part_ext.get("value", "1")))
+                                    except ValueError:
+                                        pass
+                            if exts:
+                                obj_extruders[oid] = exts
+
+                        # Map plates to objects via 3MF build items
+                        model_xml = zf.read("3D/3dmodel.model")
+                        root = ET.fromstring(model_xml)
+                        mns = {"m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"}
+                        build = root.find("m:build", mns)
+                        if build is not None:
+                            for i, item in enumerate(build.findall("m:item", mns)):
+                                plate_id = i + 1
+                                obj_id = item.get("objectid", "")
+                                exts = obj_extruders.get(obj_id, set())
+                                if exts:
+                                    plate_colors = []
+                                    for ext in sorted(exts):
+                                        idx = ext - 1
+                                        if 0 <= idx < len(filament_colors):
+                                            c = filament_colors[idx]
+                                            if c and c not in plate_colors:
+                                                plate_colors.append(c)
+                                    if plate_colors:
+                                        result[plate_id] = plate_colors
+                except Exception:
+                    pass
+
+    except Exception:
+        pass
+    return result

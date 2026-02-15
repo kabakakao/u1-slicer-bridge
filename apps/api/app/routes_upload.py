@@ -3,7 +3,7 @@ import uuid
 import logging
 from pathlib import Path
 from datetime import datetime
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from db import get_pg_pool
 
 logger = logging.getLogger(__name__)
@@ -273,17 +273,23 @@ async def get_upload(upload_id: int):
 
 
 @router.get("")
-async def list_uploads():
+async def list_uploads(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
     """List all uploads with plate validation status."""
     pool = get_pg_pool()
     async with pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM uploads")
         uploads = await conn.fetch(
             """
             SELECT id, filename, file_path, file_size, uploaded_at, plate_validated, bounds_warning
             FROM uploads
             ORDER BY uploaded_at DESC
-            LIMIT 50
-            """
+            LIMIT $1 OFFSET $2
+            """,
+            limit,
+            offset,
         )
 
     # Keep list endpoint fast; detailed re-validation is handled by GET /upload/{id}.
@@ -300,7 +306,11 @@ async def list_uploads():
     ]
 
     return {
-        "uploads": upload_list
+        "uploads": upload_list,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + limit < total,
     }
 
 
