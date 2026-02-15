@@ -326,8 +326,10 @@ Then hard refresh browser (Ctrl+Shift+R).
   2. `parser_3mf.py`: Added `detect_filament_count_from_3mf()` helper for downstream use.
   3. `routes_slice.py` (both endpoints): Changed `required_extruders` and `multicolor_slot_count` to use `max(len(active_extruders), len(detected_colors))` so SEMM painted colours are counted for auto-expand and validation.
 - **Result**: SpeedBoatRace now correctly reports 4 detected colours (`#FFFFFF`, `#000000`, `#0086D6`, `#A2D8E1`) and `has_multicolor: true`.
+- **Refinement**: `single_extruder_multi_material == "1"` alone is NOT sufficient — Bambu files carry this flag as machine AMS configuration even when the model is single-colour (e.g., Fiddle Balls has 10 AMS palette colours but no actual painting). The check now also requires `paint_color` attributes in the mesh triangles via `_has_paint_data()`.
 - **Key indicators of SEMM painted files**:
-  - `single_extruder_multi_material: "1"` in project settings
-  - `paint_color` attributes on mesh triangles (can be 200k+ occurrences)
+  - `single_extruder_multi_material: "1"` in project settings (necessary but not sufficient)
+  - `paint_color` attributes on mesh triangles (confirms actual painting — can be 200k+ occurrences)
   - `filament_maps` in model_settings (e.g., `"1 1 1 1"`)
   - Multiple `filament_colour` entries but only one object-level `extruder` assignment
+- **False positive case**: Fiddle Balls — 10 `filament_colour` entries, `single_extruder_multi_material: "1"`, but zero `paint_color` on any mesh triangle. These are AMS palette leftovers. Correctly falls through to assigned-extruder path (1 colour).

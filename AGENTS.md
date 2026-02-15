@@ -355,9 +355,9 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Problem**: Bambu-style painted files (e.g., SpeedBoatRace) with `paint_color` per-triangle attributes showed only 1 detected colour, hiding the multicolour UI.
 - **Root Cause**: `detect_colors_from_3mf()` early-returned with only the colour at the single object-level `extruder="1"` assignment, missing the other 3 filament colours used by the painting data.
 - **Fix**:
-  1. `parser_3mf.py`: Checks `single_extruder_multi_material == "1"` in project settings before the assigned-extruder path; when detected, returns all `filament_colour` entries.
+  1. `parser_3mf.py`: Checks `single_extruder_multi_material == "1"` AND confirms actual `paint_color` data in mesh triangles (via `_has_paint_data()`) before returning all `filament_colour` entries. The `paint_color` check is critical because `single_extruder_multi_material` alone is just AMS machine config and can be set on non-painted files (e.g., Fiddle Balls with 10 AMS palette colours but no painting).
   2. `routes_slice.py` (both endpoints): `required_extruders` and `multicolor_slot_count` now use `max(active_extruders, detected_colors)` so painted files auto-expand correctly.
-- **Result**: SpeedBoatRace now correctly reports 4 colours and `has_multicolor: true`.
+- **Result**: SpeedBoatRace correctly reports 4 colours. Fiddle Balls correctly reports 1 colour (AMS palette ignored).
 
 **Multicolour Crash Handling Update (Clear Failure Mode)**
 - **Problem**: Certain files (e.g., Dragon/Poker variants) can still segfault in Snapmaker Orca v2.2.4 when multicolour slicing is attempted.

@@ -189,6 +189,34 @@ def detect_filament_count_from_3mf(file_path: Path) -> int:
     return 0
 
 
+def _has_paint_data(zf: zipfile.ZipFile) -> bool:
+    """Check whether any .model file in the archive contains paint_color attributes.
+
+    Scans model files in chunks.  Paint data lives on ``<triangle>`` elements
+    which appear *after* ``<vertices>`` — so for large meshes the marker can be
+    several MB into the file.  We cap the scan at 32 MB per file to stay fast.
+    """
+    MAX_SCAN = 32 * 1024 * 1024  # 32 MB
+    CHUNK = 1024 * 1024          # 1 MB reads
+    needle = b"paint_color"
+    for name in zf.namelist():
+        if not name.endswith(".model"):
+            continue
+        try:
+            scanned = 0
+            with zf.open(name) as f:
+                while scanned < MAX_SCAN:
+                    chunk = f.read(CHUNK)
+                    if not chunk:
+                        break
+                    if needle in chunk:
+                        return True
+                    scanned += len(chunk)
+        except Exception:
+            continue
+    return False
+
+
 def detect_colors_from_3mf(file_path: Path) -> List[str]:
     """
     Detect colors from a .3mf file.
@@ -241,14 +269,17 @@ def detect_colors_from_3mf(file_path: Path) -> List[str]:
                 # Detect single-extruder multi-material (painted) files.
                 # These have one object-level extruder assignment but use
                 # multiple filament colours via per-triangle paint_color.
+                # IMPORTANT: single_extruder_multi_material alone is not enough —
+                # it may just be the machine AMS config.  We also require actual
+                # paint_color data in the mesh to confirm painting is used.
                 filament_colors = settings.get("filament_colour", [])
                 is_semm = str(settings.get("single_extruder_multi_material", "0")) == "1"
 
                 if is_semm and isinstance(filament_colors, list) and len(filament_colors) > 1:
-                    # Return all defined filament colours for painted files
-                    active_colors = [c for c in filament_colors if c]
-                    if active_colors:
-                        return active_colors
+                    if _has_paint_data(zf):
+                        active_colors = [c for c in filament_colors if c]
+                        if active_colors:
+                            return active_colors
 
                 # Prefer colors tied to actually assigned extruders when available.
                 if assigned_extruders:
