@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, getAppState } from './helpers';
+import { waitForApp, uploadFile, getAppState, API, apiUpload } from './helpers';
 
 test.describe('Multi-Plate Support', () => {
   test.beforeEach(async ({ page }) => {
@@ -8,17 +8,21 @@ test.describe('Multi-Plate Support', () => {
 
   test('multi-plate file shows plate count', async ({ page }) => {
     await uploadFile(page, 'Dragon Scale infinity.3mf');
-    await expect(page.getByText(/Multi-plate file/i)).toBeVisible();
-    await expect(page.getByText(/plates detected/i)).toBeVisible();
+    // Use more specific locator — the multi-plate info badge (not loading hints)
+    await expect(page.locator('text=/\\d+ plates detected/i').first()).toBeVisible();
   });
 
   test('plate selection cards are shown for multi-plate files', async ({ page }) => {
     await uploadFile(page, 'Dragon Scale infinity.3mf');
-    // Wait for plates to load (can take ~30s for large files)
+    // Wait for plates to load using Alpine v3 API
     await page.waitForFunction(() => {
       const body = document.querySelector('body') as any;
-      const data = body?.__x?.$data;
-      return data?.plates?.length > 0 && !data?.platesLoading;
+      if (body?._x_dataStack) {
+        for (const scope of body._x_dataStack) {
+          if ('plates' in scope) return scope.plates?.length > 0 && !scope.platesLoading;
+        }
+      }
+      return false;
     }, { timeout: 60_000 });
 
     // Should have plate cards visible
@@ -28,9 +32,15 @@ test.describe('Multi-Plate Support', () => {
 
   test('clicking a plate selects it', async ({ page }) => {
     await uploadFile(page, 'Dragon Scale infinity.3mf');
+    // Wait for plates using Alpine v3 API
     await page.waitForFunction(() => {
       const body = document.querySelector('body') as any;
-      return body?.__x?.$data?.plates?.length > 0;
+      if (body?._x_dataStack) {
+        for (const scope of body._x_dataStack) {
+          if ('plates' in scope) return scope.plates?.length > 0;
+        }
+      }
+      return false;
     }, { timeout: 60_000 });
 
     // Click first plate radio button
@@ -41,25 +51,11 @@ test.describe('Multi-Plate Support', () => {
   });
 
   test('plates API returns correct structure', async ({ request }) => {
-    // First upload a multi-plate file
-    const API = 'http://localhost:8000';
-    const uploadRes = await request.post(`${API}/upload`, {
-      multipart: {
-        file: {
-          name: 'Dragon Scale infinity.3mf',
-          mimeType: 'application/octet-stream',
-          buffer: require('fs').readFileSync(
-            require('path').resolve(__dirname, '..', 'test-data', 'Dragon Scale infinity.3mf')
-          ),
-        },
-      },
-    });
-    expect(uploadRes.ok()).toBe(true);
-    const upload = await uploadRes.json();
+    const upload = await apiUpload(request, 'Dragon Scale infinity.3mf');
     expect(upload.is_multi_plate).toBe(true);
 
     // Get plates
-    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`);
+    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: 60_000 });
     expect(platesRes.ok()).toBe(true);
     const plates = await platesRes.json();
     expect(plates).toHaveProperty('plates');

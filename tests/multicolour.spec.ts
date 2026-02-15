@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, getAppState } from './helpers';
+import { waitForApp, uploadFile, getAppState, API, apiUpload } from './helpers';
 
 test.describe('Multicolour Support', () => {
   test.beforeEach(async ({ page }) => {
@@ -25,11 +25,12 @@ test.describe('Multicolour Support', () => {
     const colors = await getAppState(page, 'detectedColors') as string[];
 
     if (colors.length >= 2) {
-      // Enable job overrides
-      await page.getByLabel(/Override settings for this job/i).check();
+      // Enable job overrides — checkbox is a sibling of the label, not linked via for/id
+      const overrideCheckbox = page.locator('input[type="checkbox"][x-model="useJobOverrides"]');
+      await overrideCheckbox.check();
       // Look for the filament override toggle
       const overrideBtn = page.getByRole('button', { name: /Override|Auto/i }).first();
-      if (await overrideBtn.isVisible()) {
+      if (await overrideBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
         await overrideBtn.click();
         // Should now show extruder selection dropdowns
         await expect(page.locator('select').first()).toBeVisible();
@@ -40,10 +41,15 @@ test.describe('Multicolour Support', () => {
   test('file with >4 colors shows notice and falls back to single filament', async ({ page }) => {
     // Dragon Scale has 7 metadata colors (but active colors may be <=4 after fix)
     await uploadFile(page, 'Dragon Scale infinity.3mf');
-    // Wait for plates to load
+    // Wait for plates to load using Alpine v3 API
     await page.waitForFunction(() => {
       const body = document.querySelector('body') as any;
-      return !body?.__x?.$data?.platesLoading;
+      if (body?._x_dataStack) {
+        for (const scope of body._x_dataStack) {
+          if ('platesLoading' in scope) return !scope.platesLoading;
+        }
+      }
+      return false;
     }, { timeout: 60_000 });
 
     const notice = await getAppState(page, 'multicolorNotice');
@@ -53,20 +59,7 @@ test.describe('Multicolour Support', () => {
   });
 
   test('multicolour API: upload detects colors', async ({ request }) => {
-    const API = 'http://localhost:8000';
-    const uploadRes = await request.post(`${API}/upload`, {
-      multipart: {
-        file: {
-          name: 'calib-cube-10-dual-colour-merged.3mf',
-          mimeType: 'application/octet-stream',
-          buffer: require('fs').readFileSync(
-            require('path').resolve(__dirname, '..', 'test-data', 'calib-cube-10-dual-colour-merged.3mf')
-          ),
-        },
-      },
-    });
-    expect(uploadRes.ok()).toBe(true);
-    const upload = await uploadRes.json();
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
     expect(upload).toHaveProperty('detected_colors');
     expect(upload.detected_colors.length).toBeGreaterThanOrEqual(2);
   });

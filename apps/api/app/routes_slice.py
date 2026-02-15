@@ -317,6 +317,19 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         if active_extruders:
             job_logger.info(f"Active assigned extruders: {active_extruders}")
 
+        # Auto-expand single filament to match source file's active extruder count.
+        # Prevents slicer segfault when a multi-extruder Bambu 3MF is sliced with
+        # fewer filaments than the model's assigned extruder count.
+        required_extruders = len(active_extruders) if active_extruders else 0
+        if required_extruders > 1 and len(filaments) < required_extruders and required_extruders <= 4:
+            job_logger.info(
+                f"Auto-expanding filament list from {len(filaments)} to {required_extruders} "
+                f"to match source file's active extruder assignments"
+            )
+            while len(filaments) < required_extruders:
+                filaments.append(filaments[-1])
+            filament_ids = [f["id"] for f in filaments]
+
         extruder_remap = {}
         if request.extruder_assignments and active_extruders:
             for idx, src_ext in enumerate(active_extruders):
@@ -771,6 +784,19 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         active_extruders = detect_active_extruders_from_3mf(source_3mf)
         if active_extruders:
             job_logger.info(f"Active assigned extruders: {active_extruders}")
+
+        # Auto-expand single filament to match source file's active extruder count.
+        # Prevents slicer segfault when a multi-extruder Bambu 3MF is sliced with
+        # fewer filaments than the model's assigned extruder count.
+        required_extruders = len(active_extruders) if active_extruders else 0
+        if required_extruders > 1 and len(filaments) < required_extruders and required_extruders <= 4:
+            job_logger.info(
+                f"Auto-expanding filament list from {len(filaments)} to {required_extruders} "
+                f"to match source file's active extruder assignments"
+            )
+            while len(filaments) < required_extruders:
+                filaments.append(filaments[-1])
+            filament_ids = [f["id"] for f in filaments]
 
         extruder_remap = {}
         if request.extruder_assignments and active_extruders:

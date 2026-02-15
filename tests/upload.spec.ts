@@ -18,7 +18,8 @@ test.describe('Upload Workflow', () => {
     // Go back to upload step
     await page.getByRole('button', { name: 'Back to Upload' }).click();
     await expect(page.getByRole('heading', { name: 'Recent Uploads' })).toBeVisible();
-    await expect(page.getByText('calib-cube-10-dual-colour-merged.3mf')).toBeVisible();
+    // Use .first() since many uploads may share the same filename
+    await expect(page.getByText('calib-cube-10-dual-colour-merged.3mf').first()).toBeVisible();
   });
 
   test('configure step shows filament selection', async ({ page }) => {

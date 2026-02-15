@@ -7,11 +7,15 @@
     "test:smoke": "npx playwright test tests/smoke.spec.ts tests/api.spec.ts tests/responsive.spec.ts",
     "test:upload": "npx playwright test tests/upload.spec.ts",
     "test:slice": "npx playwright test tests/slicing.spec.ts",
+    "test:slice-plate": "npx playwright test tests/slice-plate.spec.ts",
+    "test:slice-overrides": "npx playwright test tests/slice-overrides.spec.ts",
     "test:viewer": "npx playwright test tests/viewer.spec.ts",
     "test:multiplate": "npx playwright test tests/multiplate.spec.ts",
     "test:multicolour": "npx playwright test tests/multicolour.spec.ts",
+    "test:multicolour-slice": "npx playwright test tests/multicolour-slice.spec.ts",
     "test:settings": "npx playwright test tests/settings.spec.ts",
     "test:files": "npx playwright test tests/file-management.spec.ts",
+    "test:errors": "npx playwright test tests/errors.spec.ts",
     "test:report": "npx playwright show-report"
   },
   "repository": {

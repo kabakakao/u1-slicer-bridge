@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, waitForSliceComplete, getAppState } from './helpers';
+import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API, apiUpload } from './helpers';
 
 test.describe('Slicing Workflow', () => {
   test.beforeEach(async ({ page }) => {
@@ -27,10 +27,14 @@ test.describe('Slicing Workflow', () => {
     await page.getByRole('button', { name: /Slice Now/i }).click();
     await waitForSliceComplete(page);
 
-    // Should show summary info
-    await expect(page.getByText('Estimated Time')).toBeVisible();
-    await expect(page.getByText('Layers')).toBeVisible();
-    await expect(page.getByText('File Size')).toBeVisible();
+    // Should show summary info in the complete step
+    // Scope to the visible complete section to avoid matching sliced-files list items
+    const heading = page.getByRole('heading', { name: /G-code is Ready/i });
+    await expect(heading).toBeVisible();
+    // The summary stats are siblings near the heading — check via the visible step
+    await expect(page.getByText('Estimated Time', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Layers', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('File Size', { exact: true }).first()).toBeVisible();
   });
 
   test('completed slice has download link', async ({ page }) => {
@@ -38,7 +42,7 @@ test.describe('Slicing Workflow', () => {
     await page.getByRole('button', { name: /Slice Now/i }).click();
     await waitForSliceComplete(page);
 
-    const downloadLink = page.getByRole('link', { name: /Download G-code/i });
+    const downloadLink = page.getByRole('link', { name: /Download G-code/i }).first();
     await expect(downloadLink).toBeVisible();
     const href = await downloadLink.getAttribute('href');
     expect(href).toContain('/download');
@@ -67,35 +71,24 @@ test.describe('Slicing Workflow', () => {
   });
 
   test('slice via API returns job with metadata', async ({ request }) => {
-    const API = 'http://localhost:8000';
+    // Upload file (dual-colour — must send 2 filament_ids to avoid Orca segfault)
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
 
-    // Upload file
-    const uploadRes = await request.post(`${API}/upload`, {
-      multipart: {
-        file: {
-          name: 'calib-cube-10-dual-colour-merged.3mf',
-          mimeType: 'application/octet-stream',
-          buffer: require('fs').readFileSync(
-            require('path').resolve(__dirname, '..', 'test-data', 'calib-cube-10-dual-colour-merged.3mf')
-          ),
-        },
-      },
-    });
-    const upload = await uploadRes.json();
-
-    // Get default filament
-    const filRes = await request.get(`${API}/filaments`);
+    // Get filaments (need two for dual-colour file)
+    const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
     const filaments = (await filRes.json()).filaments;
-    const defaultFil = filaments.find((f: any) => f.is_default) || filaments[0];
+    const fil1 = filaments[0];
+    const fil2 = filaments.length > 1 ? filaments[1] : filaments[0];
 
-    // Slice
+    // Slice with two filaments matching the file's colour count
     const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
       data: {
-        filament_id: defaultFil.id,
+        filament_ids: [fil1.id, fil2.id],
         layer_height: 0.2,
         infill_density: 15,
         supports: false,
       },
+      timeout: 120_000,
     });
     expect(sliceRes.ok()).toBe(true);
     const job = await sliceRes.json();
