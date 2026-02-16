@@ -42,6 +42,58 @@ upload .3mf → validate plate → configure → slice → preview
 | Web | `apps/web/` | Nginx + static frontend (Alpine.js) |
 | PostgreSQL | via compose | Persistent storage for uploads, jobs, filaments, presets |
 
+## 3MF Sanitization
+
+MakerWorld/Bambu Studio 3MF files contain settings that cause OrcaSlicer validation errors or crashes. The profile embedder (`apps/api/app/profile_embedder.py`) automatically detects and fixes these before slicing.
+
+### Bambu File Detection & Geometry Rebuild
+
+Bambu Studio files use a geometry format that Snapmaker OrcaSlicer can't parse directly. When Bambu-specific metadata is detected (`slice_info.config`, `filament_sequence.json`, `model_settings.config`), the file is rebuilt with trimesh to extract clean geometry before profile embedding.
+
+### Bambu Metadata Stripping
+
+These Bambu-specific files are dropped during embed — they serve no purpose for OrcaSlicer and can cause crashes:
+
+| File | Reason |
+|------|--------|
+| `Metadata/slice_info.config` | Bambu-specific, not used by Orca |
+| `Metadata/cut_information.xml` | Bambu-specific |
+| `Metadata/filament_sequence.json` | Can crash OrcaSlicer |
+| `Metadata/plate*/top*/pick*` | Preview images, reduce file size |
+
+### Parameter Clamping
+
+Bambu exports can contain out-of-range values (typically `-1` meaning "auto") that OrcaSlicer rejects. These are clamped to safe minimums:
+
+| Parameter | Minimum | Why |
+|-----------|---------|-----|
+| `raft_first_layer_expansion` | `0` | `-1` not in valid range |
+| `tree_support_wall_count` | `0` | `-1` not in range `[0,2]` |
+| `prime_volume` | `0` | Negative values rejected |
+| `prime_tower_brim_width` | `0` | `-1` not in range `[0,2147483647]` |
+| `prime_tower_brim_chamfer` | `0` | Negative values rejected |
+| `prime_tower_brim_chamfer_max_width` | `0` | Negative values rejected |
+| `solid_infill_filament` | `1` | `0` is not a valid extruder index |
+| `sparse_infill_filament` | `1` | `0` is not a valid extruder index |
+| `wall_filament` | `1` | `0` is not a valid extruder index |
+
+### Wipe Tower Position Clamping
+
+Inherited `wipe_tower_x`/`wipe_tower_y` values can place the prime tower outside the 270mm bed. The sanitizer computes a safe range based on `prime_tower_width` + `prime_tower_brim_width` + margin and clamps both axes to keep the tower within bounds.
+
+### Model Settings Sanitization
+
+`Metadata/model_settings.config` can carry stale `plater_name` values from deleted plates in Bambu Studio. Snapmaker OrcaSlicer v2.2.4 segfaults on these — they are cleared to empty strings before slicing.
+
+### G-code Quality Defaults
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `enable_arc_fitting` | `1` | Without this, G-code is 5-6x larger (linear G1 moves instead of G2/G3 arcs) |
+| `layer_gcode` | `G92 E0` | Required for relative extruder addressing |
+| `time_lapse_gcode` | removed | Not applicable to Snapmaker U1 |
+| `machine_pause_gcode` | removed | Not applicable to Snapmaker U1 |
+
 ## Quick Start
 
 ### Prerequisites
@@ -112,6 +164,8 @@ All data is stored under `/data`:
 | M22 | Navigation consistency - Standardized actions across UI |
 | M23 | Common slicing options - Wall count, infill pattern, density |
 | M24 | Extruder presets - Default settings per extruder |
+| M13 | Custom filament profiles - JSON import/export with slicer settings passthrough |
+| M25 | API performance - Metadata caching, async slicing, batch 3MF reads |
 
 ### Not Yet Implemented
 
@@ -120,16 +174,16 @@ All data is stored under `/data`:
 | M2 | Moonraker integration (health check only, no print control) |
 | M8 | Print control via Moonraker |
 | M12 | 3D G-code viewer |
-| M13 | Custom filament profiles (JSON import foundation exists) |
 | M14 | Multi-machine support |
 | M19 | Slicer selection (OrcaSlicer vs Snapmaker Orca) |
 | M20 | G-code viewer zoom controls |
+| M26 | MakerWorld link import - Paste URL to auto-download 3MF |
 
-**Progress:** 19.7 / 24 milestones complete (82%)
+**Progress:** 21.7 / 26 milestones complete (83%)
 
 ## Non-Goals (v1)
 
-- MakerWorld scraping (use browser download)
+- MakerWorld scraping (see M26 for optional link import approach)
 - Per-object filament assignment (single filament per plate)
 - Mesh repair or geometry modifications
 - Multi-material/MMU support

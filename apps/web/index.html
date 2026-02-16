@@ -349,196 +349,232 @@
                         </div>
                     </div>
 
-                    <!-- Filament Selection -->
-                    <div class="mb-6">
-                        <!-- Detected Colors (shown when multicolor detected) -->
-                        <template x-if="detectedColors && detectedColors.length > 0">
-                            <div class="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-lg">
-                                <div class="flex items-center justify-between mb-2">
-                                    <span class="text-sm font-medium text-purple-800">Detected Colors</span>
-                                </div>
-                                <div class="flex gap-2">
-                                    <template x-for="(color, idx) in detectedColors" :key="idx">
-                                        <div class="flex items-center gap-1">
-                                            <div class="w-6 h-6 rounded-full border border-gray-300" 
+                    <!-- ▼ Accordion: Colours & Filaments -->
+                    <div class="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+                        <button @click="accordionColours = !accordionColours"
+                                class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition text-left">
+                            <span class="text-sm font-medium text-gray-700">Colours & Filaments</span>
+                            <svg :class="accordionColours ? 'rotate-180' : ''" class="w-4 h-4 text-gray-500 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                            </svg>
+                        </button>
+                        <!-- Summary when collapsed -->
+                        <div x-show="!accordionColours" class="px-4 py-2 border-t border-gray-100">
+                            <template x-if="!detectedColors || detectedColors.length === 0">
+                                <span class="text-xs text-gray-500" x-text="getFilamentById(selectedFilament)?.name || 'Select filament'"></span>
+                            </template>
+                            <template x-if="detectedColors && detectedColors.length > 0 && !multicolorNotice">
+                                <div class="flex flex-col gap-1">
+                                    <template x-for="(color, idx) in detectedColors.slice(0, 4)" :key="`sum-${idx}`">
+                                        <div class="flex items-center gap-1.5 text-xs text-gray-500">
+                                            <div class="w-3 h-3 rounded-full border border-gray-300 flex-shrink-0"
                                                  :style="`background-color: ${color}`"></div>
-                                            <span class="text-xs text-gray-600" x-text="colorName(color)"></span>
+                                            <span x-text="colorName(color)"></span>
+                                            <span class="text-gray-300">-></span>
+                                            <span x-text="`E${(sliceSettings.extruder_assignments?.[idx] ?? idx) + 1}`"></span>
+                                            <div class="w-2.5 h-2.5 rounded-full border border-gray-300 flex-shrink-0"
+                                                 :style="`background-color: ${extruderPresets[(sliceSettings.extruder_assignments?.[idx] ?? idx)]?.color_hex || '#FFFFFF'}`"></div>
+                                            <span x-text="getFilamentById(selectedFilaments?.[idx])?.name || ''"></span>
                                         </div>
                                     </template>
+                                    <div class="text-xs text-gray-400 mt-0.5"
+                                         x-text="sliceSettings.enable_prime_tower ? `Prime tower: on (${sliceSettings.prime_volume || 'auto'}ml, ${sliceSettings.prime_tower_width || 'auto'}mm)` : 'Prime tower: off'">
+                                    </div>
                                 </div>
-                                <template x-if="!multicolorNotice && detectedColors.length > 0">
-                                    <div class="mt-3 space-y-1">
-                                        <template x-for="(color, idx) in detectedColors.slice(0, 4)" :key="`auto-map-${idx}`">
-                                            <div class="text-xs text-purple-900">
-                                                <span class="font-medium" x-text="colorName(color)"></span>
-                                                <span> -> </span>
-                                                <span x-text="`E${(sliceSettings.extruder_assignments?.[idx] ?? idx) + 1}`"></span>
-                                                <span> • </span>
-                                                <span x-text="getFilamentById(selectedFilaments?.[idx])?.name || 'Unassigned'"></span>
+                            </template>
+                            <template x-if="detectedColors && detectedColors.length > 0 && multicolorNotice">
+                                <span class="text-xs text-amber-600" x-text="multicolorNotice"></span>
+                            </template>
+                        </div>
+                        <div x-show="accordionColours" x-cloak class="p-4 space-y-4">
+                            <!-- Single Filament Selection (single-color files) -->
+                            <template x-if="!detectedColors || detectedColors.length === 0">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Filament Profile</label>
+                                    <select x-model.number="selectedFilament"
+                                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                                        <template x-for="filament in filaments" :key="filament.id">
+                                            <option :value="filament.id" x-text="`${filament.name} - ${filament.material} (${filament.nozzle_temp}°C / ${filament.bed_temp}°C)`"></option>
+                                        </template>
+                                    </select>
+                                </div>
+                            </template>
+
+                            <!-- Multicolor: detected colours + auto-mapping -->
+                            <template x-if="detectedColors && detectedColors.length > 0">
+                                <div>
+                                    <div class="flex gap-2 mb-3">
+                                        <template x-for="(color, idx) in detectedColors" :key="idx">
+                                            <div class="flex items-center gap-1">
+                                                <div class="w-6 h-6 rounded-full border border-gray-300"
+                                                     :style="`background-color: ${color}`"></div>
+                                                <span class="text-xs text-gray-600" x-text="colorName(color)"></span>
                                             </div>
                                         </template>
                                     </div>
-                                </template>
-                                <template x-if="multicolorNotice">
-                                    <p class="text-xs text-amber-700 mt-2" x-text="multicolorNotice"></p>
-                                </template>
-                            </div>
-                        </template>
 
-                        <!-- Single Filament Selection (single-color files) -->
-                        <template x-if="!detectedColors || detectedColors.length === 0">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">Filament Profile</label>
-                                <select x-model.number="selectedFilament"
-                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                    <template x-for="filament in filaments" :key="filament.id">
-                                        <option :value="filament.id" x-text="`● ${filament.name} - ${filament.material} (${filament.nozzle_temp}°C / ${filament.bed_temp}°C)`"></option>
-                                    </template>
-                                </select>
-                            </div>
-                        </template>
-                    </div>
-
-                    <!-- Printer defaults summary + per-job override -->
-                    <div class="mb-6 p-4 bg-gray-50 rounded-lg">
-                        <div class="flex items-center justify-between mb-2">
-                            <h3 class="text-sm font-medium text-gray-700">Printer Defaults</h3>
-                            <button @click="openSettings()" class="text-xs text-blue-700 hover:text-blue-800 underline">
-                                Edit in Settings
-                            </button>
-                        </div>
-                        <p class="text-xs text-gray-600">
-                            Layer <span x-text="formatLayerHeight(machineSettings.layer_height)"></span>mm •
-                            Infill <span x-text="machineSettings.infill_density"></span>% (<span x-text="machineSettings.infill_pattern"></span>) •
-                            Walls <span x-text="machineSettings.wall_count"></span> •
-                            Supports <span x-text="machineSettings.supports ? 'On' : 'Off'"></span> •
-                            Prime Tower <span x-text="machineSettings.enable_prime_tower ? 'On' : 'Off'"></span>
-                        </p>
-                    </div>
-
-                    <!-- File Print Settings detected from 3MF -->
-                    <template x-if="fileSettings && Object.keys(fileSettings).length > 0">
-                        <div class="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
-                            <div class="flex items-center justify-between mb-2">
-                                <h3 class="text-sm font-medium text-amber-800">File Print Settings Detected</h3>
-                                <span class="text-[11px] text-amber-600">Applied as defaults</span>
-                            </div>
-                            <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-amber-900">
-                                <span x-show="fileSettings.enable_support !== undefined">
-                                    Supports: <strong x-text="fileSettings.enable_support ? 'On' : 'Off'"></strong>
-                                </span>
-                                <span x-show="fileSettings.support_type">
-                                    Type: <strong x-text="fileSettings.support_type"></strong>
-                                </span>
-                                <span x-show="fileSettings.support_threshold_angle !== undefined">
-                                    Angle: <strong x-text="fileSettings.support_threshold_angle + '\u00B0'"></strong>
-                                </span>
-                                <span x-show="fileSettings.brim_type">
-                                    Brim: <strong x-text="fileSettings.brim_type"></strong>
-                                </span>
-                                <span x-show="fileSettings.brim_width !== undefined">
-                                    Width: <strong x-text="fileSettings.brim_width + 'mm'"></strong>
-                                </span>
-                                <span x-show="fileSettings.brim_object_gap !== undefined">
-                                    Gap: <strong x-text="fileSettings.brim_object_gap + 'mm'"></strong>
-                                </span>
-                            </div>
-                            <p class="text-[11px] text-amber-700 mt-2">
-                                These settings were saved in the 3MF file. Use "Override settings" below to change them.
-                            </p>
-                        </div>
-                    </template>
-
-                    <div class="mb-6 p-4 border border-gray-200 rounded-lg">
-                        <div class="flex items-center justify-between">
-                            <label class="text-sm font-medium text-gray-700">Override settings for this job</label>
-                            <input type="checkbox" x-model="useJobOverrides" @change="handleJobOverrideToggle($event.target.checked)" class="h-4 w-4 text-blue-600 rounded">
-                        </div>
-
-                        <div x-show="useJobOverrides" x-cloak class="mt-4 space-y-4">
-                            <template x-if="detectedColors && detectedColors.length > 0 && !multicolorNotice">
-                                <div class="p-3 bg-purple-50 border border-purple-200 rounded-lg">
-                                    <div class="flex items-center justify-between mb-2">
-                                        <label class="text-sm font-medium text-purple-900">Filament/Extruder Override</label>
-                                        <button @click="toggleFilamentOverride()"
-                                                :class="filamentOverride ? 'bg-purple-600 text-white' : 'bg-purple-200 text-purple-800'"
-                                                class="px-3 py-1 text-xs rounded-lg transition">
-                                            <span x-text="filamentOverride ? 'Override On' : 'Use Auto Mapping'"></span>
-                                        </button>
-                                    </div>
-
-                                    <template x-if="filamentOverride">
+                                    <template x-if="!multicolorNotice">
                                         <div>
-                                            <div class="flex flex-wrap gap-2 mb-2">
-                                                <template x-for="extruderIdx in [0, 1, 2, 3]" :key="extruderIdx">
-                                                    <span class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border"
-                                                          :class="sliceSettings.extruder_assignments && sliceSettings.extruder_assignments.includes(extruderIdx) ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-gray-50 text-gray-500 border-gray-200'"
-                                                          :title="`Loaded color: ${colorName(extruderPresets[extruderIdx]?.color_hex || '#FFFFFF')}`">
-                                                        <span class="inline-block w-2 h-2 rounded-full border border-gray-300"
-                                                              :style="`background-color: ${extruderPresets[extruderIdx]?.color_hex || '#FFFFFF'}`"></span>
-                                                        <span x-text="`E${extruderIdx + 1} ${sliceSettings.extruder_assignments && sliceSettings.extruder_assignments.includes(extruderIdx) ? '(used)' : '(unused)'}`"></span>
-                                                    </span>
-                                                </template>
-                                            </div>
-                                            <div class="grid grid-cols-1 gap-2">
-                                                <template x-for="(color, idx) in detectedColors.slice(0, 4)" :key="idx">
-                                                    <div class="flex items-center gap-2 p-2 border rounded-lg bg-white">
-                                                        <input type="color"
-                                                               x-model="sliceSettings.filament_colors[idx]"
-                                                               class="w-8 h-8 rounded cursor-pointer border-0"
-                                                               title="Click to change color">
-                                                        <select :value="sliceSettings.extruder_assignments[idx]"
-                                                                @change="setExtruderAssignment(idx, Number($event.target.value))"
-                                                                class="w-28 text-xs border border-gray-300 rounded px-1 py-1 bg-white text-gray-900">
-                                                            <option value="0" x-text="`E1 (${colorName(extruderPresets[0]?.color_hex || '#FFFFFF')})`"></option>
-                                                            <option value="1" x-text="`E2 (${colorName(extruderPresets[1]?.color_hex || '#FFFFFF')})`"></option>
-                                                            <option value="2" x-text="`E3 (${colorName(extruderPresets[2]?.color_hex || '#FFFFFF')})`"></option>
-                                                            <option value="3" x-text="`E4 (${colorName(extruderPresets[3]?.color_hex || '#FFFFFF')})`"></option>
-                                                        </select>
-                                                        <select x-model.number="selectedFilaments[idx]"
-                                                                class="flex-1 text-xs border border-gray-300 rounded px-2 py-1 bg-white text-gray-900">
-                                                            <template x-for="filament in filaments" :key="filament.id">
-                                                                <option :value="filament.id"
-                                                                        x-text="`● ${filament.name} (${filament.material})`">
-                                                                </option>
-                                                            </template>
-                                                        </select>
+                                            <!-- Auto-mapping summary with extruder preset colours -->
+                                            <div class="space-y-1 mb-3">
+                                                <template x-for="(color, idx) in detectedColors.slice(0, 4)" :key="`map-${idx}`">
+                                                    <div class="flex items-center gap-2 text-xs">
+                                                        <div class="w-4 h-4 rounded-full border border-gray-300 flex-shrink-0"
+                                                             :style="`background-color: ${color}`"></div>
+                                                        <span class="font-medium text-gray-700" x-text="colorName(color)"></span>
+                                                        <span class="text-gray-400">-></span>
+                                                        <span class="font-medium" x-text="`E${(sliceSettings.extruder_assignments?.[idx] ?? idx) + 1}`"></span>
+                                                        <div class="w-3 h-3 rounded-full border border-gray-300 flex-shrink-0"
+                                                             :style="`background-color: ${extruderPresets[(sliceSettings.extruder_assignments?.[idx] ?? idx)]?.color_hex || '#FFFFFF'}`"></div>
+                                                        <span class="text-gray-500" x-text="`(${colorName(extruderPresets[(sliceSettings.extruder_assignments?.[idx] ?? idx)]?.color_hex || '#FFFFFF')})`"></span>
+                                                        <span class="text-gray-400">&#8226;</span>
+                                                        <span class="text-gray-600" x-text="getFilamentById(selectedFilaments?.[idx])?.name || 'Unassigned'"></span>
                                                     </div>
                                                 </template>
                                             </div>
-                                            <p class="text-xs text-gray-600 mt-2">Defaults come from machine preset filament loaded in each extruder slot.</p>
+
+                                            <!-- Filament mapping controls -->
+                                            <div class="p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                                                <div class="flex items-center justify-between mb-2">
+                                                    <label class="text-xs font-medium text-gray-600">Filament/Extruder Override</label>
+                                                    <template x-if="!filamentOverride">
+                                                        <button @click="toggleFilamentOverride()"
+                                                                class="text-xs text-blue-600 hover:text-blue-800 underline">
+                                                            Customise
+                                                        </button>
+                                                    </template>
+                                                    <template x-if="filamentOverride">
+                                                        <button @click="toggleFilamentOverride()"
+                                                                class="text-xs text-gray-500 hover:text-gray-700 underline">
+                                                            Reset to Auto
+                                                        </button>
+                                                    </template>
+                                                </div>
+                                                <template x-if="filamentOverride">
+                                                    <div>
+                                                        <div class="flex flex-wrap gap-2 mb-2">
+                                                            <template x-for="extruderIdx in [0, 1, 2, 3]" :key="extruderIdx">
+                                                                <span class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border"
+                                                                      :class="sliceSettings.extruder_assignments && sliceSettings.extruder_assignments.includes(extruderIdx) ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-gray-50 text-gray-500 border-gray-200'">
+                                                                    <span class="inline-block w-2 h-2 rounded-full border border-gray-300"
+                                                                          :style="`background-color: ${extruderPresets[extruderIdx]?.color_hex || '#FFFFFF'}`"></span>
+                                                                    <span x-text="`E${extruderIdx + 1} ${sliceSettings.extruder_assignments && sliceSettings.extruder_assignments.includes(extruderIdx) ? '(used)' : '(unused)'}`"></span>
+                                                                </span>
+                                                            </template>
+                                                        </div>
+                                                        <div class="grid grid-cols-1 gap-2">
+                                                            <template x-for="(color, idx) in detectedColors.slice(0, 4)" :key="idx">
+                                                                <div class="flex items-center gap-2 p-2 border rounded-lg bg-white">
+                                                                    <input type="color"
+                                                                           x-model="sliceSettings.filament_colors[idx]"
+                                                                           class="w-8 h-8 rounded cursor-pointer border-0"
+                                                                           title="Click to change color">
+                                                                    <select :value="sliceSettings.extruder_assignments[idx]"
+                                                                            @change="setExtruderAssignment(idx, Number($event.target.value))"
+                                                                            class="w-28 text-xs border border-gray-300 rounded px-1 py-1 bg-white text-gray-900">
+                                                                        <option value="0" x-text="`E1 (${colorName(extruderPresets[0]?.color_hex || '#FFFFFF')})`"></option>
+                                                                        <option value="1" x-text="`E2 (${colorName(extruderPresets[1]?.color_hex || '#FFFFFF')})`"></option>
+                                                                        <option value="2" x-text="`E3 (${colorName(extruderPresets[2]?.color_hex || '#FFFFFF')})`"></option>
+                                                                        <option value="3" x-text="`E4 (${colorName(extruderPresets[3]?.color_hex || '#FFFFFF')})`"></option>
+                                                                    </select>
+                                                                    <select x-model.number="selectedFilaments[idx]"
+                                                                            class="flex-1 text-xs border border-gray-300 rounded px-2 py-1 bg-white text-gray-900">
+                                                                        <template x-for="filament in filaments" :key="filament.id">
+                                                                            <option :value="filament.id"
+                                                                                    x-text="`${filament.name} (${filament.material})`">
+                                                                            </option>
+                                                                        </template>
+                                                                    </select>
+                                                                </div>
+                                                            </template>
+                                                        </div>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="multicolorNotice">
+                                        <p class="text-xs text-amber-700" x-text="multicolorNotice"></p>
+                                    </template>
+
+                                    <!-- Prime Tower (multicolor concern) -->
+                                    <template x-if="!multicolorNotice">
+                                        <div class="mt-4 pt-3 border-t border-gray-200">
+                                            <div class="flex items-center mb-3">
+                                                <input type="checkbox" x-model="sliceSettings.enable_prime_tower" id="prime-tower"
+                                                       class="h-4 w-4 text-blue-600 rounded">
+                                                <label for="prime-tower" class="ml-2 text-sm font-medium text-gray-700">
+                                                    Enable Prime Tower
+                                                </label>
+                                                <span class="ml-2 text-[10px] px-1.5 py-0.5 rounded"
+                                                      :class="settingSource('enable_prime_tower') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                                      x-text="settingSource('enable_prime_tower') === 'file' ? 'File' : 'Default'"></span>
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-3" x-show="sliceSettings.enable_prime_tower" x-cloak>
+                                                <div>
+                                                    <label class="block text-xs text-gray-500 mb-1">Prime Volume</label>
+                                                    <input type="number" min="0" x-model.number="sliceSettings.prime_volume" placeholder="Auto"
+                                                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                                </div>
+                                                <div>
+                                                    <label class="block text-xs text-gray-500 mb-1">Tower Width (mm)</label>
+                                                    <input type="number" min="1" x-model.number="sliceSettings.prime_tower_width" placeholder="Auto"
+                                                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                                </div>
+                                                <div>
+                                                    <label class="block text-xs text-gray-500 mb-1">Tower Brim Width (mm)</label>
+                                                    <input type="number" min="0" x-model.number="sliceSettings.prime_tower_brim_width" placeholder="Auto"
+                                                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                                </div>
+                                                <div>
+                                                    <label class="block text-xs text-gray-500 mb-1">Brim Chamfer</label>
+                                                    <select x-model="sliceSettings.prime_tower_brim_chamfer" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                                        <option :value="true">On</option>
+                                                        <option :value="false">Off</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label class="block text-xs text-gray-500 mb-1">Chamfer Max Width (mm)</label>
+                                                    <input type="number" min="0" x-model.number="sliceSettings.prime_tower_brim_chamfer_max_width" placeholder="Auto"
+                                                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                                </div>
+                                            </div>
                                         </div>
                                     </template>
                                 </div>
                             </template>
+                        </div>
+                    </div>
 
+                    <!-- ▼ Accordion: Print Settings -->
+                    <div class="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+                        <div class="flex items-center bg-gray-50">
+                            <button @click="accordionSettings = !accordionSettings"
+                                    class="flex-1 flex items-center justify-between px-4 py-3 hover:bg-gray-100 transition text-left">
+                                <span class="text-sm font-medium text-gray-700">Print Settings</span>
+                                <svg :class="accordionSettings ? 'rotate-180' : ''" class="w-4 h-4 text-gray-500 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                                </svg>
+                            </button>
+                            <button @click.stop="openSettings()" class="px-3 text-[11px] text-blue-600 hover:text-blue-800 underline">Edit Defaults</button>
+                        </div>
+                        <!-- Summary when collapsed -->
+                        <div x-show="!accordionSettings" class="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+                            <div x-text="`${sliceSettings.layer_height}mm · ${sliceSettings.infill_density}% ${sliceSettings.infill_pattern} · ${sliceSettings.wall_count} walls` + (sliceSettings.supports ? ' · supports' : '') + ` · brim: ${(sliceSettings.brim_type || 'auto').replace(/_/g, ' ')}`"></div>
+                            <div class="text-gray-400 mt-0.5" x-text="`Bed: ${sliceSettings.bed_temp || '(filament default)'}°C · Plate: ${sliceSettings.bed_type || 'filament default'}`"></div>
+                        </div>
+                        <div x-show="accordionSettings" x-cloak class="p-4 space-y-4">
+                            <!-- Layer Height -->
                             <div>
-                                <label class="block text-xs text-gray-500 mb-1">Bed Temp (°C)</label>
-                                <p class="text-[11px] text-gray-500 mb-1" x-text="printerDefaultText(machineSettings.bed_temp, '°C')"></p>
-                                <input type="number" x-model.number="sliceSettings.bed_temp" placeholder="Filament default"
-                                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                            </div>
-
-                            <div>
-                                <label class="block text-xs text-gray-500 mb-1">Build Plate Type</label>
-                                <p class="text-[11px] text-gray-500 mb-1" x-text="printerDefaultText(machineSettings.bed_type)"></p>
-                                <select x-model="sliceSettings.bed_type"
-                                        class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                                    <option :value="null">Use Filament Default</option>
-                                    <option value="PEI">PEI</option>
-                                    <option value="Glass">Glass</option>
-                                    <option value="PC">PC (Polycarbonate)</option>
-                                    <option value="FR4">FR4</option>
-                                    <option value="CF">Carbon Fiber</option>
-                                    <option value="PVA">PVA (Glue)</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">Layer Height</label>
-                                <p class="text-[11px] text-gray-500 mb-1" x-text="`${formatLayerHeight(machineSettings.layer_height)}mm (printer default)`"></p>
+                                <div class="flex items-center gap-2 mb-1">
+                                    <label class="block text-sm font-medium text-gray-700">Layer Height</label>
+                                    <span class="text-[10px] px-1.5 py-0.5 rounded"
+                                          :class="settingSource('layer_height') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                          x-text="settingSource('layer_height') === 'file' ? 'File' : 'Default'"></span>
+                                </div>
                                 <select x-model.number="sliceSettings.layer_height"
-                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg">
+                                        class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                                     <option value="0.1">0.10mm (Fine)</option>
                                     <option value="0.15">0.15mm (Standard)</option>
                                     <option value="0.2">0.20mm (Standard)</option>
@@ -547,36 +583,49 @@
                                 </select>
                             </div>
 
+                            <!-- Infill Density -->
                             <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">
-                                    Infill Density: <span x-text="sliceSettings.infill_density + '%'"></span>
-                                </label>
-                                <p class="text-[11px] text-gray-500 mb-1" x-text="`${machineSettings.infill_density}% (printer default)`"></p>
+                                <div class="flex items-center gap-2 mb-1">
+                                    <label class="block text-sm font-medium text-gray-700">
+                                        Infill Density: <span x-text="sliceSettings.infill_density + '%'"></span>
+                                    </label>
+                                    <span class="text-[10px] px-1.5 py-0.5 rounded"
+                                          :class="settingSource('infill_density') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                          x-text="settingSource('infill_density') === 'file' ? 'File' : 'Default'"></span>
+                                </div>
                                 <input type="range" x-model.number="sliceSettings.infill_density"
                                        min="0" max="100" step="5" class="w-full">
                             </div>
 
+                            <!-- Wall Count + Infill Pattern -->
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
-                                    <label class="block text-sm font-medium text-gray-700 mb-2">Wall Count</label>
-                                    <p class="text-[11px] text-gray-500 mb-1" x-text="`${machineSettings.wall_count} (printer default)`"></p>
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <label class="block text-sm font-medium text-gray-700">Wall Count</label>
+                                        <span class="text-[10px] px-1.5 py-0.5 rounded"
+                                              :class="settingSource('wall_count') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                              x-text="settingSource('wall_count') === 'file' ? 'File' : 'Default'"></span>
+                                    </div>
                                     <select x-model.number="sliceSettings.wall_count"
-                                            class="w-full px-4 py-2 border border-gray-300 rounded-lg">
-                                        <option value="1">1 wall (fast)</option>
+                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                        <option value="1">1 wall</option>
                                         <option value="2">2 walls</option>
-                                        <option value="3">3 walls (default)</option>
+                                        <option value="3">3 walls</option>
                                         <option value="4">4 walls</option>
                                         <option value="5">5 walls</option>
                                         <option value="6">6 walls</option>
                                     </select>
                                 </div>
-
                                 <div>
-                                    <label class="block text-sm font-medium text-gray-700 mb-2">Infill Pattern</label>
-                                    <p class="text-[11px] text-gray-500 mb-1" x-text="`${machineSettings.infill_pattern} (printer default)`"></p>
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <label class="block text-sm font-medium text-gray-700">Infill Pattern</label>
+                                        <span class="text-[10px] px-1.5 py-0.5 rounded"
+                                              :class="settingSource('infill_pattern') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                              x-text="settingSource('infill_pattern') === 'file' ? 'File' : 'Default'"></span>
+                                    </div>
                                     <select x-model="sliceSettings.infill_pattern"
-                                            class="w-full px-4 py-2 border border-gray-300 rounded-lg">
-                                        <option value="gyroid">Gyroid (default)</option>
+                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                        <option value="gyroid">Gyroid</option>
                                         <option value="grid">Grid</option>
                                         <option value="line">Line</option>
                                         <option value="cubic">Cubic</option>
@@ -586,36 +635,40 @@
                                 </div>
                             </div>
 
-                            <div class="flex items-center">
-                                <input type="checkbox" x-model="sliceSettings.supports" id="supports"
-                                       class="h-4 w-4 text-blue-600 rounded">
-                                <label for="supports" class="ml-2 text-sm font-medium text-gray-700">
-                                    Enable Support Structures
-                                </label>
-                                <span class="ml-2 text-[11px] text-gray-500"
-                                      x-text="fileSettings?.enable_support !== undefined
-                                        ? `(${fileSettings.enable_support ? 'On' : 'Off'} from file)`
-                                        : `(${machineSettings.supports ? 'On' : 'Off'} printer default)`"></span>
-                            </div>
-                            <!-- Support type (shown when supports enabled) -->
-                            <div x-show="sliceSettings.supports" x-cloak class="ml-6">
-                                <label class="block text-xs text-gray-500 mb-1">Support Type</label>
-                                <select x-model="sliceSettings.support_type"
-                                        class="w-full max-w-xs px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                                    <option :value="null">Process Default</option>
-                                    <option value="normal(auto)">Normal (Auto)</option>
-                                    <option value="tree(auto)">Tree (Auto)</option>
-                                    <option value="tree(manual)">Tree (Manual)</option>
-                                    <option value="normal(manual)">Normal (Manual)</option>
-                                </select>
-                                <span class="text-[11px] text-gray-400" x-show="fileSettings?.support_type"
-                                      x-text="'from file: ' + (fileSettings?.support_type || '')"></span>
+                            <!-- Supports -->
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <input type="checkbox" x-model="sliceSettings.supports" id="supports"
+                                           class="h-4 w-4 text-blue-600 rounded">
+                                    <label for="supports" class="text-sm font-medium text-gray-700">
+                                        Enable Support Structures
+                                    </label>
+                                    <span class="text-[10px] px-1.5 py-0.5 rounded"
+                                          :class="settingSource('supports') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                          x-text="settingSource('supports') === 'file' ? 'File' : 'Default'"></span>
+                                </div>
+                                <div x-show="sliceSettings.supports" x-cloak class="mt-2 ml-6">
+                                    <label class="block text-xs text-gray-500 mb-1">Support Type</label>
+                                    <select x-model="sliceSettings.support_type"
+                                            class="w-full max-w-xs px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                        <option :value="null">Process Default</option>
+                                        <option value="normal(auto)">Normal (Auto)</option>
+                                        <option value="tree(auto)">Tree (Auto)</option>
+                                        <option value="tree(manual)">Tree (Manual)</option>
+                                        <option value="normal(manual)">Normal (Manual)</option>
+                                    </select>
+                                </div>
                             </div>
 
-                            <!-- Brim settings -->
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <!-- Brim -->
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                                 <div>
-                                    <label class="block text-xs text-gray-500 mb-1">Brim Type</label>
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <label class="block text-xs text-gray-500">Brim Type</label>
+                                        <span class="text-[10px] px-1.5 py-0.5 rounded"
+                                              :class="settingSource('brim_type') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                              x-text="settingSource('brim_type') === 'file' ? 'File' : 'Default'"></span>
+                                    </div>
                                     <select x-model="sliceSettings.brim_type"
                                             class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                                         <option :value="null">Process Default (auto)</option>
@@ -625,76 +678,57 @@
                                         <option value="outer_and_inner">Outer and Inner</option>
                                         <option value="no_brim">No Brim</option>
                                     </select>
-                                    <span class="text-[11px] text-gray-400" x-show="fileSettings?.brim_type"
-                                          x-text="'from file: ' + (fileSettings?.brim_type || '')"></span>
                                 </div>
                                 <div>
                                     <label class="block text-xs text-gray-500 mb-1">Brim Width (mm)</label>
                                     <input type="number" x-model.number="sliceSettings.brim_width"
                                            placeholder="Default" min="0" max="50" step="1"
                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                                    <span class="text-[11px] text-gray-400" x-show="fileSettings?.brim_width !== undefined"
-                                          x-text="'from file: ' + (fileSettings?.brim_width || 0) + 'mm'"></span>
                                 </div>
                                 <div>
                                     <label class="block text-xs text-gray-500 mb-1">Brim Gap (mm)</label>
                                     <input type="number" x-model.number="sliceSettings.brim_object_gap"
                                            placeholder="Default" min="0" max="5" step="0.05"
                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                                    <span class="text-[11px] text-gray-400" x-show="fileSettings?.brim_object_gap !== undefined"
-                                          x-text="'from file: ' + (fileSettings?.brim_object_gap || 0) + 'mm'"></span>
                                 </div>
                             </div>
 
-                            <div class="pt-2 border-t border-gray-200">
-                                <div class="flex items-center mb-3">
-                                    <input type="checkbox" x-model="sliceSettings.enable_prime_tower" id="prime-tower"
-                                           class="h-4 w-4 text-blue-600 rounded">
-                                    <label for="prime-tower" class="ml-2 text-sm font-medium text-gray-700">
-                                        Enable Prime Tower
-                                    </label>
-                                    <span class="ml-2 text-[11px] text-gray-500" x-text="`(${machineSettings.enable_prime_tower ? 'On' : 'Off'} printer default)`"></span>
+                            <!-- Bed Temp + Bed Type -->
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <label class="block text-xs text-gray-500">Bed Temp (°C)</label>
+                                        <span class="text-[10px] px-1.5 py-0.5 rounded"
+                                              :class="settingSource('bed_temp') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                              x-text="settingSource('bed_temp') === 'file' ? 'File' : 'Default'"></span>
+                                    </div>
+                                    <input type="number" x-model.number="sliceSettings.bed_temp" placeholder="Filament default"
+                                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                                 </div>
-                                <div class="grid grid-cols-2 gap-4" x-show="sliceSettings.enable_prime_tower" x-cloak>
-                                    <div>
-                                        <label class="block text-xs text-gray-500 mb-1">Prime Volume</label>
-                                        <p class="text-[11px] text-gray-500 mb-1" x-text="printerDefaultText(machineSettings.prime_volume)"></p>
-                                        <input type="number" min="0" x-model.number="sliceSettings.prime_volume" placeholder="Auto"
-                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                <div>
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <label class="block text-xs text-gray-500">Build Plate Type</label>
+                                        <span class="text-[10px] px-1.5 py-0.5 rounded"
+                                              :class="settingSource('bed_type') === 'file' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'"
+                                              x-text="settingSource('bed_type') === 'file' ? 'File' : 'Default'"></span>
                                     </div>
-                                    <div>
-                                        <label class="block text-xs text-gray-500 mb-1">Prime Tower Width (mm)</label>
-                                        <p class="text-[11px] text-gray-500 mb-1" x-text="printerDefaultText(machineSettings.prime_tower_width, 'mm')"></p>
-                                        <input type="number" min="1" x-model.number="sliceSettings.prime_tower_width" placeholder="Auto"
-                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-gray-500 mb-1">Prime Tower Brim Width (mm)</label>
-                                        <p class="text-[11px] text-gray-500 mb-1" x-text="printerDefaultText(machineSettings.prime_tower_brim_width, 'mm')"></p>
-                                        <input type="number" min="0" x-model.number="sliceSettings.prime_tower_brim_width" placeholder="Auto"
-                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-gray-500 mb-1">Prime Tower Brim Chamfer</label>
-                                        <p class="text-[11px] text-gray-500 mb-1" x-text="`(${machineSettings.prime_tower_brim_chamfer ? 'On' : 'Off'} printer default)`"></p>
-                                        <select x-model="sliceSettings.prime_tower_brim_chamfer" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                                            <option :value="true">On</option>
-                                            <option :value="false">Off</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-gray-500 mb-1">Chamfer Max Width (mm)</label>
-                                        <p class="text-[11px] text-gray-500 mb-1" x-text="printerDefaultText(machineSettings.prime_tower_brim_chamfer_max_width, 'mm')"></p>
-                                        <input type="number" min="0" x-model.number="sliceSettings.prime_tower_brim_chamfer_max_width" placeholder="Auto"
-                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                                    </div>
+                                    <select x-model="sliceSettings.bed_type"
+                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                        <option :value="null">Use Filament Default</option>
+                                        <option value="PEI">PEI</option>
+                                        <option value="Glass">Glass</option>
+                                        <option value="PC">PC (Polycarbonate)</option>
+                                        <option value="FR4">FR4</option>
+                                        <option value="CF">Carbon Fiber</option>
+                                        <option value="PVA">PVA (Glue)</option>
+                                    </select>
                                 </div>
                             </div>
                         </div>
                     </div>
 
                     <!-- Action Buttons -->
-                    <div class="mt-8 flex gap-4">
+                    <div class="mt-6 flex gap-4">
                         <button @click="currentStep = 'upload'"
                                 class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
                             Back to Upload
@@ -703,7 +737,7 @@
                                 :disabled="!selectedFilament && (!selectedFilaments || selectedFilaments.length === 0)"
                                 :class="(selectedFilament || (selectedFilaments && selectedFilaments.length > 0)) ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'"
                                 class="flex-1 px-6 py-3 text-white rounded-lg transition">
-                            Slice Now →
+                            Slice Now
                         </button>
                     </div>
                 </section>

@@ -313,4 +313,26 @@ test.describe('Filament Import/Export (M13)', () => {
     await request.delete(`${API}/filaments/${imported.id}`);
     await request.delete(`${API}/filaments/${reImported.id}`);
   });
+
+  test('Bambu profile derives speed from volumetric flow limit', async ({ request }) => {
+    const filePath = fixture('Bambu PLA Basic @BBL P1S 0.4 nozzle.json');
+    const fileBuffer = fs.readFileSync(filePath);
+
+    const res = await request.post(`${API}/filaments/import/preview`, {
+      multipart: {
+        file: {
+          name: 'Bambu PLA Basic @BBL P1S 0.4 nozzle.json',
+          mimeType: 'application/json',
+          buffer: fileBuffer,
+        },
+      },
+    });
+    expect(res.ok()).toBe(true);
+
+    const data = await res.json();
+    // filament_max_volumetric_speed: ["21", "29"] → 21 / 0.08 = 262
+    expect(data.preview.print_speed).toBe(262);
+    expect(data.preview.nozzle_temp).toBe(220);
+    expect(data.preview.is_recognized).toBe(true);
+  });
 });

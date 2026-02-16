@@ -16,7 +16,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 
 ## Non-goals (v1)
 
-- No MakerWorld scraping (use browser downloads)
+- No MakerWorld scraping (see M26 for optional link import approach)
 - No per-object filament assignment (single filament per plate)
 - No mesh repair or geometry modifications
 - No multi-material/MMU support
@@ -64,10 +64,14 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ❌ M19 slicer selection - Choose between OrcaSlicer and Snapmaker Orca for slicing
 ✅ M23 common slicing options - Allow changing wall count, infill pattern, and infill density (%)
 
+### Performance
+✅ M25 API performance - Metadata caching at upload, async slicing (asyncio.to_thread), batch 3MF reads, profile caching
+
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
+❌ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info/profiles and auto-download 3MF into upload pipeline. Feasibility researched; plan in `memory/milestone-makerworld-integration.md`
 
-**Current:** 20.7 / 24 complete (86%)
+**Current:** 21.7 / 26 complete (83%)
 
 ---
 

@@ -22,7 +22,7 @@ test.describe('Responsive Design', () => {
       await expect(dropzone).toBeVisible();
 
       // Tab buttons should be visible
-      await expect(page.getByRole('button', { name: 'Upload' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
     });
   }

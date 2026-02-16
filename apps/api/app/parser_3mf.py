@@ -527,13 +527,35 @@ def detect_colors_per_plate(file_path: Path) -> Dict[int, List[str]]:
 
 
 def detect_print_settings(file_path: Path) -> Dict[str, Any]:
-    """Extract support/brim print settings from a 3MF's project_settings.config.
+    """Extract print settings from a 3MF's project_settings.config.
 
     Returns a dict with normalised values.  Empty dict when nothing found.
     Keys use OrcaSlicer config names so they can round-trip straight through
     the override pipeline.
     """
     settings: Dict[str, Any] = {}
+
+    def _as_bool(val) -> bool:
+        return str(val).strip() in ("1", "true", "True")
+
+    def _as_int(val):
+        try:
+            return int(float(str(val)))
+        except (ValueError, TypeError):
+            return None
+
+    def _as_float(val, decimals=2):
+        try:
+            return round(float(str(val)), decimals)
+        except (ValueError, TypeError):
+            return None
+
+    def _first_element(val):
+        """Return first element if list/array, else the value itself."""
+        if isinstance(val, list) and val:
+            return val[0]
+        return val
+
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
             if "Metadata/project_settings.config" not in zf.namelist():
@@ -543,7 +565,7 @@ def detect_print_settings(file_path: Path) -> Dict[str, Any]:
             # --- support ---
             raw = config.get("enable_support")
             if raw is not None:
-                settings["enable_support"] = str(raw).strip() in ("1", "true", "True")
+                settings["enable_support"] = _as_bool(raw)
 
             raw = config.get("support_type")
             if raw is not None and str(raw).strip():
@@ -551,10 +573,9 @@ def detect_print_settings(file_path: Path) -> Dict[str, Any]:
 
             raw = config.get("support_threshold_angle")
             if raw is not None:
-                try:
-                    settings["support_threshold_angle"] = int(float(str(raw)))
-                except (ValueError, TypeError):
-                    pass
+                v = _as_int(raw)
+                if v is not None:
+                    settings["support_threshold_angle"] = v
 
             # --- brim ---
             raw = config.get("brim_type")
@@ -563,17 +584,78 @@ def detect_print_settings(file_path: Path) -> Dict[str, Any]:
 
             raw = config.get("brim_width")
             if raw is not None:
-                try:
-                    settings["brim_width"] = round(float(str(raw)), 2)
-                except (ValueError, TypeError):
-                    pass
+                v = _as_float(raw)
+                if v is not None:
+                    settings["brim_width"] = v
 
             raw = config.get("brim_object_gap")
             if raw is not None:
-                try:
-                    settings["brim_object_gap"] = round(float(str(raw)), 2)
-                except (ValueError, TypeError):
-                    pass
+                v = _as_float(raw)
+                if v is not None:
+                    settings["brim_object_gap"] = v
+
+            # --- wall / infill / layer ---
+            raw = config.get("wall_loops")
+            if raw is not None:
+                v = _as_int(raw)
+                if v is not None:
+                    settings["wall_loops"] = v
+
+            raw = config.get("sparse_infill_density")
+            if raw is not None:
+                v = _as_int(str(raw).replace("%", ""))
+                if v is not None:
+                    settings["sparse_infill_density"] = v
+
+            raw = config.get("sparse_infill_pattern")
+            if raw is not None and str(raw).strip():
+                settings["sparse_infill_pattern"] = str(raw).strip()
+
+            raw = config.get("layer_height")
+            if raw is not None:
+                v = _as_float(raw)
+                if v is not None:
+                    settings["layer_height"] = v
+
+            # --- prime tower ---
+            raw = config.get("enable_prime_tower")
+            if raw is not None:
+                settings["enable_prime_tower"] = _as_bool(raw)
+
+            raw = config.get("prime_tower_width")
+            if raw is not None:
+                v = _as_int(raw)
+                if v is not None:
+                    settings["prime_tower_width"] = v
+
+            raw = config.get("prime_tower_brim_width")
+            if raw is not None:
+                v = _as_int(raw)
+                if v is not None and v >= 0:
+                    settings["prime_tower_brim_width"] = v
+
+            raw = config.get("filament_prime_volume")
+            if raw is not None:
+                v = _as_int(_first_element(raw))
+                if v is not None:
+                    settings["prime_volume"] = v
+
+            # --- temperature / bed ---
+            raw = config.get("nozzle_temperature")
+            if raw is not None:
+                v = _as_int(_first_element(raw))
+                if v is not None:
+                    settings["nozzle_temperature"] = v
+
+            raw = config.get("bed_temperature")
+            if raw is not None:
+                v = _as_int(_first_element(raw))
+                if v is not None:
+                    settings["bed_temperature"] = v
+
+            raw = config.get("curr_bed_type")
+            if raw is not None and str(raw).strip():
+                settings["curr_bed_type"] = str(raw).strip()
 
     except Exception:
         pass

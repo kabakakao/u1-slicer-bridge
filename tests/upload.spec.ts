@@ -25,12 +25,8 @@ test.describe('Upload Workflow', () => {
   test('configure step shows filament selection', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     // Should see either detected colors or filament dropdown
-    const hasColors = await getAppState(page, 'detectedColors');
-    if (hasColors && (hasColors as string[]).length > 0) {
-      await expect(page.getByText(/Detected Colors/i)).toBeVisible();
-    } else {
-      await expect(page.getByText(/Filament Profile/i)).toBeVisible();
-    }
+    // Should see the Colours & Filaments accordion
+    await expect(page.getByText(/Colours & Filaments/i)).toBeVisible();
   });
 
   test('configure step shows Slice Now button', async ({ page }) => {

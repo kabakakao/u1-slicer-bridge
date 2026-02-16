@@ -49,8 +49,10 @@ function app() {
         plates: [],               // Available plates for selected upload
         platesLoading: false,     // Loading state for plates
         detectedColors: [],       // Colors detected from 3MF file
-        fileSettings: null,       // Print settings detected from 3MF file (support, brim)
+        fileSettings: null,       // Print settings detected from 3MF file
         filamentOverride: false,  // Whether user wants to manually override filament assignment
+        accordionColours: false,  // Colours & Filaments section (closed by default, summary shown)
+        accordionSettings: false, // Print Settings section (closed by default, summary shown)
         extruderPresets: [
             { slot: 1, filament_id: null, color_hex: '#FFFFFF' },
             { slot: 2, filament_id: null, color_hex: '#FFFFFF' },
@@ -296,6 +298,7 @@ function app() {
          */
         applyFileSettings(settings) {
             if (!settings || Object.keys(settings).length === 0) return;
+            // Support
             if (settings.enable_support !== undefined) {
                 this.sliceSettings.supports = !!settings.enable_support;
             }
@@ -305,6 +308,7 @@ function app() {
             if (settings.support_threshold_angle !== undefined) {
                 this.sliceSettings.support_threshold_angle = settings.support_threshold_angle;
             }
+            // Brim
             if (settings.brim_type) {
                 this.sliceSettings.brim_type = settings.brim_type;
             }
@@ -314,14 +318,45 @@ function app() {
             if (settings.brim_object_gap !== undefined) {
                 this.sliceSettings.brim_object_gap = settings.brim_object_gap;
             }
+            // Wall / Infill / Layer
+            if (settings.wall_loops !== undefined) {
+                this.sliceSettings.wall_count = settings.wall_loops;
+            }
+            if (settings.sparse_infill_density !== undefined) {
+                this.sliceSettings.infill_density = settings.sparse_infill_density;
+            }
+            if (settings.sparse_infill_pattern) {
+                this.sliceSettings.infill_pattern = settings.sparse_infill_pattern;
+            }
+            if (settings.layer_height !== undefined) {
+                this.sliceSettings.layer_height = settings.layer_height;
+            }
+            // Prime tower
+            if (settings.enable_prime_tower !== undefined) {
+                this.sliceSettings.enable_prime_tower = !!settings.enable_prime_tower;
+            }
+            if (settings.prime_tower_width !== undefined) {
+                this.sliceSettings.prime_tower_width = settings.prime_tower_width;
+            }
+            if (settings.prime_tower_brim_width !== undefined) {
+                this.sliceSettings.prime_tower_brim_width = settings.prime_tower_brim_width;
+            }
+            if (settings.prime_volume !== undefined) {
+                this.sliceSettings.prime_volume = settings.prime_volume;
+            }
+            // Temperature / Bed
+            if (settings.bed_temperature !== undefined) {
+                this.sliceSettings.bed_temp = settings.bed_temperature;
+            }
+            if (settings.curr_bed_type) {
+                this.sliceSettings.bed_type = settings.curr_bed_type;
+            }
         },
 
         handleJobOverrideToggle(enabled) {
             const isEnabled = typeof enabled === 'boolean' ? enabled : this.useJobOverrides;
             if (isEnabled) {
                 this.applyPrinterDefaultsToOverrides();
-            } else {
-                this.filamentOverride = false;
             }
         },
 
@@ -330,6 +365,35 @@ function app() {
                 return `Filament default (printer default)`;
             }
             return `${value}${unit} (printer default)`;
+        },
+
+        /**
+         * Returns 'file' if the setting came from the 3MF file, otherwise 'default'.
+         * Uses a mapping from fileSettings keys to sliceSettings keys.
+         */
+        settingSource(sliceKey) {
+            if (!this.fileSettings) return 'default';
+            const keyMap = {
+                layer_height: 'layer_height',
+                infill_density: 'sparse_infill_density',
+                infill_pattern: 'sparse_infill_pattern',
+                wall_count: 'wall_loops',
+                supports: 'enable_support',
+                support_type: 'support_type',
+                support_threshold_angle: 'support_threshold_angle',
+                brim_type: 'brim_type',
+                brim_width: 'brim_width',
+                brim_object_gap: 'brim_object_gap',
+                enable_prime_tower: 'enable_prime_tower',
+                prime_tower_width: 'prime_tower_width',
+                prime_tower_brim_width: 'prime_tower_brim_width',
+                prime_volume: 'prime_volume',
+                bed_temp: 'bed_temperature',
+                bed_type: 'curr_bed_type',
+            };
+            const fileKey = keyMap[sliceKey];
+            if (!fileKey) return 'default';
+            return this.fileSettings[fileKey] !== undefined ? 'file' : 'default';
         },
 
         normalizeLayerHeight(value) {
@@ -941,39 +1005,15 @@ function app() {
             try {
                 let result;
                 
-                // Prepare slice settings with filament info
+                // Prepare slice settings: printer defaults as base, then
+                // sliceSettings overlay (which includes file-detected + user edits)
                 const sliceSettings = {
                     ...this.machineSettings,
-                    nozzle_temp: null,
+                    ...this.sliceSettings,
+                    nozzle_temp: null, // always from filament profile
                     filament_colors: [...(this.sliceSettings.filament_colors || [])],
                     extruder_assignments: [...(this.sliceSettings.extruder_assignments || [0, 1, 2, 3])],
                 };
-
-                if (this.useJobOverrides) {
-                    sliceSettings.layer_height = this.sliceSettings.layer_height;
-                    sliceSettings.infill_density = this.sliceSettings.infill_density;
-                    sliceSettings.wall_count = this.sliceSettings.wall_count;
-                    sliceSettings.infill_pattern = this.sliceSettings.infill_pattern;
-                    sliceSettings.supports = this.sliceSettings.supports;
-                    sliceSettings.enable_prime_tower = this.sliceSettings.enable_prime_tower;
-                    sliceSettings.prime_volume = this.sliceSettings.prime_volume;
-                    sliceSettings.prime_tower_width = this.sliceSettings.prime_tower_width;
-                    sliceSettings.prime_tower_brim_width = this.sliceSettings.prime_tower_brim_width;
-                    sliceSettings.prime_tower_brim_chamfer = this.sliceSettings.prime_tower_brim_chamfer;
-                    sliceSettings.prime_tower_brim_chamfer_max_width = this.sliceSettings.prime_tower_brim_chamfer_max_width;
-                    sliceSettings.bed_temp = this.sliceSettings.bed_temp;
-                    sliceSettings.bed_type = this.sliceSettings.bed_type;
-                }
-
-                // Always pass through support/brim settings — these may come from
-                // file-detected defaults or user overrides. Without this, file settings
-                // (e.g. tree supports, outer_only brim) would be silently dropped.
-                sliceSettings.supports = this.sliceSettings.supports;
-                sliceSettings.support_type = this.sliceSettings.support_type;
-                sliceSettings.support_threshold_angle = this.sliceSettings.support_threshold_angle;
-                sliceSettings.brim_type = this.sliceSettings.brim_type;
-                sliceSettings.brim_width = this.sliceSettings.brim_width;
-                sliceSettings.brim_object_gap = this.sliceSettings.brim_object_gap;
 
                 // Reorder colors and filament_ids based on extruder assignments
                 if (hasMultiFilaments && this.sliceSettings.extruder_assignments) {

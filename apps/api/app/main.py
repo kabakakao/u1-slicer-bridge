@@ -647,10 +647,27 @@ def _parse_filament_profile_payload(file_name: str, payload: dict) -> dict:
 
     nozzle_temp = _clamp(_as_int(_extract_profile_value(root, ["nozzle_temp", "nozzle_temperature", "temperature"], 210), 210), 100, 400)
     bed_temp = _clamp(_as_int(_extract_profile_value(root, ["bed_temp", "bed_temperature"], 60), 60), 0, 150)
-    print_speed = _clamp(_as_int(_extract_profile_value(root, ["print_speed", "speed"], 60), 60), 5, 600)
 
     # Detect whether this looks like an OrcaSlicer/Bambu profile
     is_orca_profile = root.get("type") == "filament" or "nozzle_temperature" in root or "filament_type" in root
+
+    # print_speed: Bambu/Orca filament profiles don't include speed (it's a process setting).
+    # Derive from filament_max_volumetric_speed if available, else use material defaults.
+    explicit_speed = _extract_profile_value(root, ["print_speed", "speed"], None)
+    if explicit_speed is not None:
+        print_speed = _clamp(_as_int(explicit_speed, 60), 5, 600)
+    elif is_orca_profile:
+        vol_speed = _extract_profile_value(root, ["filament_max_volumetric_speed"], None)
+        if vol_speed is not None:
+            # Convert volumetric (mm³/s) to linear (mm/s) assuming 0.4mm nozzle, 0.2mm layer
+            vol = _as_int(vol_speed, 0)
+            print_speed = _clamp(round(vol / 0.08), 30, 500) if vol > 0 else 200
+        else:
+            # Material-appropriate defaults matching Bambu Studio
+            _material_speeds = {"PLA": 200, "PETG": 150, "ABS": 150, "ASA": 150, "TPU": 30, "PA": 100, "PC": 100}
+            print_speed = _material_speeds.get(material, 200)
+    else:
+        print_speed = 60
 
     # Extract slicer-native settings for passthrough
     slicer_settings = {}
