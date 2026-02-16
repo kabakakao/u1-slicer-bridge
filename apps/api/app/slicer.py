@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import re
@@ -11,6 +12,19 @@ from dataclasses import dataclass
 
 from config import PrinterProfile
 from gcode_parser import parse_orca_metadata
+
+# Maximum concurrent OrcaSlicer processes (memory-bound).
+# Configurable via env var, default 2.
+MAX_CONCURRENT_SLICES = int(os.environ.get("MAX_CONCURRENT_SLICES", "2"))
+_slicer_semaphore = None
+
+
+def _get_slicer_semaphore():
+    """Lazy-init semaphore (must be created within a running event loop)."""
+    global _slicer_semaphore
+    if _slicer_semaphore is None:
+        _slicer_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SLICES)
+    return _slicer_semaphore
 
 
 @dataclass
@@ -213,10 +227,11 @@ class OrcaSlicer:
         output_name: str = "output.gcode",
         plate_index: Optional[int] = None,
     ) -> Dict:
-        """Async version of slice_3mf — runs in thread pool to avoid blocking the event loop."""
-        return await asyncio.to_thread(
-            self.slice_3mf, three_mf_path, workspace, output_name, plate_index
-        )
+        """Async version of slice_3mf — acquires semaphore to limit concurrent processes."""
+        async with _get_slicer_semaphore():
+            return await asyncio.to_thread(
+                self.slice_3mf, three_mf_path, workspace, output_name, plate_index
+            )
 
     def parse_gcode_metadata(self, gcode_path: Path) -> Dict:
         """Extract metadata from generated G-code."""

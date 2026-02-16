@@ -9,21 +9,25 @@ Self-hostable, Docker-first service for Snapmaker U1 3D printing workflow.
 U1 Slicer Bridge provides a complete workflow for 3D printing with the Snapmaker U1:
 
 ```
-upload .3mf → validate plate → configure → slice → preview
+upload .3mf → validate plate → configure → slice → preview → print
 ```
 
 **Key Features:**
-- Upload `.3mf` files (including MakerWorld/Bambu Studio exports)
+- Upload `.3mf` files (including MakerWorld/Bambu Studio and PrusaSlicer exports)
 - Multi-plate 3MF support with per-plate validation and visual selection
 - Multicolour/multi-extruder slicing (up to 4 extruders)
 - Automatic plate validation (270x270x270mm build volume)
 - Slicing with Snapmaker OrcaSlicer fork (v2.2.4)
-- Interactive 2D G-code preview with layer-by-layer visualization and colour legend
-- Configurable slicing options (wall count, infill pattern/density, prime tower)
-- Persistent extruder presets and filament library with JSON profile import
+- Interactive 2D G-code preview with layer-by-layer visualization, zoom/pan, and colour legend
+- 3-way setting modes per parameter (use file defaults / Orca defaults / custom override)
+- Configurable slicing options (wall count, infill, supports, brim, skirt, prime tower)
+- Persistent extruder presets and filament library with JSON profile import/export
 - Temperature and build plate type overrides per job
+- Print control via Moonraker (send to printer, pause/resume/cancel)
+- Printer status page with live progress, temperatures, and state monitoring
+- Configurable Moonraker URL (persisted in database)
 - File management (browse, download, delete uploads and sliced files)
-- Modern web UI with upload/settings tabs and 3-step slice workflow
+- Modern web UI with settings modal and 3-step slice workflow
 
 ## Architecture
 
@@ -146,6 +150,7 @@ All data is stored under `/data`:
 |----|---------|
 | M0 | Skeleton - Docker, FastAPI, services |
 | M1 | Database - PostgreSQL with uploads, jobs, filaments |
+| M2 | Moonraker integration - Health check, configurable URL, print status |
 | M3 | Object extraction - 3MF parser (handles MakerWorld files) |
 | M4 | Plate validation - Preserves arrangements |
 | M5 | Direct slicing with filament profiles |
@@ -153,33 +158,35 @@ All data is stored under `/data`:
 | M7 | Preview - Interactive 2D layer viewer |
 | M7.1 | Multi-plate support - Detection and visual selection |
 | M7.2 | Build plate type & temperature overrides |
+| M8 | Print control - Send to printer, pause/resume/cancel via Moonraker |
 | M9 | Sliced file access - Browse and view G-code files |
 | M10 | File deletion - Delete old uploads and sliced files |
 | M11 | Multifilament support - Colour detection, auto-assignment, override |
+| M13 | Custom filament profiles - JSON import/export with slicer settings passthrough |
 | M15 | Multicolour viewer - Colour legend in 2D viewer |
 | M16 | Flexible filament assignment - Override colour per extruder |
 | M17 | Prime tower options - Configurable prime tower settings |
 | M18 | Multi-plate visual selection - Plate names and preview images |
+| M20 | G-code viewer zoom - Zoom/pan controls, scroll-wheel zoom, fit-to-bed |
 | M21 | Upload/configure loading UX - Progress indicators |
 | M22 | Navigation consistency - Standardized actions across UI |
-| M23 | Common slicing options - Wall count, infill pattern, density |
+| M23 | Common slicing options - Wall count, infill, supports, brim, skirt |
 | M24 | Extruder presets - Default settings per extruder |
-| M13 | Custom filament profiles - JSON import/export with slicer settings passthrough |
 | M25 | API performance - Metadata caching, async slicing, batch 3MF reads |
+| M28 | Printer status page - Always-accessible status overlay with live monitoring |
+| M27 | Concurrency hardening - UUID temp files, slicer process semaphore |
+| M29 | 3-way setting modes - Per-setting model/orca/override with file detection |
 
 ### Not Yet Implemented
 
 | ID | Feature |
 |----|---------|
-| M2 | Moonraker integration (health check only, no print control) |
-| M8 | Print control via Moonraker |
 | M12 | 3D G-code viewer |
 | M14 | Multi-machine support |
 | M19 | Slicer selection (OrcaSlicer vs Snapmaker Orca) |
-| M20 | G-code viewer zoom controls |
 | M26 | MakerWorld link import - Paste URL to auto-download 3MF |
 
-**Progress:** 21.7 / 26 milestones complete (83%)
+**Progress:** 27.7 / 30 milestones complete (92%)
 
 ## Non-Goals (v1)
 

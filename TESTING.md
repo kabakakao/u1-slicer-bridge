@@ -11,20 +11,25 @@
 ### Running Tests
 
 ```bash
-# Run all tests
+# Run all tests (122 tests, ~15 min)
 npm test
 
 # Run quick smoke tests only (no slicing, ~15 seconds)
 npm run test:smoke
 
 # Run specific test suites
-npm run test:upload        # Upload workflow
-npm run test:slice         # Slicing end-to-end (slow, requires slicer)
-npm run test:viewer        # G-code viewer rendering
-npm run test:multiplate    # Multi-plate detection and selection
-npm run test:multicolour   # Multicolour detection and overrides
-npm run test:settings      # Settings tab, presets, filament CRUD
-npm run test:files         # File management (upload/job delete)
+npm run test:upload            # Upload workflow
+npm run test:slice             # Slicing end-to-end (slow, requires slicer)
+npm run test:slice-overrides   # Setting overrides (temps, walls, infill, prime tower)
+npm run test:slice-plate       # Individual plate slicing
+npm run test:viewer            # G-code viewer rendering
+npm run test:multiplate        # Multi-plate detection and selection
+npm run test:multicolour       # Multicolour detection and overrides
+npm run test:multicolour-slice # Multi-colour slicing workflow
+npm run test:settings          # Settings modal, presets, filament CRUD
+npm run test:files             # File management (upload/job delete)
+npm run test:errors            # Error handling and edge cases
+npm run test:file-settings     # File-level print settings detection
 
 # View HTML test report
 npm run test:report
@@ -34,17 +39,23 @@ npm run test:report
 
 ```
 tests/
-  helpers.ts              Shared utilities (waitForApp, uploadFile, etc.)
-  smoke.spec.ts           Page load, Alpine.js init, tabs, API health
-  api.spec.ts             API endpoint availability and response shapes
-  responsive.spec.ts      Desktop/tablet/mobile viewport rendering
-  upload.spec.ts          Upload workflow (file → configure → back)
-  slicing.spec.ts         Slice end-to-end (configure → slice → complete)
-  viewer.spec.ts          G-code viewer canvas, controls, metadata
-  multiplate.spec.ts      Multi-plate detection, plate cards, selection
-  multicolour.spec.ts     Colour detection, overrides, >4 colour guard
-  file-management.spec.ts Upload/job deletion, preview endpoints
-  settings.spec.ts        Settings tab, extruder presets, filament CRUD
+  helpers.ts                Shared utilities (waitForApp, uploadFile, fixture, etc.)
+  smoke.spec.ts             Page load, Alpine.js init, header, API health
+  api.spec.ts               API endpoint availability and response shapes
+  responsive.spec.ts        Desktop/tablet/mobile viewport rendering
+  upload.spec.ts            Upload workflow (file → configure → back)
+  slicing.spec.ts           Slice end-to-end (configure → slice → complete)
+  slice-overrides.spec.ts   Slicing setting overrides (temps, walls, infill, prime tower)
+  slice-plate.spec.ts       Individual plate slicing endpoint
+  viewer.spec.ts            G-code viewer canvas, controls, metadata
+  multiplate.spec.ts        Multi-plate detection, plate cards, selection
+  multicolour.spec.ts       Colour detection, overrides, >4 colour guard
+  multicolour-slice.spec.ts Multi-colour slicing workflow
+  plate-colors.spec.ts      Per-plate colour detection accuracy
+  file-management.spec.ts   Upload/job deletion, preview endpoints
+  file-settings.spec.ts     File-level print settings detection
+  settings.spec.ts          Settings modal, printer defaults, filament library, presets
+  errors.spec.ts            Error handling, edge cases, delete safety
 ```
 
 ### Test Fixtures
@@ -57,21 +68,29 @@ Test 3MF files live in `test-data/`:
 | `Dragon Scale infinity.3mf` | Multi-plate file with 3 plates |
 | `Dragon Scale infinity-1-plate-2-colours.3mf` | Single plate, 2 colours |
 | `Dragon Scale infinity-1-plate-2-colours-new-plate.3mf` | Variant for plater_name bug |
-| `Shashibo-h2s-textured.3mf` | Multi-plate, tree supports, outer-only brim, multicolour (file settings detection) |
+| `Shashibo-h2s-textured.3mf` | Multi-plate, tree supports, outer-only brim, multicolour |
+| `PrusaSlicer_majorasmask_2colour.3mf` | PrusaSlicer 2-colour format compatibility |
+| `PrusaSlicer-printables-Korok_mask_4colour.3mf` | PrusaSlicer 4-colour from Printables |
 
 ### Test Categories
 
 | Suite | Speed | Needs Slicer | What it covers |
 |-------|-------|-------------|----------------|
-| smoke | Fast | No | Page load, Alpine init, tabs, API health |
+| smoke | Fast | No | Page load, Alpine init, header, API health |
 | api | Fast | No | All API endpoint shapes and error handling |
 | responsive | Fast | No | 3 viewport sizes render correctly |
 | upload | Medium | No | Upload flow, configure step, navigation |
-| settings | Medium | No | Presets, filament CRUD, form interactions |
-| file-management | Medium | Yes* | Upload/job deletion lifecycle |
-| multiplate | Slow | No | Plate detection, cards, selection |
+| errors | Medium | No | Error handling, edge cases, delete safety |
+| settings | Medium | No | Settings modal, presets, filament CRUD |
+| file-settings | Medium | No | File-level print settings detection |
 | multicolour | Medium | No | Colour detection, overrides, fallbacks |
+| plate-colors | Medium | No | Per-plate colour detection accuracy |
+| multiplate | Slow | No | Plate detection, cards, selection |
+| file-management | Medium | Yes* | Upload/job deletion lifecycle |
 | slicing | Slow | Yes | Full slice end-to-end, metadata, download |
+| slice-overrides | Slow | Yes | Setting overrides (temps, walls, infill, prime tower) |
+| slice-plate | Slow | Yes | Individual plate slicing |
+| multicolour-slice | Slow | Yes | Multi-colour slicing workflow |
 | viewer | Slow | Yes | Canvas rendering, layer controls, API |
 
 *file-management deletes test data created during the test
@@ -102,13 +121,24 @@ Before submitting changes, verify these still work:
 
 ---
 
-## API Endpoints
+## API Endpoints (37 total)
 
 ### Health & Status
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/healthz` | Health check |
-| GET | `/printer/status` | Moonraker printer status |
+| GET | `/printer/status` | Printer connection status, info, and print state |
+
+### Printer Settings & Control
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/printer/settings` | Get printer connection settings (Moonraker URL) |
+| PUT | `/printer/settings` | Save printer connection settings and reconnect |
+| POST | `/printer/print` | Upload G-code to Moonraker and start printing |
+| GET | `/printer/print/status` | Get current print progress and state (polling) |
+| POST | `/printer/pause` | Pause the current print |
+| POST | `/printer/resume` | Resume a paused print |
+| POST | `/printer/cancel` | Cancel the current print |
 
 ### Uploads
 | Method | Endpoint | Description |
@@ -116,6 +146,7 @@ Before submitting changes, verify these still work:
 | POST | `/upload` | Upload 3MF file (validates plate bounds) |
 | GET | `/upload` | List all uploads |
 | GET | `/upload/{id}` | Get upload details (re-validates bounds) |
+| GET | `/upload/{id}/download` | Download original uploaded 3MF file |
 | DELETE | `/upload/{id}` | Delete upload and associated files |
 | GET | `/uploads/{id}/preview` | Get embedded 3MF preview image |
 
@@ -137,6 +168,7 @@ Before submitting changes, verify these still work:
 | GET | `/jobs` | List all slicing jobs |
 | GET | `/jobs/{job_id}` | Get job status and metadata |
 | GET | `/jobs/{job_id}/download` | Download G-code file |
+| GET | `/jobs/{job_id}/download-3mf` | Download profile-embedded 3MF used for slicing |
 | GET | `/jobs/{job_id}/gcode/metadata` | Get G-code metadata (bounds, layers, tools) |
 | GET | `/jobs/{job_id}/gcode/layers` | Get layer geometry for viewer |
 | DELETE | `/jobs/{job_id}` | Delete job and G-code file |
@@ -147,8 +179,9 @@ Before submitting changes, verify these still work:
 | GET | `/filaments` | List filament profiles |
 | POST | `/filaments` | Create filament profile |
 | PUT | `/filaments/{id}` | Update filament profile |
-| DELETE | `/filaments/{id}` | Delete filament profile |
+| DELETE | `/filaments/{id}` | Delete filament profile (safety check: blocks if in preset) |
 | POST | `/filaments/{id}/default` | Set filament as default |
+| GET | `/filaments/{id}/export` | Export filament as OrcaSlicer-compatible JSON |
 | POST | `/filaments/init-defaults` | Initialize starter filament library |
 | POST | `/filaments/import` | Import JSON filament profile |
 | POST | `/filaments/import/preview` | Preview JSON profile before import |
@@ -158,6 +191,7 @@ Before submitting changes, verify these still work:
 |--------|----------|-------------|
 | GET | `/presets/extruders` | Get extruder presets and slicing defaults |
 | PUT | `/presets/extruders` | Save extruder presets and slicing defaults |
+| GET | `/presets/orca-defaults` | Get Orca process profile defaults for UI hints |
 
 ---
 

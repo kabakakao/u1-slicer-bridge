@@ -6,6 +6,7 @@ Handles Bambu Studio files by extracting clean geometry with trimesh.
 
 import asyncio
 import json
+import uuid
 import zipfile
 import shutil
 import logging
@@ -443,7 +444,7 @@ class ProfileEmbedder:
 
             if is_bambu and not preserve_geometry:
                 logger.info("Detected Bambu Studio file - rebuilding with trimesh")
-                temp_clean = source_3mf.parent / f"{source_3mf.stem}_clean.3mf"
+                temp_clean = source_3mf.parent / f"{source_3mf.stem}_clean_{uuid.uuid4().hex[:8]}.3mf"
                 self._rebuild_with_trimesh(source_3mf, temp_clean)
                 working_3mf = temp_clean
 

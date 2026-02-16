@@ -10,7 +10,7 @@ Self-hostable, Docker-first service for Snapmaker U1:
 
 upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview → print via Moonraker.
 
-**Current Status:** Fully functional upload-to-preview workflow. Print control (M8) not yet implemented.
+**Current Status:** Fully functional upload-to-print workflow with printer status monitoring.
 
 ---
 
@@ -35,8 +35,8 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ✅ M6 slicing - Snapmaker OrcaSlicer v2.2.4, Bambu support  
 
 ### Device Integration & Print Execution
-⚠️ M2 moonraker - Health check only (no print control yet)  
-❌ M8 print control - NOT IMPLEMENTED  
+✅ M2 moonraker - Health check, configurable URL, print status polling
+✅ M8 print control - Send to printer, pause/resume/cancel, printer status page
 
 ### File Lifecycle & Job Management
 ✅ M9 sliced file access - Browse and view previously sliced G-code files  
@@ -51,28 +51,30 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ✅ M18 multi-plate visual selection - Show plate names and preview images when selecting plates
 
 ### Preview & UX
-✅ M7 preview - Interactive 2D layer viewer  
-❌ M12 3D G-code viewer - Interactive 3D preview of sliced G-code  
+✅ M7 preview - Interactive 2D layer viewer
+❌ M12 3D G-code viewer - Interactive 3D preview of sliced G-code. Library research in `memory/gcode-viewer-research.md`; top candidate: `gcode-preview` (npm, MIT, Three.js, multi-color + arc support)
 ✅ M20 G-code viewer zoom - Zoom in/out buttons, scroll-wheel zoom toward cursor, click-drag pan, fit-to-bed reset
-✅ M21 upload/configure loading UX - Add progress indicator while upload is being prepared for filament/configuration selection
-✅ M22 navigation consistency - Standardize actions like "Back" and "Slice Another" across the UI
+✅ M21 upload/configure loading UX - Progress indicators during upload preparation
+✅ M22 navigation consistency - Standardized actions across UI
+✅ M28 printer status page - Always-accessible printer status overlay with live progress, temps, and controls
 
 ### Slicing Controls & Profiles
-✅ M7.2 build plate type & temperature overrides - Set bed type per filament and override temps at slice time  
-✅ M13 custom filament profiles - Import/export OrcaSlicer JSON profiles with advanced slicer settings passthrough  
+✅ M7.2 build plate type & temperature overrides - Set bed type per filament and override temps at slice time
+✅ M13 custom filament profiles - Import/export OrcaSlicer JSON profiles with advanced slicer settings passthrough
 ✅ M24 extruder presets - Preconfigure default slicing settings and filament color/type per extruder
 ❌ M19 slicer selection - Choose between OrcaSlicer and Snapmaker Orca for slicing
-✅ M23 common slicing options - Allow changing wall count, infill pattern, and infill density (%)
+✅ M23 common slicing options - Wall count, infill pattern/density, supports, brim, skirt
+✅ M29 3-way setting modes - Per-setting model/orca/override with file print settings detection
 
 ### Performance
 ✅ M25 API performance - Metadata caching at upload, async slicing (asyncio.to_thread), batch 3MF reads, profile caching
-❌ M27 concurrency hardening - Fix temp file race in profile_embedder, add uvicorn workers, Redis semaphore to cap concurrent slices
+✅ M27 concurrency hardening - UUID temp files in profile_embedder, asyncio.Semaphore caps concurrent slicer processes (configurable MAX_CONCURRENT_SLICES)
 
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 ❌ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info/profiles and auto-download 3MF into upload pipeline. Feasibility researched; plan in `memory/milestone-makerworld-integration.md`
 
-**Current:** 22.7 / 27 complete (84%)
+**Current:** 27.7 / 30 complete (92%)
 
 ---
 
@@ -191,8 +193,11 @@ npm test
 | Upload/parser changes | `npm run test:upload` + `npm run test:multiplate` |
 | Filament/preset changes | `npm run test:settings` |
 | Viewer changes | `npm run test:viewer` |
-| Multicolour/profile embedder | `npm run test:multicolour` + `npm run test:slice` |
+| Multicolour/profile embedder | `npm run test:multicolour` + `npm run test:multicolour-slice` |
+| Slice settings/overrides | `npm run test:slice-overrides` |
+| Error handling/edge cases | `npm run test:errors` |
 | File deletion or management | `npm run test:files` |
+| File-level print settings | `npm run test:file-settings` |
 | Test file changes only | The affected suite(s) |
 | Any significant or cross-cutting change | `npm test` (full suite) |
 
@@ -737,33 +742,44 @@ All tests use Playwright and live in `tests/`. Config is in `playwright.config.t
 **Prerequisites:** Docker services running, `npm install`, `npx playwright install chromium`.
 
 ```bash
-npm test                  # Run ALL tests
-npm run test:smoke        # Quick smoke tests (~15s, no slicer needed)
-npm run test:upload       # Upload workflow
-npm run test:slice        # Slicing end-to-end (slow, needs slicer)
-npm run test:viewer       # G-code viewer
-npm run test:multiplate   # Multi-plate detection and selection
-npm run test:multicolour  # Multicolour detection and overrides
-npm run test:settings     # Settings tab, presets, filament CRUD
-npm run test:files        # File management (delete)
-npm run test:report       # View HTML test report
+npm test                       # Run ALL tests (122 tests, ~15 min)
+npm run test:smoke             # Quick smoke tests (~15s, no slicer needed)
+npm run test:upload            # Upload workflow
+npm run test:slice             # Slicing end-to-end (slow, needs slicer)
+npm run test:slice-overrides   # Setting overrides (temps, walls, infill, prime tower)
+npm run test:slice-plate       # Individual plate slicing
+npm run test:viewer            # G-code viewer
+npm run test:multiplate        # Multi-plate detection and selection
+npm run test:multicolour       # Multicolour detection and overrides
+npm run test:multicolour-slice # Multi-colour slicing workflow
+npm run test:settings          # Settings modal, presets, filament CRUD
+npm run test:files             # File management (delete)
+npm run test:errors            # Error handling and edge cases
+npm run test:file-settings     # File-level print settings detection
+npm run test:report            # View HTML test report
 ```
 
 ### Test File Structure
 
 ```
 tests/
-  helpers.ts              Shared utilities (waitForApp, uploadFile, fixture, etc.)
-  smoke.spec.ts           Page load, Alpine.js init, tabs, API health
-  api.spec.ts             API endpoint availability and response shapes
-  responsive.spec.ts      Desktop/tablet/mobile viewport rendering
-  upload.spec.ts          Upload workflow (file → configure → back)
-  slicing.spec.ts         Slice end-to-end (configure → slice → complete)
-  viewer.spec.ts          G-code viewer canvas, controls, metadata API
-  multiplate.spec.ts      Multi-plate detection, plate cards, selection
-  multicolour.spec.ts     Colour detection, overrides, >4 colour guard
-  file-management.spec.ts Upload/job deletion, preview endpoints
-  settings.spec.ts        Settings tab, extruder presets, filament CRUD
+  helpers.ts                Shared utilities (waitForApp, uploadFile, fixture, etc.)
+  smoke.spec.ts             Page load, Alpine.js init, header, API health
+  api.spec.ts               API endpoint availability and response shapes
+  responsive.spec.ts        Desktop/tablet/mobile viewport rendering
+  upload.spec.ts            Upload workflow (file → configure → back)
+  slicing.spec.ts           Slice end-to-end (configure → slice → complete)
+  slice-overrides.spec.ts   Slicing setting overrides (temps, walls, infill, prime tower)
+  slice-plate.spec.ts       Individual plate slicing endpoint
+  viewer.spec.ts            G-code viewer canvas, controls, metadata API
+  multiplate.spec.ts        Multi-plate detection, plate cards, selection
+  multicolour.spec.ts       Colour detection, overrides, >4 colour guard
+  multicolour-slice.spec.ts Multi-colour slicing workflow
+  plate-colors.spec.ts      Per-plate colour detection accuracy
+  file-management.spec.ts   Upload/job deletion, preview endpoints
+  file-settings.spec.ts     File-level print settings detection
+  settings.spec.ts          Settings modal, printer defaults, filament library, presets
+  errors.spec.ts            Error handling, edge cases, delete safety
 ```
 
 ### Test Fixtures
@@ -776,20 +792,29 @@ Test 3MF files live in `test-data/`:
 | `Dragon Scale infinity.3mf` | Multi-plate file with 3 plates |
 | `Dragon Scale infinity-1-plate-2-colours.3mf` | Single plate, 2 colours |
 | `Dragon Scale infinity-1-plate-2-colours-new-plate.3mf` | Variant for plater_name bug |
+| `Shashibo-h2s-textured.3mf` | Multi-plate, tree supports, outer-only brim, multicolour |
+| `PrusaSlicer_majorasmask_2colour.3mf` | PrusaSlicer 2-colour format compatibility |
+| `PrusaSlicer-printables-Korok_mask_4colour.3mf` | PrusaSlicer 4-colour from Printables |
 
 ### Test Speed Categories
 
 | Suite | Speed | Needs Slicer | Coverage |
 |-------|-------|-------------|----------|
-| smoke | Fast | No | Page load, Alpine init, tabs, API health |
+| smoke | Fast | No | Page load, Alpine init, header, API health |
 | api | Fast | No | All API endpoint shapes and error handling |
 | responsive | Fast | No | 3 viewport sizes render correctly |
 | upload | Medium | No | Upload flow, configure step, navigation |
-| settings | Medium | No | Presets, filament CRUD, form interactions |
+| errors | Medium | No | Error handling, edge cases, delete safety |
+| settings | Medium | No | Settings modal, presets, filament CRUD |
+| file-settings | Medium | No | File-level print settings detection |
 | multicolour | Medium | No | Colour detection, overrides, fallbacks |
+| plate-colors | Medium | No | Per-plate colour detection accuracy |
 | multiplate | Slow | No | Plate detection, cards, selection |
 | file-management | Medium | Yes* | Upload/job deletion lifecycle |
 | slicing | Slow | Yes | Full slice end-to-end, metadata, download |
+| slice-overrides | Slow | Yes | Setting overrides (temps, walls, infill, prime tower) |
+| slice-plate | Slow | Yes | Individual plate slicing |
+| multicolour-slice | Slow | Yes | Multi-colour slicing workflow |
 | viewer | Slow | Yes | Canvas rendering, layer controls, API |
 
 *file-management creates and deletes its own test data

@@ -24,3 +24,17 @@
 - **License**: MakerWorld Standard Digital License (Exclusive)
 - **Usage**: Licensed for printing and testing only. Included in this repository solely for automated test purposes.
 - **Note**: Multi-plate file with tree supports, outer-only brim, and multicolour. Used for file print settings detection tests.
+
+## PrusaSlicer_majorasmask_2colour.3mf
+
+- **Model**: Majora's Mask (2-colour)
+- **Source**: PrusaSlicer export
+- **License**: Unknown (community model)
+- **Note**: PrusaSlicer 2-colour format compatibility testing. Used to verify non-Bambu 3MF parsing.
+
+## PrusaSlicer-printables-Korok_mask_4colour.3mf
+
+- **Model**: Korok Mask (4-colour)
+- **Source**: Printables (PrusaSlicer export)
+- **License**: Unknown (community model)
+- **Note**: PrusaSlicer 4-colour model for format compatibility testing. Verifies multi-colour detection from PrusaSlicer exports.

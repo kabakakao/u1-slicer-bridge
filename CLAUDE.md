@@ -16,7 +16,7 @@ Docker Compose stack: **api** (Python/FastAPI) + **web** (nginx + Alpine.js) + *
 
 ## Workflow
 
-Upload 3MF → validate plate bounds → configure filament/settings → slice with Snapmaker OrcaSlicer → preview G-code → download
+Upload 3MF → validate plate bounds → configure filament/settings → slice with Snapmaker OrcaSlicer → preview G-code → download/print
 
 ## Milestones & Plans
 
@@ -32,3 +32,6 @@ Milestone status lives in [AGENTS.md](AGENTS.md) (section: "Milestones Status").
 - Arc fitting (`enable_arc_fitting = 1`) is required to avoid 5-6x G-code bloat
 - Bambu Studio files need trimesh rebuild before slicing (auto-detected in profile_embedder.py)
 - Full 3MF sanitization docs (parameter clamping, metadata stripping, wipe tower bounds) in [README.md § 3MF Sanitization](README.md)
+- Moonraker URL is persisted in `printer_settings` table (configurable via Settings modal)
+- Extruder presets API requires exactly 4 slots (E1-E4) — tests must send all 4
+- 3-way setting modes (model/orca/override) stored in `slicing_defaults.setting_modes` as JSON
