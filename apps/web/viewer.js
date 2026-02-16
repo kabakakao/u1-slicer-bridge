@@ -23,6 +23,14 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
         offsetY: 0,
         showTravel: false,
 
+        // Zoom and pan
+        zoomLevel: 1,
+        panX: 0,
+        panY: 0,
+        isPanning: false,
+        lastPointerX: 0,
+        lastPointerY: 0,
+
         // Loading state
         loading: false,
         error: null,
@@ -246,13 +254,14 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
             // Draw U1 bed outline at (0,0) to (270,270) in G-code coordinates
             const bedX = this.toCanvasX(0);
             const bedY = this.toCanvasY(270);  // Top-left corner (Y is flipped)
-            const bedWidth = 270 * this.scale;
-            const bedHeight = 270 * this.scale;
+            const effectiveScale = this.scale * this.zoomLevel;
+            const bedWidth = 270 * effectiveScale;
+            const bedHeight = 270 * effectiveScale;
 
             // Draw grid lines every 27mm (10% of bed size for reference)
             this.ctx.strokeStyle = '#3a3a3a';
             this.ctx.lineWidth = 1;
-            const gridSpacing = 27 * this.scale;
+            const gridSpacing = 27 * effectiveScale;
 
             for (let i = 1; i < 10; i++) {
                 // Vertical lines
@@ -344,12 +353,13 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
             const exceedsBed = printWidth > 270 || printHeight > 270;
             this.ctx.strokeStyle = exceedsBed ? '#dc2626' : '#f59e0b';
             this.ctx.lineWidth = 2;
+            const effectiveScale = this.scale * this.zoomLevel;
             this.ctx.setLineDash([5, 5]);
             this.ctx.strokeRect(
                 this.toCanvasX(this.bounds.min_x),
                 this.toCanvasY(this.bounds.max_y),
-                printWidth * this.scale,
-                printHeight * this.scale
+                printWidth * effectiveScale,
+                printHeight * effectiveScale
             );
             this.ctx.setLineDash([]);
 
@@ -453,21 +463,22 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
 
         /**
          * Convert G-code X coordinate to canvas X
-         * Maps from bed coordinate (0-270mm) to canvas pixels
+         * Applies base fit-to-bed transform, then zoom around canvas center + pan
          */
         toCanvasX(x) {
-            return this.offsetX + x * this.scale;
+            const cx = this.canvas.parentElement.clientWidth / 2;
+            const base = this.offsetX + x * this.scale;
+            return cx + (base - cx) * this.zoomLevel + this.panX;
         },
 
         /**
          * Convert G-code Y coordinate to canvas Y (flip Y axis)
-         * Maps from bed coordinate (0-270mm) to canvas pixels
-         * Y-axis is flipped (0 at bottom in G-code, top in canvas)
+         * Applies base fit-to-bed transform, then zoom around canvas center + pan
          */
         toCanvasY(y) {
-            const container = this.canvas.parentElement;
-            const bedSize = 270;
-            return container.clientHeight - (this.offsetY + y * this.scale);
+            const cy = this.canvas.parentElement.clientHeight / 2;
+            const base = this.canvas.parentElement.clientHeight - (this.offsetY + y * this.scale);
+            return cy + (base - cy) * this.zoomLevel + this.panY;
         },
 
         /**
@@ -509,6 +520,100 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
         toggleTravel() {
             this.showTravel = !this.showTravel;
             this.renderLayer(this.currentLayer);
+        },
+
+        /**
+         * Zoom in (toward canvas center)
+         */
+        zoomIn() {
+            this.zoomAt(1.3);
+        },
+
+        /**
+         * Zoom out (from canvas center)
+         */
+        zoomOut() {
+            this.zoomAt(1 / 1.3);
+        },
+
+        /**
+         * Reset view to fit bed
+         */
+        resetView() {
+            this.zoomLevel = 1;
+            this.panX = 0;
+            this.panY = 0;
+            if (this.layerCache.has(this.currentLayer)) {
+                this.renderLayer(this.currentLayer);
+            }
+        },
+
+        /**
+         * Zoom by factor, optionally around a specific canvas point
+         */
+        zoomAt(factor, mx, my) {
+            const container = this.canvas.parentElement;
+            const cx = container.clientWidth / 2;
+            const cy = container.clientHeight / 2;
+            if (mx === undefined) mx = cx;
+            if (my === undefined) my = cy;
+
+            const oldZoom = this.zoomLevel;
+            const newZoom = Math.max(0.25, Math.min(30, oldZoom * factor));
+            const ratio = 1 - newZoom / oldZoom;
+
+            // Adjust pan so the point under (mx, my) stays fixed
+            this.panX += (mx - cx - this.panX) * ratio;
+            this.panY += (my - cy - this.panY) * ratio;
+            this.zoomLevel = newZoom;
+
+            if (this.layerCache.has(this.currentLayer)) {
+                this.renderLayer(this.currentLayer);
+            }
+        },
+
+        /**
+         * Mouse wheel zoom (toward cursor)
+         */
+        onWheel(e) {
+            e.preventDefault();
+            const rect = this.canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+            this.zoomAt(factor, mx, my);
+        },
+
+        /**
+         * Start panning on pointer down
+         */
+        onPointerDown(e) {
+            if (e.button !== 0) return;
+            this.isPanning = true;
+            this.lastPointerX = e.clientX;
+            this.lastPointerY = e.clientY;
+            this.canvas.setPointerCapture(e.pointerId);
+        },
+
+        /**
+         * Pan on pointer move
+         */
+        onPointerMove(e) {
+            if (!this.isPanning) return;
+            this.panX += e.clientX - this.lastPointerX;
+            this.panY += e.clientY - this.lastPointerY;
+            this.lastPointerX = e.clientX;
+            this.lastPointerY = e.clientY;
+            if (this.layerCache.has(this.currentLayer)) {
+                this.renderLayer(this.currentLayer);
+            }
+        },
+
+        /**
+         * Stop panning on pointer up
+         */
+        onPointerUp() {
+            this.isPanning = false;
         }
     };
 }

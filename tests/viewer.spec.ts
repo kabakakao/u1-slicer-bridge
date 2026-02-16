@@ -41,6 +41,32 @@ test.describe('G-code Viewer', () => {
     await expect(slider.first()).toBeVisible();
   });
 
+  test('viewer shows zoom controls', async ({ page }) => {
+    await waitForApp(page);
+    await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
+    await page.getByRole('button', { name: /Slice Now/i }).click();
+    await waitForSliceComplete(page);
+
+    await page.locator('canvas').waitFor({ state: 'visible', timeout: 15_000 });
+    await page.waitForTimeout(2_000);
+
+    // Zoom buttons should be visible
+    await expect(page.getByTitle('Zoom in')).toBeVisible();
+    await expect(page.getByTitle('Zoom out')).toBeVisible();
+    await expect(page.getByTitle('Fit to bed')).toBeVisible();
+
+    // Click zoom in and verify zoom level indicator appears
+    await page.getByTitle('Zoom in').click();
+    const zoomIndicator = page.locator('.bg-gray-900 .text-white\\/60');
+    await expect(zoomIndicator).toBeVisible({ timeout: 2_000 });
+    await expect(zoomIndicator).toHaveText(/\d+%/);
+
+    // Reset view
+    await page.getByTitle('Fit to bed').click();
+    // Zoom indicator hides at 100%
+    await expect(zoomIndicator).not.toBeVisible({ timeout: 2_000 });
+  });
+
   test('viewer has no initialization errors', async ({ page }) => {
     await waitForApp(page);
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');

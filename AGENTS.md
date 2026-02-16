@@ -53,7 +53,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ### Preview & UX
 ✅ M7 preview - Interactive 2D layer viewer  
 ❌ M12 3D G-code viewer - Interactive 3D preview of sliced G-code  
-❌ M20 G-code viewer zoom - Add zooming in/out controls for preview
+✅ M20 G-code viewer zoom - Zoom in/out buttons, scroll-wheel zoom toward cursor, click-drag pan, fit-to-bed reset
 ✅ M21 upload/configure loading UX - Add progress indicator while upload is being prepared for filament/configuration selection
 ✅ M22 navigation consistency - Standardize actions like "Back" and "Slice Another" across the UI
 
@@ -66,12 +66,13 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 
 ### Performance
 ✅ M25 API performance - Metadata caching at upload, async slicing (asyncio.to_thread), batch 3MF reads, profile caching
+❌ M27 concurrency hardening - Fix temp file race in profile_embedder, add uvicorn workers, Redis semaphore to cap concurrent slices
 
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 ❌ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info/profiles and auto-download 3MF into upload pipeline. Feasibility researched; plan in `memory/milestone-makerworld-integration.md`
 
-**Current:** 21.7 / 26 complete (83%)
+**Current:** 22.7 / 27 complete (84%)
 
 ---
 
