@@ -39,7 +39,7 @@ See **[DEPLOY.md](DEPLOY.md)** for the full deployment guide.
 # Pre-built images (fastest)
 curl -O https://raw.githubusercontent.com/taylormadearmy/u1-slicer-bridge/master/docker-compose.prod.yml
 docker compose -f docker-compose.prod.yml up -d
-# Open http://localhost:8080
+# Open http://localhost:8234
 
 # Or build from source
 git clone https://github.com/taylormadearmy/u1-slicer-bridge.git
@@ -146,7 +146,7 @@ Inherited `wipe_tower_x`/`wipe_tower_y` values can place the prime tower outside
    curl http://localhost:8000/healthz
    ```
 
-5. Open the web UI: http://localhost:8080
+5. Open the web UI: http://localhost:8234
 
 ## Storage Layout
 

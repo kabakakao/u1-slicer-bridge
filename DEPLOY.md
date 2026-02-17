@@ -12,7 +12,7 @@ curl -O https://raw.githubusercontent.com/taylormadearmy/u1-slicer-bridge/master
 docker compose -f docker-compose.prod.yml up -d
 
 # 3. Open your browser
-#    http://localhost:8080
+#    http://localhost:8234
 ```
 
 That's it. On first startup the database is created automatically and a starter filament library (PLA, PETG, ABS, TPU) is seeded. You can start uploading 3MF files immediately.
@@ -22,7 +22,7 @@ That's it. On first startup the database is created automatically and a starter 
 Create a `.env` file next to the compose file:
 
 ```bash
-# Change the web UI port (default 8080)
+# Change the web UI port (default 8234)
 WEB_PORT=9090
 
 # Connect to your printer's Moonraker API (can also be set in the UI)
@@ -52,7 +52,7 @@ cp .env.example .env
 # 3. Build and start
 docker compose up -d --build
 
-# 4. Open http://localhost:8080
+# 4. Open http://localhost:8234
 ```
 
 **Development workflow:**
@@ -79,7 +79,7 @@ The URL is persisted in the database, so you only set it once.
 
 No configuration needed. The app allows connections from any device on your network by default.
 
-- Server at `192.168.1.100` → open `http://192.168.1.100:8080` from any phone/tablet/PC on the same LAN.
+- Server at `192.168.1.100` → open `http://192.168.1.100:8234` from any phone/tablet/PC on the same LAN.
 
 ---
 
