@@ -39,3 +39,15 @@ Milestone status lives in [AGENTS.md](AGENTS.md) (section: "Milestones Status").
 - Extruder presets API requires exactly 4 slots (E1-E4) — tests must send all 4
 - 3-way setting modes (model/orca/override) stored in `slicing_defaults.setting_modes` as JSON
 - When adding any third-party library or dependency, update [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) with name, version, license, copyright, and source URL
+
+## Release Workflow
+
+Docker images are built and pushed to GHCR automatically via `.github/workflows/release.yml` when a version tag is pushed. **After pushing commits, always ask the user if they want to tag a release and build new Docker images.**
+
+```bash
+# Tag and push to trigger GHCR image build
+git tag v1.x.x
+git push origin v1.x.x
+```
+
+Images published: `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web,worker}:{version,latest}`

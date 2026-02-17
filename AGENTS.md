@@ -141,6 +141,16 @@ Avoid:
 - plaintext secrets
 - skipping tests after changes (even "small" ones can break things)
 
+### Release & Docker Images
+
+After pushing commits, **always ask the user if they want to tag a release** to trigger Docker image builds on GHCR.
+
+```bash
+git tag v1.x.x && git push origin v1.x.x
+```
+
+This triggers `.github/workflows/release.yml` which builds and pushes `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web,worker}` with semver + `latest` tags. Production users pulling `docker-compose.prod.yml` get updates via `:latest`.
+
 ### Third-Party License Attribution
 
 When adding vendored libraries, CDN dependencies, or new pip/npm packages:
