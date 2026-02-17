@@ -53,8 +53,8 @@ ENV/
 ehthumbs.db
 Thumbs.db
 
-# Claude Code user-specific settings
-.claude/settings.local.json
+# Claude Code
+.claude/
 
 # OpenCode editor config
 .opencode/
