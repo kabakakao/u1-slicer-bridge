@@ -32,8 +32,11 @@ test.describe('Settings Modal', () => {
   test('filament library shows entries', async ({ page }) => {
     const filaments = await getAppState(page, 'filaments') as any[];
     if (filaments.length > 0) {
-      // At least one filament card should be visible in the library section
-      await expect(page.getByText(filaments[0].name, { exact: true }).first()).toBeVisible();
+      // Scroll to the Filament Library section (below viewport)
+      const heading = page.getByRole('heading', { name: 'Filament Library' });
+      await heading.scrollIntoViewIfNeeded();
+      // At least one filament card should be visible (use <p> to avoid hidden dropdown spans)
+      await expect(page.locator('p').filter({ hasText: filaments[0].name }).first()).toBeVisible();
     }
   });
 
@@ -59,11 +62,11 @@ test.describe('Settings Modal', () => {
     expect(showForm).toBe(false);
   });
 
-  test('Initialize Starter Library button is present', async ({ page }) => {
+  test('Reset to Starter Library button is present', async ({ page }) => {
     // Scroll to Filament Library section (may be below viewport)
     const heading = page.getByRole('heading', { name: 'Filament Library' });
     await heading.scrollIntoViewIfNeeded();
-    const initBtn = page.getByRole('button', { name: /Initialize Starter Library/i });
+    const initBtn = page.getByRole('button', { name: /Reset to Starter Library/i });
     await expect(initBtn).toBeVisible();
     // Button is disabled when filaments already exist — just check it's rendered
     const filaments = await getAppState(page, 'filaments') as any[];

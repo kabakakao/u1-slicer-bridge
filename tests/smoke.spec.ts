@@ -39,13 +39,13 @@ test.describe('Smoke Tests', () => {
     await expect(dropzone).toBeVisible();
   });
 
-  test('file input accepts .3mf', async ({ page }) => {
-    const input = page.locator('input[type="file"][accept=".3mf"]');
+  test('file input accepts .3mf and .stl', async ({ page }) => {
+    const input = page.locator('input[type="file"][accept=".3mf,.stl"]');
     await expect(input).toBeAttached();
   });
 
   test('printer status indicator is shown', async ({ page }) => {
-    const status = page.locator('header').locator('text=/Checking|Connected|Offline|Error/i');
+    const status = page.locator('header').getByRole('button', { name: /Checking|Connected|Offline|Error/i });
     await expect(status.first()).toBeVisible();
   });
 
@@ -66,6 +66,6 @@ test.describe('Smoke Tests', () => {
     // Close settings modal via X button (scope to the visible modal)
     await page.getByTitle('Close').first().click();
     await expect(page.getByRole('heading', { name: 'Printer Defaults' })).not.toBeVisible();
-    await expect(page.getByText('Upload 3MF File')).toBeVisible();
+    await expect(page.getByText('Upload File')).toBeVisible();
   });
 });

@@ -446,26 +446,35 @@ def detect_colors_per_plate(file_path: Path) -> Dict[int, List[str]]:
     Returns a dict mapping plate_id (1-based) to a list of color hex codes.
     Empty dict if per-plate detection is not possible.
 
-    Uses two sources and merges them:
+    Uses three sources and merges them:
     - Source 1 (layer tool changes): Correct for filament-swap plates
       (MultiAsSingle mode) but may overcount for H2D plates.
     - Source 2 (model_settings per-object/part extruders): Correct for
       H2D plates with part-level extruder assignments but misses
       filament-swap plates.
+    - Source 3 (plate_N.json wipe tower): If a plate's cached slice
+      metadata contains a wipe_tower, the plate is multi-color even when
+      Sources 1+2 miss it (e.g. Bambu model_settings inconsistency).
 
     Strategy: prefer Source 2 when it finds >=2 colors (H2D), otherwise
     prefer Source 1 (filament swap), otherwise fall back to Source 2.
+    Source 3 upgrades any single-color result to the first N filament
+    colours (N = number of extruders).
     """
     result: Dict[int, List[str]] = {}
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
             # Get filament colour palette from project_settings
             filament_colors: List[str] = []
+            num_extruders = 2
             try:
                 settings = json.loads(zf.read("Metadata/project_settings.config"))
                 filament_colors = settings.get("filament_colour", [])
                 if not isinstance(filament_colors, list):
                     filament_colors = []
+                ext_colours = settings.get("extruder_colour", [])
+                if isinstance(ext_colours, list) and len(ext_colours) >= 2:
+                    num_extruders = len(ext_colours)
             except (KeyError, ValueError):
                 pass
 
@@ -526,8 +535,26 @@ def detect_colors_per_plate(file_path: Path) -> Dict[int, List[str]]:
             except Exception:
                 pass
 
-            # Merge: collect all plate IDs from both sources
-            all_plate_ids = set(source1.keys()) | set(source2.keys())
+            # Source 3: Wipe tower presence in plate_N.json (Bambu slice cache).
+            # A wipe tower means the plate was sliced as multi-color,
+            # even if model_settings extruder data is inconsistent.
+            wipe_tower_plates: set = set()
+            for name in zf.namelist():
+                if not name.startswith("Metadata/plate_") or not name.endswith(".json"):
+                    continue
+                try:
+                    plate_data = json.loads(zf.read(name))
+                    bbox_objects = plate_data.get("bbox_objects", [])
+                    has_wipe = any(o.get("name") == "wipe_tower" for o in bbox_objects)
+                    if has_wipe:
+                        # Extract plate number from filename (plate_2.json -> 2)
+                        num_str = name.split("plate_")[1].split(".")[0]
+                        wipe_tower_plates.add(int(num_str))
+                except Exception:
+                    pass
+
+            # Merge: collect all plate IDs from all sources
+            all_plate_ids = set(source1.keys()) | set(source2.keys()) | wipe_tower_plates
             for pid in all_plate_ids:
                 s1 = source1.get(pid, [])
                 s2 = source2.get(pid, [])
@@ -542,6 +569,13 @@ def detect_colors_per_plate(file_path: Path) -> Dict[int, List[str]]:
                     result[pid] = s2
                 elif s1:
                     result[pid] = s1
+
+                # Source 3: if wipe tower detected but we only found 1 color,
+                # upgrade to the first N filament colors (N = num extruders).
+                if pid in wipe_tower_plates and len(result.get(pid, [])) < 2:
+                    multi = _extruders_to_colors(set(range(1, num_extruders + 1)), filament_colors)
+                    if len(multi) >= 2:
+                        result[pid] = multi
 
     except Exception:
         pass

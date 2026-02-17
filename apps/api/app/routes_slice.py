@@ -1320,7 +1320,7 @@ async def get_upload_plates(upload_id: int):
                 validation = validator.validate_3mf_bounds(source_3mf, plate.plate_id)
 
                 plate_dict = plate.to_dict()
-                plate_colors = colors_per_plate.get(plate.plate_id, global_colors[:1])
+                plate_colors = colors_per_plate.get(plate.plate_id, global_colors)
                 plate_dict.update({
                     "detected_colors": plate_colors,
                     "preview_url": (
@@ -1339,7 +1339,7 @@ async def get_upload_plates(upload_id: int):
             except Exception as e:
                 logger.error(f"Failed to validate plate {plate.plate_id}: {str(e)}")
                 plate_dict = plate.to_dict()
-                plate_colors = colors_per_plate.get(plate.plate_id, global_colors[:1])
+                plate_colors = colors_per_plate.get(plate.plate_id, global_colors)
                 plate_dict.update({
                     "detected_colors": plate_colors,
                     "preview_url": (

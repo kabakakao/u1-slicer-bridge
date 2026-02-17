@@ -40,10 +40,10 @@ export function fixture(name: string) {
   return path.resolve(__dirname, '..', 'test-data', name);
 }
 
-/** Upload a 3MF file via the hidden file input */
+/** Upload a file via the hidden file input */
 export async function uploadFile(page: Page, fixtureName: string) {
   const filePath = fixture(fixtureName);
-  const fileInput = page.locator('input[type="file"][accept=".3mf"]');
+  const fileInput = page.locator('input[type="file"][accept=".3mf,.stl"]');
   await fileInput.setInputFiles(filePath);
   // Wait for upload to complete and move to configure step.
   // Large multi-plate files (e.g. Dragon Scale 3.6MB) need ~40s for

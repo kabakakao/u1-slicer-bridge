@@ -69,6 +69,7 @@ function app() {
 
         // Printer status
         printerConnected: false,
+        printerBusy: false,
         printerStatus: 'Checking...',
 
         // Printer settings (for Settings modal)
@@ -172,6 +173,7 @@ function app() {
             try {
                 const status = await api.getPrinterStatus();
                 this.printerConnected = status.connected;
+                this.printerBusy = ['printing', 'paused'].includes(status.print_status?.state);
                 // Show print progress in header when actively printing
                 if (status.print_status && status.print_status.state === 'printing') {
                     const pct = Math.round((status.print_status.progress || 0) * 100);
@@ -844,8 +846,9 @@ function app() {
          */
         async handleFileUpload(file) {
             // Validate file type
-            if (!file.name.endsWith('.3mf')) {
-                this.showError('Please upload a .3mf file');
+            const lower = file.name.toLowerCase();
+            if (!lower.endsWith('.3mf') && !lower.endsWith('.stl')) {
+                this.showError('Please upload a .3mf or .stl file');
                 return;
             }
 

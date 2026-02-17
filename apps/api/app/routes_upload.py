@@ -13,6 +13,7 @@ from parser_3mf import parse_3mf, detect_colors_from_3mf, detect_colors_per_plat
 from plate_validator import PlateValidator, PlateValidationError
 from config import get_printer_profile
 from multi_plate_parser import parse_multi_plate_3mf
+from stl_converter import convert_stl_to_3mf, STLConversionError
 
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -29,134 +30,176 @@ async def upload_3mf(file: UploadFile = File(...)):
     Returns upload ID and list of objects found.
     """
     # Validate file extension
-    if not file.filename or not file.filename.lower().endswith(".3mf"):
-        raise HTTPException(status_code=400, detail="Only .3mf files are supported")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+    lower_name = file.filename.lower()
+    is_stl = lower_name.endswith(".stl")
+    if not lower_name.endswith(".3mf") and not is_stl:
+        raise HTTPException(status_code=400, detail="Only .3mf and .stl files are supported")
 
-    # Generate unique filename to avoid collisions
-    file_id = uuid.uuid4().hex[:12]
-    safe_filename = f"{file_id}_{file.filename}"
-    file_path = UPLOAD_DIR / safe_filename
-
-    # Save uploaded file
+    # Read file content
     try:
         content = await file.read()
-        file_path.write_bytes(content)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
 
-    # Parse .3mf and extract object/plate metadata (single parse pass)
-    try:
-        plates, is_multi_plate = parse_multi_plate_3mf(file_path)
-        objects = parse_3mf(file_path)
-    except ValueError as e:
-        file_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        file_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Failed to parse .3mf: {str(e)}")
-
-    if not objects:
-        file_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="No valid objects found in .3mf file")
-
-    # Validate plate bounds (pass pre-parsed plates to avoid re-parsing)
-    try:
-        printer_profile = get_printer_profile("snapmaker_u1")
-        validator = PlateValidator(printer_profile)
-        validation = validator.validate_3mf_bounds(file_path, plates=plates)
-
-        # For multi-plate files, suppress combined-scene warnings when at least
-        # one individual plate fits the build volume.
-        plate_validations = []
-        if validation.get('is_multi_plate'):
-            for plate in validation.get('plates', []):
-                try:
-                    plate_id = plate['plate_id']
-                    plate_validation = validator.validate_3mf_bounds(file_path, plate_id, plates=plates)
-                    plate_validations.append({
-                        "plate_id": plate['plate_id'],
-                        "bounds": plate_validation['bounds'],
-                        "warnings": plate_validation['warnings'],
-                        "fits": plate_validation['fits']
-                    })
-                except Exception as e:
-                    logger.error(f"Failed to validate plate {plate.get('plate_id')}: {str(e)}")
-                    plate_validations.append({
-                        "plate_id": plate.get('plate_id'),
-                        "error": str(e),
-                        "fits": False
-                    })
-
-            any_plate_fits = any(p.get('fits', False) for p in plate_validations)
-            if any_plate_fits:
-                validation['warnings'] = [
-                    w for w in validation.get('warnings', [])
-                    if "exceeds build volume" not in w.lower()
-                    and "multi-plate file with" not in w.lower()
-                ]
-                validation['fits'] = True
-        else:
-            plate_validations = []
-    except PlateValidationError as e:
-        file_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=f"Plate validation failed: {str(e)}")
-    except Exception as e:
-        file_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Failed to validate plate: {str(e)}")
-
-    # Detect colors and print settings before storing (so we can cache them)
-    detected_colors = []
-    try:
-        detected_colors = detect_colors_from_3mf(file_path)
-    except Exception as e:
-        logger.warning(f"Failed to detect colors: {e}")
-
-    file_print_settings = {}
-    try:
-        file_print_settings = detect_print_settings(file_path)
-    except Exception as e:
-        logger.warning(f"Failed to detect print settings: {e}")
-
-    # Build plate_metadata cache for multi-plate files (avoids re-parsing on every GET /plates)
-    is_multi_plate = validation.get('is_multi_plate', False)
-    plate_metadata_json = None
-    if is_multi_plate and plates:
-        from routes_slice import _index_preview_assets
+    # For STL files, convert to 3MF first
+    if is_stl:
         try:
-            preview_assets = _index_preview_assets(file_path)
-            preview_map = preview_assets.get("by_plate", {})
-            has_generic_preview = isinstance(preview_assets.get("best"), str)
-
-            colors_per_plate = {}
-            try:
-                colors_per_plate = detect_colors_per_plate(file_path)
-            except Exception:
-                pass
-
-            plate_info_cache = []
-            for plate in plates:
-                plate_dict = plate.to_dict() if hasattr(plate, 'to_dict') else (plate if isinstance(plate, dict) else {})
-                pid = plate_dict.get('plate_id') or (plate.plate_id if hasattr(plate, 'plate_id') else None)
-
-                # Per-plate colors if available; else assume single-extruder (first color)
-                plate_colors = colors_per_plate.get(pid, (detected_colors or [])[:1])
-                pv = next((p for p in plate_validations if p.get('plate_id') == pid), {})
-
-                plate_dict.update({
-                    "detected_colors": plate_colors,
-                    "has_preview": pid in preview_map if isinstance(preview_map, dict) else False,
-                    "has_generic_preview": has_generic_preview,
-                    "validation": {
-                        "fits": pv.get('fits', False),
-                        "warnings": pv.get('warnings', []),
-                        "bounds": pv.get('bounds')
-                    }
-                })
-                plate_info_cache.append(plate_dict)
-
-            plate_metadata_json = json.dumps(plate_info_cache)
+            conversion = convert_stl_to_3mf(content, file.filename)
+            file_path = conversion["file_path"]
+        except STLConversionError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    else:
+        # Save 3MF directly
+        file_id = uuid.uuid4().hex[:12]
+        safe_filename = f"{file_id}_{file.filename}"
+        file_path = UPLOAD_DIR / safe_filename
+        try:
+            file_path.write_bytes(content)
         except Exception as e:
-            logger.warning(f"Failed to build plate metadata cache: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+    # --- STL: simplified metadata path (single object, no multi-plate/colors/settings) ---
+    if is_stl:
+        try:
+            objects = parse_3mf(file_path)
+        except Exception:
+            objects = []
+        objects_count = len(objects) if objects else 1
+
+        try:
+            printer_profile = get_printer_profile("snapmaker_u1")
+            validator = PlateValidator(printer_profile)
+            validation = validator.validate_3mf_bounds(file_path)
+        except Exception as e:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"Bounds validation failed: {str(e)}")
+
+        detected_colors = []
+        file_print_settings = {}
+        is_multi_plate = False
+        plates = []
+        plate_validations = []
+        plate_metadata_json = None
+
+    # --- 3MF: full metadata extraction path ---
+    else:
+        # Parse .3mf and extract object/plate metadata (single parse pass)
+        try:
+            plates, is_multi_plate = parse_multi_plate_3mf(file_path)
+            objects = parse_3mf(file_path)
+        except ValueError as e:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=500, detail=f"Failed to parse .3mf: {str(e)}")
+
+        if not objects:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="No valid objects found in .3mf file")
+
+        objects_count = len(objects)
+
+        # Validate plate bounds (pass pre-parsed plates to avoid re-parsing)
+        try:
+            printer_profile = get_printer_profile("snapmaker_u1")
+            validator = PlateValidator(printer_profile)
+            validation = validator.validate_3mf_bounds(file_path, plates=plates)
+
+            # For multi-plate files, suppress combined-scene warnings when at least
+            # one individual plate fits the build volume.
+            plate_validations = []
+            if validation.get('is_multi_plate'):
+                for plate in validation.get('plates', []):
+                    try:
+                        plate_id = plate['plate_id']
+                        plate_validation = validator.validate_3mf_bounds(file_path, plate_id, plates=plates)
+                        plate_validations.append({
+                            "plate_id": plate['plate_id'],
+                            "bounds": plate_validation['bounds'],
+                            "warnings": plate_validation['warnings'],
+                            "fits": plate_validation['fits']
+                        })
+                    except Exception as e:
+                        logger.error(f"Failed to validate plate {plate.get('plate_id')}: {str(e)}")
+                        plate_validations.append({
+                            "plate_id": plate.get('plate_id'),
+                            "error": str(e),
+                            "fits": False
+                        })
+
+                any_plate_fits = any(p.get('fits', False) for p in plate_validations)
+                if any_plate_fits:
+                    validation['warnings'] = [
+                        w for w in validation.get('warnings', [])
+                        if "exceeds build volume" not in w.lower()
+                        and "multi-plate file with" not in w.lower()
+                    ]
+                    validation['fits'] = True
+            else:
+                plate_validations = []
+        except PlateValidationError as e:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"Plate validation failed: {str(e)}")
+        except Exception as e:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=500, detail=f"Failed to validate plate: {str(e)}")
+
+        # Detect colors and print settings before storing (so we can cache them)
+        detected_colors = []
+        try:
+            detected_colors = detect_colors_from_3mf(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to detect colors: {e}")
+
+        file_print_settings = {}
+        try:
+            file_print_settings = detect_print_settings(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to detect print settings: {e}")
+
+        # Build plate_metadata cache for multi-plate files (avoids re-parsing on every GET /plates)
+        is_multi_plate = validation.get('is_multi_plate', False)
+        plate_metadata_json = None
+        if is_multi_plate and plates:
+            from routes_slice import _index_preview_assets
+            try:
+                preview_assets = _index_preview_assets(file_path)
+                preview_map = preview_assets.get("by_plate", {})
+                has_generic_preview = isinstance(preview_assets.get("best"), str)
+
+                colors_per_plate = {}
+                try:
+                    colors_per_plate = detect_colors_per_plate(file_path)
+                except Exception:
+                    pass
+
+                plate_info_cache = []
+                for plate in plates:
+                    plate_dict = plate.to_dict() if hasattr(plate, 'to_dict') else (plate if isinstance(plate, dict) else {})
+                    pid = plate_dict.get('plate_id') or (plate.plate_id if hasattr(plate, 'plate_id') else None)
+
+                    # Per-plate colors if available; else use all global colors
+                    plate_colors = colors_per_plate.get(pid, detected_colors or [])
+                    pv = next((p for p in plate_validations if p.get('plate_id') == pid), {})
+
+                    plate_dict.update({
+                        "detected_colors": plate_colors,
+                        "has_preview": pid in preview_map if isinstance(preview_map, dict) else False,
+                        "has_generic_preview": has_generic_preview,
+                        "validation": {
+                            "fits": pv.get('fits', False),
+                            "warnings": pv.get('warnings', []),
+                            "bounds": pv.get('bounds')
+                        }
+                    })
+                    plate_info_cache.append(plate_dict)
+
+                plate_metadata_json = json.dumps(plate_info_cache)
+            except Exception as e:
+                logger.warning(f"Failed to build plate metadata cache: {e}")
 
     # Store in database with bounds information and cached metadata
     pool = get_pg_pool()
@@ -194,7 +237,7 @@ async def upload_3mf(file: UploadFile = File(...)):
         "upload_id": upload_id,
         "filename": file.filename,
         "file_size": len(content),
-        "objects_count": len(objects),
+        "objects_count": objects_count,
         "bounds": validation['bounds'],
         "warnings": validation['warnings'],
         "fits": validation['fits']

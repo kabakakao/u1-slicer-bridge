@@ -58,7 +58,7 @@ test.describe('Per-Plate Color Detection', () => {
 
     // Upload via UI (file input) with extended timeout
     const filePath = path.resolve(__dirname, '..', 'test-data', 'Shashibo-h2s-textured.3mf');
-    const fileInput = page.locator('input[type="file"][accept=".3mf"]');
+    const fileInput = page.locator('input[type="file"][accept=".3mf,.stl"]');
     await fileInput.setInputFiles(filePath);
 
     // Wait for upload + parse to complete (large multi-plate file)
