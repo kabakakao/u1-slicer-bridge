@@ -74,6 +74,7 @@ temp/
 node_modules/
 test-results/
 playwright-report/
+tests/.test-baseline
 
 # Old/backup files
 *_old.py

@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>U1 Slicer Bridge</title>
+    <!-- Vendored 3D libraries (LAN-first, no CDN) — Three.js r159 + gcode-preview v2.18.0 -->
+    <script src="lib/three.min.js"></script>
+    <script src="lib/gcode-preview.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.tailwindcss.com/3.4.0"></script>
     <style>
@@ -699,7 +702,8 @@
             <!-- Step 3: Slicing Progress -->
             <div x-show="currentStep === 'slicing'" x-cloak>
                 <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
-                    <h2 class="text-lg md:text-xl font-semibold mb-4">Slicing Your Print...</h2>
+                    <h2 class="text-lg md:text-xl font-semibold mb-1">Slicing Your Print...</h2>
+                    <p class="text-sm text-gray-500 mb-3" x-text="selectedUpload?.filename"></p>
 
                     <div class="py-8">
                         <div class="relative pt-1">
@@ -739,6 +743,7 @@
                             </svg>
                         </div>
                         <h2 class="text-2xl font-bold text-gray-900">Your G-code is Ready!</h2>
+                        <p class="text-sm text-gray-500 mt-1" x-text="selectedUpload?.filename"></p>
                     </div>
 
                     <!-- Print Summary -->
@@ -808,16 +813,10 @@
             <h3 class="text-lg font-semibold mb-4">G-code Preview</h3>
 
             <template x-if="sliceResult && sliceResult.job_id">
-                <div x-data="gcodeViewer(sliceResult.job_id, sliceResult.filament_colors)" x-init="init()" class="space-y-4">
+                <div x-data="gcodeViewer(sliceResult.job_id, sliceResult.filament_colors)" class="space-y-4">
                 <!-- Canvas Container -->
                 <div class="relative bg-gray-900 rounded-lg overflow-hidden" style="height: 400px;">
-                    <canvas x-ref="canvas" class="w-full h-full"
-                            :class="isPanning ? 'cursor-grabbing' : 'cursor-grab'"
-                            @wheel.prevent="onWheel($event)"
-                            @pointerdown="onPointerDown($event)"
-                            @pointermove="onPointerMove($event)"
-                            @pointerup="onPointerUp($event)"
-                            @pointerleave="onPointerUp($event)"></canvas>
+                    <canvas x-ref="canvas" class="w-full h-full"></canvas>
 
                     <!-- Zoom controls overlay -->
                     <div class="absolute top-2 right-2 flex flex-col gap-1 z-10">
@@ -833,14 +832,15 @@
                         </button>
                     </div>
 
-                    <!-- Zoom level indicator -->
-                    <div class="absolute bottom-2 right-2 text-xs text-white/60 z-10"
-                         x-show="zoomLevel !== 1"
-                         x-text="`${Math.round(zoomLevel * 100)}%`"></div>
-
                     <!-- Loading overlay -->
                     <div x-show="loading" class="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-                        <div class="text-white text-sm">Loading layers...</div>
+                        <div class="text-white text-sm flex items-center gap-2">
+                            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                            </svg>
+                            <span x-text="loadingMessage"></span>
+                        </div>
                     </div>
 
                     <!-- Error message -->
@@ -855,7 +855,7 @@
                     <div class="space-y-2">
                         <div class="flex justify-between text-sm">
                             <span class="text-gray-600">Layer</span>
-                            <span class="font-medium" x-text="`${currentLayer + 1} / ${totalLayers}`"></span>
+                            <span class="font-medium" x-text="displayLayerText()"></span>
                         </div>
                         <input type="range"
                                x-model.number="currentLayer"
@@ -884,7 +884,7 @@
                         <label class="flex items-center gap-2 cursor-pointer">
                             <input type="checkbox"
                                    x-model="showTravel"
-                                   @change="renderLayer(currentLayer)"
+                                   @change="toggleTravel()"
                                    class="rounded">
                             <span class="text-gray-700">Show travel moves</span>
                         </label>
@@ -910,7 +910,7 @@
 
                 <!-- Mobile hint -->
                 <p class="text-xs text-gray-500 text-center md:hidden">
-                    Use slider or buttons to navigate layers
+                    Drag to rotate, pinch to zoom, two fingers to pan
                 </p>
             </div>
             </template>

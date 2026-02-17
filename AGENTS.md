@@ -52,7 +52,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 
 ### Preview & UX
 ✅ M7 preview - Interactive 2D layer viewer
-❌ M12 3D G-code viewer - Interactive 3D preview of sliced G-code. Library research in `memory/gcode-viewer-research.md`; top candidate: `gcode-preview` (npm, MIT, Three.js, multi-color + arc support)
+✅ M12 3D G-code viewer - Interactive 3D preview using gcode-preview + Three.js (orbit rotation, multi-color, arc support, build volume)
 ✅ M20 G-code viewer zoom - Zoom in/out buttons, scroll-wheel zoom toward cursor, click-drag pan, fit-to-bed reset
 ✅ M21 upload/configure loading UX - Progress indicators during upload preparation
 ✅ M22 navigation consistency - Standardized actions across UI
@@ -73,8 +73,9 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 ❌ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info/profiles and auto-download 3MF into upload pipeline. Feasibility researched; plan in `memory/milestone-makerworld-integration.md`
+❌ M30 STL upload support - Accept .stl files via trimesh STL→3MF wrapper. Single-filament only (no multi-plate, no color detection, no embedded print settings). OrcaSlicer slices the wrapped 3MF as normal.
 
-**Current:** 27.7 / 30 complete (92%)
+**Current:** 28.7 / 30 complete (96%)
 
 ---
 

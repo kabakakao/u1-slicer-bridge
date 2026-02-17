@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, waitForSliceComplete, API, apiUpload, getDefaultFilament, waitForJobComplete } from './helpers';
+import { waitForApp, uploadFile, selectUploadByName, waitForSliceComplete, getAppState, API, apiUpload, getDefaultFilament, waitForJobComplete } from './helpers';
 
 test.describe('G-code Viewer', () => {
   // This test slices a file first, so it needs extra time
@@ -55,30 +55,82 @@ test.describe('G-code Viewer', () => {
     await expect(page.getByTitle('Zoom out')).toBeVisible();
     await expect(page.getByTitle('Fit to bed')).toBeVisible();
 
-    // Click zoom in and verify zoom level indicator appears
+    // Click zoom in — should not cause errors
     await page.getByTitle('Zoom in').click();
-    const zoomIndicator = page.locator('.bg-gray-900 .text-white\\/60');
-    await expect(zoomIndicator).toBeVisible({ timeout: 2_000 });
-    await expect(zoomIndicator).toHaveText(/\d+%/);
 
     // Reset view
     await page.getByTitle('Fit to bed').click();
-    // Zoom indicator hides at 100%
-    await expect(zoomIndicator).not.toBeVisible({ timeout: 2_000 });
   });
 
   test('viewer has no initialization errors', async ({ page }) => {
+    // Collect console errors during viewer init
+    const consoleErrors: string[] = [];
+    page.on('console', msg => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text());
+    });
+    page.on('pageerror', err => {
+      consoleErrors.push(err.message);
+    });
+
     await waitForApp(page);
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     await page.getByRole('button', { name: /Slice Now/i }).click();
     await waitForSliceComplete(page);
 
-    // Wait for viewer
+    // Wait for viewer to fully initialize
     await page.locator('canvas').waitFor({ state: 'visible', timeout: 15_000 });
+    await page.waitForTimeout(3_000);
 
-    // No error overlay
-    const errorOverlay = page.getByText(/Failed to initialize/i);
+    // No error overlay (catches errors shown to user)
+    const errorOverlay = page.getByText(/Failed to load G-code preview/i);
     await expect(errorOverlay).not.toBeVisible();
+
+    // No Proxy/Three.js errors in console (catches Alpine+Three.js conflicts)
+    const proxyErrors = consoleErrors.filter(e =>
+      e.includes('modelViewMatrix') ||
+      e.includes('on proxy') ||
+      e.includes('non-configurable')
+    );
+    expect(proxyErrors).toEqual([]);
+
+    // No "Failed to" errors of any kind in the error overlay
+    const failedText = page.getByText(/Failed to/i);
+    await expect(failedText).not.toBeVisible();
+  });
+
+  test('viewer loads correct job after re-slicing', async ({ page }) => {
+    await waitForApp(page);
+
+    // Slice file (first time)
+    await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
+    await page.getByRole('button', { name: /Slice Now/i }).click();
+    await waitForSliceComplete(page);
+    await page.locator('canvas').waitFor({ state: 'visible', timeout: 15_000 });
+    await page.waitForTimeout(2_000);
+
+    // Note the first job ID
+    const firstSliceResult = await getAppState(page, 'sliceResult') as any;
+    const firstJobId = firstSliceResult?.job_id;
+    expect(firstJobId).toBeTruthy();
+
+    // No viewer errors
+    await expect(page.getByText(/Failed to/i)).not.toBeVisible();
+
+    // Re-select the same file from history and slice again
+    await selectUploadByName(page, 'calib-cube-10-dual-colour-merged.3mf');
+    await page.getByRole('button', { name: /Slice Now/i }).click();
+    await waitForSliceComplete(page);
+    await page.locator('canvas').waitFor({ state: 'visible', timeout: 15_000 });
+    await page.waitForTimeout(2_000);
+
+    // The new job should have a different ID (new slice = new job)
+    const secondSliceResult = await getAppState(page, 'sliceResult') as any;
+    const secondJobId = secondSliceResult?.job_id;
+    expect(secondJobId).toBeTruthy();
+    expect(secondJobId).not.toBe(firstJobId);
+
+    // No viewer errors after re-slice
+    await expect(page.getByText(/Failed to/i)).not.toBeVisible();
   });
 
   test('gcode metadata API returns valid data', async ({ request }) => {

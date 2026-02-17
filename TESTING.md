@@ -11,10 +11,13 @@
 ### Running Tests
 
 ```bash
-# Run all tests (122 tests, ~15 min)
+# Fast regression (84 tests, includes calicube slice sanity, ~5 min) — use for everyday dev
+npm run test:fast
+
+# Full suite (122 tests, includes slicing, ~60 min) — use before pushing to GH
 npm test
 
-# Run quick smoke tests only (no slicing, ~15 seconds)
+# Quick smoke tests only (~15 seconds)
 npm run test:smoke
 
 # Run specific test suites

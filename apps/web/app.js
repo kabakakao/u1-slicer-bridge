@@ -151,10 +151,11 @@ function app() {
         async init() {
             console.log('U1 Slicer Bridge - Initializing...');
 
-            // Load initial data
+            // Load initial data — printer check runs in parallel so it
+            // doesn't block file lists when Moonraker is slow/unreachable.
             this.loadOrcaDefaults(); // non-blocking
             this.loadPrinterSettings(); // non-blocking, pre-load for settings modal
-            await this.checkPrinterStatus();
+            this.checkPrinterStatus(); // non-blocking — updates header indicator async
             await this.loadFilaments();
             await this.loadExtruderPresets();
             await this.loadRecentUploads();
@@ -1099,9 +1100,12 @@ function app() {
             console.log('Settings:', this.sliceSettings);
             console.log('Selected filaments:', hasMultiFilaments ? this.selectedFilaments : this.selectedFilament);
 
+            this.sliceResult = null;  // Destroy old viewer before creating new one
             this.currentStep = 'slicing';
             this.activeTab = 'upload';
             this.sliceProgress = 0;
+            this.accordionColours = false;
+            this.accordionSettings = false;
 
             // Animate progress during the blocking slice POST.
             // Starts fast, slows down as it approaches 90%.
@@ -1275,6 +1279,10 @@ function app() {
          */
         async viewJob(job) {
             try {
+                // Null first to destroy old viewer before creating new one
+                this.sliceResult = null;
+                await new Promise(resolve => requestAnimationFrame(resolve));
+
                 const status = await api.getJobStatus(job.job_id);
                 this.selectedUpload = {
                     upload_id: job.upload_id,
@@ -1527,6 +1535,10 @@ function app() {
             if (mappedFromPresets && mappedFromPresets.filamentIds.length === limitedColors.length) {
                 this.selectedFilaments = mappedFromPresets.filamentIds;
                 this.sliceSettings.extruder_assignments = mappedFromPresets.assignments;
+                // Use the preset/extruder colors (what's physically loaded), not the
+                // detected file colors (what the designer intended). syncFilamentColors
+                // will further refine from filament profile color_hex if available.
+                this.sliceSettings.filament_colors = mappedFromPresets.mappedColors;
                 this.syncFilamentColors();
                 return;
             }
@@ -1586,13 +1598,15 @@ function app() {
          */
         syncFilamentColors() {
             const existing = this.sliceSettings.filament_colors || [];
+            const assignments = this.sliceSettings.extruder_assignments || [];
             this.sliceSettings.filament_colors = this.selectedFilaments.map((fid, idx) => {
                 const fil = this.getFilamentById(fid);
                 const profileColor = fil?.color_hex;
                 // If the filament profile has a real (non-default) color, use it.
                 if (profileColor && profileColor.toUpperCase() !== '#FFFFFF') return profileColor;
-                // Otherwise preserve the existing color (from file detection).
-                const presetColor = this.extruderPresets?.[idx]?.color_hex;
+                // Use the assigned extruder slot (not position index) for preset lookup.
+                const presetIdx = assignments[idx] ?? idx;
+                const presetColor = this.extruderPresets?.[presetIdx]?.color_hex;
                 if (presetColor && presetColor.toUpperCase() !== '#FFFFFF') return presetColor;
                 return existing[idx] || '#FFFFFF';
             });

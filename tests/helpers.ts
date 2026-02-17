@@ -192,16 +192,50 @@ export async function apiSlicePlate(
   return waitForJobComplete(request, job);
 }
 
-/** Poll a job until completed or failed (max ~2 min) */
+/** Poll a job until completed or failed (max ~2 min).
+ *  Uses adaptive backoff: 500ms → 1s → 2s to detect fast slices sooner. */
 export async function waitForJobComplete(request: APIRequestContext, job: any) {
   if (job.status === 'completed') return job;
   const jobId = job.job_id;
-  for (let i = 0; i < 60; i++) {
+  let delay = 500;
+  const maxDelay = 2_000;
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, delay));
     const statusRes = await request.get(`${API}/jobs/${jobId}`, { timeout: 30_000 });
     const status = await statusRes.json();
     if (status.status === 'completed') return status;
     if (status.status === 'failed') throw new Error(`Slice failed: ${status.error || 'unknown'}`);
-    await new Promise(r => setTimeout(r, 2_000));
+    delay = Math.min(delay * 2, maxDelay);
   }
   throw new Error(`Slice timed out for job ${jobId}`);
+}
+
+/**
+ * Delete test-created uploads (cascades to jobs, G-code files, and logs).
+ * Only deletes uploads with IDs above the given baseline, preserving
+ * user-created data that existed before the test run.
+ */
+export async function cleanupTestUploads(baselineId: number) {
+  const baseUrl = API;
+  let offset = 0;
+  let deleted = 0;
+  while (true) {
+    const res = await fetch(`${baseUrl}/upload?limit=200&offset=${offset}`);
+    if (!res.ok) break;
+    const body = await res.json();
+    const uploads = body.uploads || [];
+    if (uploads.length === 0) break;
+    for (const u of uploads) {
+      if (u.upload_id > baselineId) {
+        try {
+          await fetch(`${baseUrl}/upload/${u.upload_id}`, { method: 'DELETE' });
+          deleted++;
+        } catch { /* ignore individual failures */ }
+      }
+    }
+    if (!body.has_more) break;
+    offset += 200;
+  }
+  return deleted;
 }
