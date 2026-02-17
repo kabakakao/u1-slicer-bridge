@@ -209,9 +209,7 @@ All data is stored under `/data`:
 ## Non-Goals (v1)
 
 - MakerWorld scraping (see M26 for optional link import approach)
-- Per-object filament assignment (single filament per plate)
 - Mesh repair or geometry modifications
-- Multi-material/MMU support
 - Cloud dependencies (LAN-first by default)
 
 ## Documentation
