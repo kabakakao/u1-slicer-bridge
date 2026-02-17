@@ -53,19 +53,6 @@ services:
       redis:
         condition: service_healthy
 
-  worker:
-    image: ghcr.io/taylormadearmy/u1-slicer-bridge-worker:latest
-    volumes:
-      - data_storage:/data
-      - data_cache:/cache
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "sleep"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-    restart: unless-stopped
-
   web:
     image: ghcr.io/taylormadearmy/u1-slicer-bridge-web:latest
     ports:
@@ -83,6 +70,5 @@ services:
 
 volumes:
   data_storage:
-  data_cache:
   postgres_data:
   redis_data:
