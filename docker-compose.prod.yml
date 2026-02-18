@@ -1,7 +1,10 @@
 # U1 Slicer Bridge — Production Deployment
 #
-# Usage:
+# Usage (stable):
 #   docker compose -f docker-compose.prod.yml up -d
+#
+# Usage (beta on a different port):
+#   IMAGE_TAG=beta WEB_PORT=8235 docker compose -f docker-compose.prod.yml -p u1-beta up -d
 #
 # Optional: create a .env file to customize (see .env.prod.example)
 
@@ -22,7 +25,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ghcr.io/taylormadearmy/u1-slicer-bridge-api:latest
+    image: ghcr.io/taylormadearmy/u1-slicer-bridge-api:${IMAGE_TAG:-latest}
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-u1slicer}:${POSTGRES_PASSWORD:-u1slicer}@postgres:5432/${POSTGRES_DB:-u1slicer}
       # MOONRAKER_URL: http://192.168.1.100:7125
@@ -40,7 +43,7 @@ services:
         condition: service_healthy
 
   web:
-    image: ghcr.io/taylormadearmy/u1-slicer-bridge-web:latest
+    image: ghcr.io/taylormadearmy/u1-slicer-bridge-web:${IMAGE_TAG:-latest}
     ports:
       - "${WEB_PORT:-8234}:80"
     healthcheck:
