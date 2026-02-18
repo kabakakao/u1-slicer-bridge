@@ -33,18 +33,28 @@ upload .3mf/.stl → validate plate → configure → slice → preview → prin
 
 ## Quick Start
 
-See **[DEPLOY.md](DEPLOY.md)** for the full deployment guide.
+**Prerequisites:** Docker and Docker Compose. Snapmaker U1 with Moonraker API enabled (optional — needed for print control only).
 
 ```bash
 # Pre-built images (fastest)
 curl -O https://raw.githubusercontent.com/taylormadearmy/u1-slicer-bridge/master/docker-compose.prod.yml
 docker compose -f docker-compose.prod.yml up -d
 # Open http://localhost:8234
-
-# Or build from source
-git clone https://github.com/taylormadearmy/u1-slicer-bridge.git
-cd u1-slicer-bridge && docker compose up -d --build
 ```
+
+Or build from source:
+
+```bash
+git clone https://github.com/taylormadearmy/u1-slicer-bridge.git
+cd u1-slicer-bridge
+cp .env.example .env          # Optional: edit to set MOONRAKER_URL for printer control
+docker compose up -d --build
+# Open http://localhost:8080
+```
+
+Verify: `curl http://localhost:8000/healthz`
+
+See **[DEPLOY.md](DEPLOY.md)** for the full deployment guide.
 
 ## Architecture
 
@@ -114,39 +124,6 @@ Inherited `wipe_tower_x`/`wipe_tower_y` values can place the prime tower outside
 | `layer_gcode` | `G92 E0` | Required for relative extruder addressing |
 | `time_lapse_gcode` | removed | Not applicable to Snapmaker U1 |
 | `machine_pause_gcode` | removed | Not applicable to Snapmaker U1 |
-
-## Quick Start
-
-### Prerequisites
-
-- Docker and Docker Compose
-- Snapmaker U1 with Moonraker API enabled (optional - needed for print control)
-
-### Setup
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/taylormadearmy/u1-slicer-bridge.git
-   cd u1-slicer-bridge
-   ```
-
-2. (Optional) Configure printer connection:
-   ```bash
-   cp .env.example .env
-   # Edit .env to set MOONRAKER_URL if you want printer control
-   ```
-
-3. Start services:
-   ```bash
-   docker compose up -d --build
-   ```
-
-4. Verify health:
-   ```bash
-   curl http://localhost:8000/healthz
-   ```
-
-5. Open the web UI: http://localhost:8234
 
 ## Storage Layout
 
