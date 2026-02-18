@@ -59,12 +59,13 @@ test.describe('Slicing Workflow', () => {
     expect(href).toContain('/download');
   });
 
-  test('Start New Slice returns to upload step', async ({ page }) => {
+  test('home button returns to upload step from complete', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     await page.getByRole('button', { name: /Slice Now/i }).click();
     await waitForSliceComplete(page);
 
-    await page.getByRole('button', { name: /Start New Slice/i }).click();
+    await page.getByTitle('Back to home').click();
+    await page.getByTestId('confirm-ok').click();
     const step = await getAppState(page, 'currentStep');
     expect(step).toBe('upload');
   });
@@ -74,8 +75,9 @@ test.describe('Slicing Workflow', () => {
     await page.getByRole('button', { name: /Slice Now/i }).click();
     await waitForSliceComplete(page);
 
-    // Go back to upload step
-    await page.getByRole('button', { name: /Start New Slice/i }).click();
+    // Go back to upload step via home button
+    await page.getByTitle('Back to home').click();
+    await page.getByTestId('confirm-ok').click();
 
     // Open My Files modal — completed slices show as sub-entries under the upload
     await page.getByTitle('My Files').click();

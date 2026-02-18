@@ -22,9 +22,27 @@
 <body class="bg-gray-50 min-h-screen" x-data="app()" x-init="init()">
     <!-- Header -->
     <header class="bg-white shadow-sm sticky top-0 z-50">
-        <div class="container mx-auto px-4 py-4">
+        <div class="max-w-4xl mx-auto px-4 py-4">
             <div class="flex items-center justify-between">
-                <h1 class="text-xl md:text-2xl font-bold text-gray-900">U1 Slicer Bridge</h1>
+                <div class="flex items-center gap-3 min-w-0">
+                    <button x-show="currentStep !== 'upload'"
+                            x-cloak
+                            @click="confirmResetWorkflow()"
+                            class="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition flex-shrink-0"
+                            title="Back to home">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+                        </svg>
+                    </button>
+                    <div class="flex items-center gap-2 min-w-0">
+                        <svg x-show="currentStep === 'slicing'" x-cloak
+                             class="animate-spin w-5 h-5 text-blue-600 flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                        </svg>
+                        <h1 class="text-xl md:text-2xl font-bold text-gray-900 truncate" x-text="headerTitle()"></h1>
+                    </div>
+                </div>
                 <div class="flex items-center gap-3">
                     <button @click="openPrinterStatus()"
                             class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition relative"
@@ -64,54 +82,6 @@
     <!-- Main Content -->
     <main class="container mx-auto px-4 py-6 max-w-4xl">
         <!-- (Tab bar removed — Settings is now a modal via gear icon in header) -->
-
-        <!-- Progress Indicator -->
-        <div class="max-w-4xl mx-auto mb-8" x-cloak>
-            <div class="flex items-center justify-between">
-                <!-- Step 1: Upload -->
-                <div class="flex-1 text-center"
-                     :class="['configure', 'complete'].includes(currentStep) ? 'cursor-pointer' : ''"
-                     @click="if (['configure', 'complete'].includes(currentStep)) { currentStep = 'upload'; currentStep = 'upload'; }">
-                    <div class="w-12 h-12 mx-auto rounded-full flex items-center justify-center"
-                         :class="currentStep === 'upload' ? 'bg-blue-600 text-white' :
-                                ['configure', 'slicing', 'complete'].includes(currentStep) ? 'bg-green-600 text-white' :
-                                'bg-gray-300 text-gray-600'">
-                        <span x-text="['configure', 'slicing', 'complete'].includes(currentStep) ? '✓' : '1'"></span>
-                    </div>
-                    <p class="mt-2 text-sm font-medium">Upload</p>
-                </div>
-
-                <div class="flex-1 h-1 bg-gray-300 mx-2"
-                     :class="['configure', 'slicing', 'complete'].includes(currentStep) ? 'bg-green-600' : ''"></div>
-
-                <!-- Step 2: Configure -->
-                <div class="flex-1 text-center"
-                     :class="currentStep === 'complete' ? 'cursor-pointer' : ''"
-                     @click="if (currentStep === 'complete') { goBackToConfigure(); }">
-                    <div class="w-12 h-12 mx-auto rounded-full flex items-center justify-center"
-                         :class="currentStep === 'configure' ? 'bg-blue-600 text-white' :
-                                ['slicing', 'complete'].includes(currentStep) ? 'bg-green-600 text-white' :
-                                'bg-gray-300 text-gray-600'">
-                        <span x-text="['slicing', 'complete'].includes(currentStep) ? '✓' : '2'"></span>
-                    </div>
-                    <p class="mt-2 text-sm font-medium">Configure</p>
-                </div>
-
-                <div class="flex-1 h-1 bg-gray-300 mx-2"
-                     :class="['slicing', 'complete'].includes(currentStep) ? 'bg-green-600' : ''"></div>
-
-                <!-- Step 3: Slice -->
-                <div class="flex-1 text-center">
-                    <div class="w-12 h-12 mx-auto rounded-full flex items-center justify-center"
-                         :class="currentStep === 'slicing' ? 'bg-blue-600 text-white animate-pulse' :
-                                currentStep === 'complete' ? 'bg-green-600 text-white' :
-                                'bg-gray-300 text-gray-600'">
-                        <span x-text="currentStep === 'complete' ? '✓' : '3'"></span>
-                    </div>
-                    <p class="mt-2 text-sm font-medium">Slice</p>
-                </div>
-            </div>
-        </div>
 
         <!-- Step Content -->
         <div class="max-w-4xl mx-auto" x-cloak>
@@ -167,7 +137,16 @@
             <!-- Step 2: Configure Settings -->
             <div x-show="currentStep === 'configure'" x-cloak>
                 <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
-                    <h2 class="text-lg md:text-xl font-semibold mb-4">Configure Print Settings</h2>
+                    <div class="flex items-center gap-3 mb-4">
+                        <button @click="confirmResetWorkflow()"
+                                class="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition flex-shrink-0"
+                                title="Back to upload">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+                            </svg>
+                        </button>
+                        <h2 class="text-lg md:text-xl font-semibold">Configure Print Settings</h2>
+                    </div>
 
                     <!-- File Info -->
                     <div class="mb-6 p-4 bg-gray-50 rounded-lg">
@@ -703,15 +682,11 @@
                     </div>
 
                     <!-- Action Buttons -->
-                    <div class="mt-6 flex gap-4">
-                        <button @click="currentStep = 'upload'"
-                                class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
-                            Back to Upload
-                        </button>
+                    <div class="mt-6">
                         <button @click="startSlice()"
                                 :disabled="!selectedFilament && (!selectedFilaments || selectedFilaments.length === 0)"
                                 :class="(selectedFilament || (selectedFilaments && selectedFilaments.length > 0)) ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'"
-                                class="flex-1 px-6 py-3 text-white rounded-lg transition">
+                                class="w-full px-6 py-3 text-white rounded-lg transition">
                             Slice Now
                         </button>
                     </div>
@@ -755,14 +730,25 @@
             <!-- Step 4: Complete (Results) -->
             <div x-show="currentStep === 'complete'" x-cloak>
                 <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
-                    <div class="text-center mb-6">
-                        <div class="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-4">
-                            <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                            </svg>
+                    <div class="mb-6">
+                        <div class="flex items-center gap-3 mb-4">
+                            <button @click="goBackToConfigure()"
+                                    class="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition flex-shrink-0"
+                                    title="Back to configure">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+                                </svg>
+                            </button>
+                            <h2 class="text-2xl font-bold text-gray-900">Your G-code is Ready!</h2>
                         </div>
-                        <h2 class="text-2xl font-bold text-gray-900">Your G-code is Ready!</h2>
-                        <p class="text-sm text-gray-500 mt-1" x-text="selectedUpload?.filename"></p>
+                        <div class="text-center">
+                            <div class="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-4">
+                                <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                </svg>
+                            </div>
+                            <p class="text-sm text-gray-500" x-text="selectedUpload?.filename"></p>
+                        </div>
                     </div>
 
                     <!-- Print Summary -->
@@ -811,15 +797,6 @@
                                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
                             </svg>
                             <span x-text="printerBusy ? 'Printer Busy' : printSending ? 'Sending...' : 'Send to Printer'"></span>
-                        </button>
-                        <button x-show="selectedFilament || (selectedFilaments && selectedFilaments.length > 0)"
-                                @click="goBackToConfigure()"
-                                class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
-                            Modify &amp; Reslice
-                        </button>
-                        <button @click="resetWorkflow()"
-                                class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
-                            Start New Slice
                         </button>
                     </div>
 
@@ -935,6 +912,31 @@
             </div>
             </template>
         </section>
+
+        <!-- Confirm Dialog Modal -->
+        <div x-show="confirmModal.open" x-cloak
+             class="fixed inset-0 z-[200] flex items-center justify-center bg-black/40"
+             @keydown.escape.window="resolveConfirm(false)">
+            <div class="bg-white rounded-xl shadow-2xl max-w-sm w-full mx-4 overflow-hidden"
+                 @click.outside="resolveConfirm(false)">
+                <div class="p-6">
+                    <h3 class="text-lg font-semibold text-gray-900" x-text="confirmModal.title"></h3>
+                    <p class="mt-2 text-sm text-gray-600" x-text="confirmModal.message"></p>
+                </div>
+                <div class="flex gap-3 px-6 pb-6">
+                    <button @click="resolveConfirm(false)"
+                            class="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition">
+                        Cancel
+                    </button>
+                    <button @click="resolveConfirm(true)"
+                            data-testid="confirm-ok"
+                            :class="confirmModal.destructive ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'"
+                            class="flex-1 px-4 py-2.5 rounded-lg text-sm font-medium text-white transition"
+                            x-text="confirmModal.confirmText || 'OK'">
+                    </button>
+                </div>
+            </div>
+        </div>
 
         <!-- Settings Modal Overlay -->
         <div x-show="showSettingsModal" x-cloak

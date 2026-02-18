@@ -18,6 +18,10 @@ function app() {
         showStorageDrawer: false,
         showPrinterStatus: false,
 
+        // Confirm dialog state
+        confirmModal: { open: false, title: '', message: '', confirmText: 'OK', destructive: false },
+        _confirmResolve: null,
+
         // Data
         uploads: [],
         uploadsTotal: 0,
@@ -712,7 +716,7 @@ function app() {
         },
 
         async deleteFilament(filamentId, filamentName) {
-            if (!confirm(`Delete filament '${filamentName}'?`)) return;
+            if (!await this.showConfirm({ title: 'Delete Filament', message: `Delete filament '${filamentName}'?`, confirmText: 'Delete', destructive: true })) return;
 
             try {
                 await api.deleteFilament(filamentId);
@@ -788,7 +792,7 @@ function app() {
          * Delete an upload and all its jobs
          */
         async deleteUpload(uploadId) {
-            if (!confirm('Delete this file and all its sliced versions?')) return;
+            if (!await this.showConfirm({ title: 'Delete File', message: 'Delete this file and all its sliced versions?', confirmText: 'Delete', destructive: true })) return;
             
             try {
                 await api.deleteUpload(uploadId);
@@ -808,7 +812,7 @@ function app() {
          * Delete a single job
          */
         async deleteJob(jobId) {
-            if (!confirm('Delete this sliced file?')) return;
+            if (!await this.showConfirm({ title: 'Delete Slice', message: 'Delete this sliced file?', confirmText: 'Delete', destructive: true })) return;
             
             try {
                 await api.deleteJob(jobId);
@@ -1238,6 +1242,33 @@ function app() {
         },
 
         /**
+         * Contextual header title based on current step
+         */
+        headerTitle() {
+            switch (this.currentStep) {
+                case 'upload': return 'U1 Slicer Bridge';
+                case 'configure': return this.selectedUpload?.filename
+                    ? 'Configure: ' + this.selectedUpload.filename
+                    : 'Configure Print Settings';
+                case 'slicing': return this.selectedUpload?.filename
+                    ? 'Slicing: ' + this.selectedUpload.filename
+                    : 'Slicing...';
+                case 'complete': return 'G-code Ready';
+                default: return 'U1 Slicer Bridge';
+            }
+        },
+
+        /**
+         * Reset workflow with confirmation if state exists
+         */
+        async confirmResetWorkflow() {
+            if (this.selectedUpload || this.sliceResult) {
+                if (!await this.showConfirm({ title: 'Start Over', message: 'Start over? Current progress will be lost.', confirmText: 'Start Over' })) return;
+            }
+            this.resetWorkflow();
+        },
+
+        /**
          * Reset workflow to start over
          */
         resetWorkflow() {
@@ -1650,6 +1681,24 @@ function app() {
             }, 5000); // Auto-dismiss after 5 seconds
         },
 
+        /**
+         * Show a styled confirm dialog. Returns a promise that resolves to true/false.
+         */
+        showConfirm({ title = 'Confirm', message = '', confirmText = 'OK', destructive = false } = {}) {
+            return new Promise(resolve => {
+                this._confirmResolve = resolve;
+                this.confirmModal = { open: true, title, message, confirmText, destructive };
+            });
+        },
+
+        resolveConfirm(value) {
+            this.confirmModal.open = false;
+            if (this._confirmResolve) {
+                this._confirmResolve(value);
+                this._confirmResolve = null;
+            }
+        },
+
         // ----- Printer Settings (Settings modal) -----
 
         async loadPrinterSettings() {
@@ -1760,7 +1809,7 @@ function app() {
         },
 
         async cancelPrint() {
-            if (!confirm('Cancel the current print?')) return;
+            if (!await this.showConfirm({ title: 'Cancel Print', message: 'Cancel the current print?', confirmText: 'Cancel Print', destructive: true })) return;
             try {
                 await api.cancelPrint();
                 await this.pollPrintStatus();

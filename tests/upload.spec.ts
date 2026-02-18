@@ -15,8 +15,9 @@ test.describe('Upload Workflow', () => {
 
   test('uploaded file appears in My Files modal', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
-    // Go back to upload step
-    await page.getByRole('button', { name: 'Back to Upload' }).click();
+    // Go back to upload step via back arrow
+    await page.getByTitle('Back to upload').click();
+    await page.getByTestId('confirm-ok').click();
     // Open My Files modal and scope searches within it
     await page.getByTitle('My Files').click();
     const modal = page.locator('[x-show="showStorageDrawer"]');
@@ -36,9 +37,10 @@ test.describe('Upload Workflow', () => {
     await expect(page.getByRole('button', { name: /Slice Now/i })).toBeVisible();
   });
 
-  test('Back to Upload button returns to upload step', async ({ page }) => {
+  test('back arrow returns to upload step', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
-    await page.getByRole('button', { name: 'Back to Upload' }).click();
+    await page.getByTitle('Back to upload').click();
+    await page.getByTestId('confirm-ok').click();
     const step = await getAppState(page, 'currentStep');
     expect(step).toBe('upload');
   });
@@ -68,7 +70,8 @@ test.describe('Upload Workflow', () => {
   test('selecting an existing upload from My Files goes to configure', async ({ page }) => {
     // First ensure there's at least one upload
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
-    await page.getByRole('button', { name: 'Back to Upload' }).click();
+    await page.getByTitle('Back to upload').click();
+    await page.getByTestId('confirm-ok').click();
 
     // Open My Files modal and click Slice on the first upload
     await page.getByTitle('My Files').click();

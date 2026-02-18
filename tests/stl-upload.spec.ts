@@ -28,7 +28,8 @@ test.describe('STL Upload (M30)', () => {
   test('STL upload appears in My Files with .stl filename', async ({ page }) => {
     await waitForApp(page);
     await uploadFile(page, '3DBenchy.stl');
-    await page.getByRole('button', { name: 'Back to Upload' }).click();
+    await page.getByTitle('Back to upload').click();
+    await page.getByTestId('confirm-ok').click();
     await page.getByTitle('My Files').click();
     const modal = page.locator('[x-show="showStorageDrawer"]');
     await expect(modal.getByRole('heading', { name: 'My Files' })).toBeVisible();
