@@ -19,7 +19,7 @@ function app() {
         showPrinterStatus: false,
 
         // Confirm dialog state
-        confirmModal: { open: false, title: '', message: '', confirmText: 'OK', destructive: false },
+        confirmModal: { open: false, title: '', message: '', html: '', confirmText: 'OK', destructive: false, suppressKey: null, suppressChecked: false },
         _confirmResolve: null,
 
         // Data
@@ -1263,7 +1263,12 @@ function app() {
          */
         async confirmResetWorkflow() {
             if (this.selectedUpload || this.sliceResult) {
-                if (!await this.showConfirm({ title: 'Start Over', message: 'Start over? Current progress will be lost.', confirmText: 'Start Over' })) return;
+                if (!await this.showConfirm({
+                    title: 'Start Over',
+                    html: 'Your uploads and sliced files are saved in <strong>My Files</strong> <svg class="inline w-4 h-4 -mt-0.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg> and can be reopened any time.',
+                    confirmText: 'Start Over',
+                    suppressKey: 'suppress_start_over'
+                })) return;
             }
             this.resetWorkflow();
         },
@@ -1683,15 +1688,22 @@ function app() {
 
         /**
          * Show a styled confirm dialog. Returns a promise that resolves to true/false.
+         * Options:
+         *   html - rich HTML message (used instead of message if provided)
+         *   suppressKey - localStorage key; if set, shows "Don't show again" checkbox
          */
-        showConfirm({ title = 'Confirm', message = '', confirmText = 'OK', destructive = false } = {}) {
+        showConfirm({ title = 'Confirm', message = '', html = '', confirmText = 'OK', destructive = false, suppressKey = null } = {}) {
+            if (suppressKey && localStorage.getItem(suppressKey) === '1') return Promise.resolve(true);
             return new Promise(resolve => {
                 this._confirmResolve = resolve;
-                this.confirmModal = { open: true, title, message, confirmText, destructive };
+                this.confirmModal = { open: true, title, message, html, confirmText, destructive, suppressKey, suppressChecked: false };
             });
         },
 
         resolveConfirm(value) {
+            if (value && this.confirmModal.suppressKey && this.confirmModal.suppressChecked) {
+                localStorage.setItem(this.confirmModal.suppressKey, '1');
+            }
             this.confirmModal.open = false;
             if (this._confirmResolve) {
                 this._confirmResolve(value);

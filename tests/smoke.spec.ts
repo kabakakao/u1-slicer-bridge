@@ -45,8 +45,8 @@ test.describe('Smoke Tests', () => {
   });
 
   test('printer status indicator is shown', async ({ page }) => {
-    const status = page.locator('header').getByRole('button', { name: /Checking|Connected|Offline|Error/i });
-    await expect(status.first()).toBeVisible();
+    const status = page.locator('header button[data-testid="printer-status"]');
+    await expect(status).toBeVisible();
   });
 
   test('API health check passes from browser', async ({ page }) => {
