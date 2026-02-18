@@ -320,16 +320,21 @@ function app() {
                 this.selectedFilament = e1.filament_id;
             }
 
-            const presetFilaments = this.extruderPresets
-                .map((p) => p.filament_id)
-                .filter((id) => !!id)
-                .slice(0, this.maxExtruders);
-            if (presetFilaments.length > 0) {
-                this.selectedFilaments = presetFilaments;
-            }
+            // Only set selectedFilaments from presets if no file is loaded yet.
+            // A file upload's applyDetectedColors() determines the correct
+            // filament mode — overwriting it here causes race conditions.
+            if (!this.selectedUpload) {
+                const presetFilaments = this.extruderPresets
+                    .map((p) => p.filament_id)
+                    .filter((id) => !!id)
+                    .slice(0, this.maxExtruders);
+                if (presetFilaments.length > 0) {
+                    this.selectedFilaments = presetFilaments;
+                }
 
-            this.syncFilamentColors();
-            this.sliceSettings.extruder_assignments = [0, 1, 2, 3];
+                this.syncFilamentColors();
+                this.sliceSettings.extruder_assignments = [0, 1, 2, 3];
+            }
         },
 
         resetJobOverrideSettings() {
@@ -1533,6 +1538,13 @@ function app() {
 
             if (colors.length > this.maxExtruders) {
                 this.multicolorNotice = `Detected ${colors.length} colors, but U1 supports up to ${this.maxExtruders} extruders. Defaulting to single-filament mode.`;
+                this.setDefaultFilament();
+                return;
+            }
+
+            // Single-color files always use single-filament mode.
+            // Multicolor mapping would pad to 2+ extruders and can crash Orca.
+            if (colors.length <= 1) {
                 this.setDefaultFilament();
                 return;
             }

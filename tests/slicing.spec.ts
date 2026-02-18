@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API, apiUpload } from './helpers';
+import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API, apiUpload, apiSlice } from './helpers';
 
 test.describe('Slicing Workflow', () => {
   test.setTimeout(180_000);
@@ -135,5 +135,34 @@ test.describe('Slicing Workflow', () => {
       expect(job).toHaveProperty('metadata');
       expect(job.metadata).toHaveProperty('layer_count');
     }
+  });
+
+  test('Bambu file with modifier parts slices without crash', async ({ request }) => {
+    // Regression: Bambu 3MFs with modifier parts (type="other" objects) caused
+    // trimesh to duplicate geometry, and the multi-file component reference
+    // format triggered segfaults in Orca Slicer.
+    const upload = await apiUpload(request, 'u1-auxiliary-fan-cover-hex_mw.3mf');
+
+    const job = await apiSlice(request, upload.upload_id);
+    expect(job.status).toBe('completed');
+    expect(job.metadata.layer_count).toBeGreaterThan(0);
+  });
+
+  test('single-color Bambu file slices via browser UI', async ({ page }) => {
+    // Regression: single-color Bambu files entered multicolor mode in the UI
+    // when extruder presets were configured, sending 2 filament_ids and causing
+    // Orca segfault. The UI must use single-filament mode for 1-color files.
+    await uploadFile(page, 'u1-auxiliary-fan-cover-hex_mw.3mf');
+
+    // Verify single-filament mode (selectedFilament set, not selectedFilaments)
+    const selectedFilament = await getAppState(page, 'selectedFilament');
+    const selectedFilaments = await getAppState(page, 'selectedFilaments');
+    expect(selectedFilament).toBeTruthy();
+    expect(selectedFilaments.length).toBe(0);
+
+    // Slice via UI — exercises the full browser filament selection path
+    await page.getByRole('button', { name: /Slice Now/i }).click();
+    await waitForSliceComplete(page);
+    await expect(page.getByRole('heading', { name: /G-code is Ready/i })).toBeVisible();
   });
 });

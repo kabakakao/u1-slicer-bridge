@@ -66,11 +66,90 @@ class ProfileEmbedder:
             logger.warning(f"Could not check if Bambu file: {e}")
             return False
 
+    @staticmethod
+    def _has_modifier_parts(three_mf_path: Path) -> bool:
+        """Check if any model file contains type='other' objects (modifier parts).
+
+        Bambu Studio uses modifier parts (cubes, etc.) to override print settings
+        in specific regions.  Trimesh doesn't understand modifier semantics and
+        duplicates them as full geometry copies, so they must be stripped before
+        the trimesh rebuild.
+        """
+        try:
+            with zipfile.ZipFile(three_mf_path, 'r') as zf:
+                for name in zf.namelist():
+                    if not name.endswith('.model'):
+                        continue
+                    root = ET.fromstring(zf.read(name))
+                    for elem in root.iter():
+                        if elem.tag.endswith('}object') or elem.tag == 'object':
+                            if elem.get('type') == 'other':
+                                return True
+        except Exception as e:
+            logger.debug(f"Could not check for modifier parts: {e}")
+        return False
+
+    @staticmethod
+    def _strip_modifier_parts(source_3mf: Path, dest_3mf: Path) -> None:
+        """Create a copy of the 3MF with modifier parts removed.
+
+        Strips component references to type='other' objects from the main model
+        and removes the modifier objects from sub-model files.  This prevents
+        trimesh from duplicating geometry (it merges both the main mesh and the
+        modifier mesh for every component reference, producing wrong output).
+        """
+        # Collect modifier object IDs from sub-model files
+        modifier_ids: set[str] = set()
+        with zipfile.ZipFile(source_3mf, 'r') as zf:
+            for name in zf.namelist():
+                if not name.endswith('.model') or name == '3D/3dmodel.model':
+                    continue
+                root = ET.fromstring(zf.read(name))
+                for elem in root.iter():
+                    if (elem.tag.endswith('}object') or elem.tag == 'object') and elem.get('type') == 'other':
+                        modifier_ids.add(elem.get('id'))
+
+        if not modifier_ids:
+            # Nothing to strip — just copy
+            import shutil
+            shutil.copy2(source_3mf, dest_3mf)
+            return
+
+        logger.info(f"Stripping modifier object IDs {modifier_ids} before trimesh rebuild")
+
+        with zipfile.ZipFile(source_3mf, 'r') as zin:
+            with zipfile.ZipFile(dest_3mf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+
+                    if item.filename == '3D/3dmodel.model':
+                        root = ET.fromstring(data)
+                        for elem in root.iter():
+                            if elem.tag.endswith('}components') or elem.tag == 'components':
+                                for comp in list(elem):
+                                    if comp.get('objectid') in modifier_ids:
+                                        elem.remove(comp)
+                        data = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+                    elif item.filename.endswith('.model') and item.filename != '3D/3dmodel.model':
+                        root = ET.fromstring(data)
+                        for elem in root.iter():
+                            if elem.tag.endswith('}resources') or elem.tag == 'resources':
+                                for obj in list(elem):
+                                    if obj.get('type') == 'other':
+                                        elem.remove(obj)
+                        data = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+                    zout.writestr(item, data)
+
     def _rebuild_with_trimesh(self, source_3mf: Path, dest_3mf: Path) -> None:
         """Rebuild 3MF with trimesh to extract clean geometry.
 
         This strips Bambu-specific format issues and creates a clean 3MF
         that Orca Slicer can parse.
+
+        For files with modifier parts (type='other' objects), these are stripped
+        before the trimesh load to prevent geometry duplication.
 
         Args:
             source_3mf: Original Bambu 3MF path
@@ -80,11 +159,26 @@ class ProfileEmbedder:
             import trimesh
             logger.info(f"Rebuilding Bambu 3MF with trimesh: {source_3mf.name}")
 
-            # Load entire scene (preserves object positions)
-            scene = trimesh.load(str(source_3mf), file_type='3mf')
+            load_source = source_3mf
+            temp_stripped: Path | None = None
 
-            # Export as clean 3MF
-            scene.export(str(dest_3mf), file_type='3mf')
+            # Strip modifier parts before trimesh load — trimesh doesn't
+            # understand modifier semantics and duplicates geometry otherwise.
+            if self._has_modifier_parts(source_3mf):
+                temp_stripped = source_3mf.parent / f"{source_3mf.stem}_nomod_{uuid.uuid4().hex[:8]}.3mf"
+                self._strip_modifier_parts(source_3mf, temp_stripped)
+                load_source = temp_stripped
+                logger.info("Stripped modifier parts before trimesh rebuild")
+
+            try:
+                # Load entire scene (preserves object positions)
+                scene = trimesh.load(str(load_source), file_type='3mf')
+
+                # Export as clean 3MF
+                scene.export(str(dest_3mf), file_type='3mf')
+            finally:
+                if temp_stripped is not None and temp_stripped.exists():
+                    temp_stripped.unlink()
 
             logger.info(f"Rebuilt clean 3MF: {dest_3mf.name} ({dest_3mf.stat().st_size / 1024 / 1024:.2f} MB)")
 
@@ -470,7 +564,10 @@ class ProfileEmbedder:
                 logger.info(f"Successfully embedded profiles into {output_3mf.name}")
                 return output_3mf
 
-            if is_bambu and not preserve_geometry:
+            if is_bambu:
+                # Bambu multi-file component references (p:path) crash Snapmaker
+                # OrcaSlicer v2.2.4 when combined with our Snapmaker settings.
+                # Always flatten via trimesh regardless of preserve_geometry.
                 logger.info("Detected Bambu Studio file - rebuilding with trimesh")
                 temp_clean = source_3mf.parent / f"{source_3mf.stem}_clean_{uuid.uuid4().hex[:8]}.3mf"
                 self._rebuild_with_trimesh(source_3mf, temp_clean)

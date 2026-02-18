@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*.*.*'
+      - 'v*.*.*-beta.*'
+      - 'v*.*.*-rc.*'
 
 env:
   REGISTRY: ghcr.io
@@ -49,7 +51,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
+            type=raw,value=beta,enable=${{ contains(github.ref, '-beta') }}
+            type=raw,value=rc,enable=${{ contains(github.ref, '-rc') }}
 
       - name: Build and push ${{ matrix.service.name }}
         uses: docker/build-push-action@v5
