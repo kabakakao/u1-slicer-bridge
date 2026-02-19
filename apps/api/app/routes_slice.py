@@ -619,6 +619,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
 
         # Update database with results
         filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
+        filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -631,7 +632,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                     filament_used_mm = $6,
                     layer_count = $7,
                     three_mf_path = $8,
-                    filament_colors = $9
+                    filament_colors = $9,
+                    filament_used_g = $10
                 WHERE job_id = $1
                 """,
                 job_id,
@@ -642,7 +644,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 metadata['filament_used_mm'],
                 metadata.get('layer_count'),
                 str(embedded_3mf),
-                filament_colors_json
+                filament_colors_json,
+                filament_used_g_json
             )
 
         job_logger.info(f"Slicing job {job_id} completed successfully")
@@ -1138,6 +1141,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
 
         # Update database with results
         filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
+        filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -1150,7 +1154,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                     filament_used_mm = $6,
                     layer_count = $7,
                     three_mf_path = $8,
-                    filament_colors = $9
+                    filament_colors = $9,
+                    filament_used_g = $10
                 WHERE job_id = $1
                 """,
                 job_id,
@@ -1161,7 +1166,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 metadata['filament_used_mm'],
                 metadata.get('layer_count'),
                 str(embedded_3mf),
-                filament_colors_json
+                filament_colors_json,
+                filament_used_g_json
             )
 
         job_logger.info(f"Plate slicing job {job_id} completed successfully")
@@ -1468,7 +1474,7 @@ async def get_slicing_job(job_id: str):
             """
             SELECT j.job_id, j.upload_id, j.status, j.started_at, j.completed_at,
                    j.gcode_path, j.gcode_size, j.estimated_time_seconds, j.filament_used_mm,
-                   j.layer_count, j.filament_colors, j.error_message,
+                   j.layer_count, j.filament_colors, j.filament_used_g, j.error_message,
                    u.detected_colors AS upload_detected_colors
             FROM slicing_jobs j
             LEFT JOIN uploads u ON u.id = j.upload_id
@@ -1494,6 +1500,13 @@ async def get_slicing_job(job_id: str):
         except (json.JSONDecodeError, ValueError):
             pass
 
+    filament_used_g = []
+    if job["filament_used_g"]:
+        try:
+            filament_used_g = json.loads(job["filament_used_g"])
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     result = {
         "job_id": job["job_id"],
         "upload_id": job["upload_id"],
@@ -1513,6 +1526,7 @@ async def get_slicing_job(job_id: str):
         result["metadata"] = {
             "estimated_time_seconds": job["estimated_time_seconds"],
             "filament_used_mm": job["filament_used_mm"],
+            "filament_used_g": filament_used_g,
             "layer_count": job["layer_count"]
         }
 
@@ -1818,6 +1832,8 @@ async def list_all_jobs(
                 sj.gcode_size,
                 sj.estimated_time_seconds,
                 sj.filament_used_mm,
+                sj.filament_used_g,
+                sj.filament_colors,
                 sj.layer_count,
                 sj.started_at,
                 sj.completed_at
@@ -1827,18 +1843,34 @@ async def list_all_jobs(
             LIMIT $1 OFFSET $2
         """, limit, offset)
 
-        job_list = [{
-            "job_id": job["job_id"],
-            "upload_id": job["upload_id"],
-            "filename": job["filename"],
-            "status": job["status"],
-            "gcode_size": job["gcode_size"] or 0,
-            "estimated_time_seconds": job["estimated_time_seconds"] or 0,
-            "filament_used_mm": job["filament_used_mm"] or 0,
-            "layer_count": job["layer_count"] or 0,
-            "started_at": job["started_at"].isoformat() if job["started_at"] else None,
-            "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None
-        } for job in jobs]
+        job_list = []
+        for job in jobs:
+            filament_colors = []
+            if job["filament_colors"]:
+                try:
+                    filament_colors = json.loads(job["filament_colors"])
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            filament_used_g = []
+            if job["filament_used_g"]:
+                try:
+                    filament_used_g = json.loads(job["filament_used_g"])
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            job_list.append({
+                "job_id": job["job_id"],
+                "upload_id": job["upload_id"],
+                "filename": job["filename"],
+                "status": job["status"],
+                "gcode_size": job["gcode_size"] or 0,
+                "estimated_time_seconds": job["estimated_time_seconds"] or 0,
+                "filament_used_mm": job["filament_used_mm"] or 0,
+                "filament_used_g": filament_used_g,
+                "filament_colors": filament_colors,
+                "layer_count": job["layer_count"] or 0,
+                "started_at": job["started_at"].isoformat() if job["started_at"] else None,
+                "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None
+            })
 
         return {
             "jobs": job_list,

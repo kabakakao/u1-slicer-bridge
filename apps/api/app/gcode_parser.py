@@ -122,7 +122,8 @@ def parse_orca_metadata(gcode_path: Path) -> GCodeMetadata:
 
             # Extract per-filament weight in grams
             # Example: ; filament used [g] = 0.83, 0.85
-            elif 'filament used' in line.lower() and '[g]' in line.lower():
+            # Skip "total filament used [g]" which is the combined total
+            elif 'filament used' in line.lower() and '[g]' in line.lower() and 'total' not in line.lower():
                 g_match = re.search(r'=\s*(.+)$', line)
                 if g_match:
                     filament_used_g = [float(v.strip()) for v in g_match.group(1).split(',') if v.strip()]

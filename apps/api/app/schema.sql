@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS slicing_jobs (
     layer_count INTEGER,
     three_mf_path TEXT,
     filament_colors TEXT,  -- JSON array of color hex codes used
+    filament_used_g TEXT,  -- JSON array of per-extruder gram weights
     error_message TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -91,6 +92,9 @@ CREATE INDEX IF NOT EXISTS idx_slicing_jobs_upload_id ON slicing_jobs(upload_id)
 
 -- Migration: Add filament_colors column to existing databases
 ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS filament_colors TEXT;
+
+-- Migration: Add filament_used_g column to existing databases
+ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS filament_used_g TEXT;
 
 -- Persistent extruder preset mapping (E1-E4)
 CREATE TABLE IF NOT EXISTS extruder_presets (

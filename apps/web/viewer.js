@@ -118,7 +118,25 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
                     backgroundColor: '#1a1a1a',
                     renderTravel: false,
                     disableGradient: true,
+                    renderTubes: true,
+                    extrusionWidth: 0.45,
                 });
+
+                // Improve tube lighting for better contrast between adjacent lines.
+                // The library's defaults (ambient + overhead point) give flat, uniform
+                // illumination. Adding a low-angle directional light creates shadows
+                // between toolpaths, making individual lines distinguishable.
+                if (preview.scene) {
+                    // Replace library's default lights (ambient 0.3π + point π)
+                    // with balanced setup that creates contrast without washing out
+                    preview.scene.children
+                        .filter(c => c.isAmbientLight || c.isPointLight)
+                        .forEach(c => preview.scene.remove(c));
+                    preview.scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+                    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+                    dirLight.position.set(-200, 150, 300); // Low angle from front-left
+                    preview.scene.add(dirLight);
+                }
 
                 // Match OrcaSlicer mouse controls: left=rotate, middle/right=pan, scroll=zoom
                 if (preview.controls) {
