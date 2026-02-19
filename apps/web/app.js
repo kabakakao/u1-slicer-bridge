@@ -1364,9 +1364,9 @@ function app() {
         autoAssignFilaments() {
             if (this.detectedColors.length === 0) return;
 
+            // First 4 colors get identity assignment; extras round-robin
             this.sliceSettings.extruder_assignments = this.detectedColors
-                .slice(0, this.maxExtruders)
-                .map((_, idx) => idx);
+                .map((_, idx) => idx < this.maxExtruders ? idx : idx % this.maxExtruders);
 
             // Prefer machine preset filament loaded in each assigned extruder.
             this.applyPresetFilamentsForAssignments(true);
@@ -1395,12 +1395,16 @@ function app() {
             const filamentIds = [];
             const mappedColors = [];
 
-            for (const detectedColor of colors.slice(0, this.maxExtruders)) {
+            for (let i = 0; i < colors.length; i++) {
+                const detectedColor = colors[i];
                 let bestSlot = null;
                 let bestDistance = Infinity;
 
+                // First 4 colors get unique slots; extras can share any slot
+                const requireUnique = i < this.maxExtruders;
+
                 for (const slot of presetSlots) {
-                    if (usedSlots.has(slot.slotIdx)) continue;
+                    if (requireUnique && usedSlots.has(slot.slotIdx)) continue;
                     const distance = this.colorDistance(detectedColor, slot.colorHex);
                     if (distance < bestDistance) {
                         bestDistance = distance;
@@ -1412,7 +1416,7 @@ function app() {
                     return null;
                 }
 
-                usedSlots.add(bestSlot.slotIdx);
+                if (requireUnique) usedSlots.add(bestSlot.slotIdx);
                 assignments.push(bestSlot.slotIdx);
                 filamentIds.push(bestSlot.filamentId);
                 mappedColors.push(bestSlot.colorHex);
@@ -1498,17 +1502,11 @@ function app() {
          * Toggle filament override mode
          */
         toggleFilamentOverride() {
-            if (this.multicolorNotice) {
-                this.filamentOverride = false;
-                this.showError('This file uses more than 4 colors. Override mode is disabled on U1.');
-                return;
-            }
             this.filamentOverride = !this.filamentOverride;
             if (this.filamentOverride) {
                 if (!this.sliceSettings.extruder_assignments || this.sliceSettings.extruder_assignments.length === 0) {
                     this.sliceSettings.extruder_assignments = (this.detectedColors || [])
-                        .slice(0, this.maxExtruders)
-                        .map((_, idx) => idx);
+                        .map((_, idx) => idx < this.maxExtruders ? idx : idx % this.maxExtruders);
                 }
                 this.applyPresetFilamentsForAssignments(true);
                 setTimeout(() => this.applyPresetFilamentsForAssignments(true), 0);
@@ -1532,7 +1530,7 @@ function app() {
         },
 
         applyPresetFilamentsForAssignments(overwriteExisting = false) {
-            const colorCount = Math.min((this.detectedColors || []).length, this.maxExtruders);
+            const colorCount = (this.detectedColors || []).length;
             if (colorCount <= 0) return;
 
             const assignments = this.sliceSettings.extruder_assignments || [];
@@ -1558,13 +1556,15 @@ function app() {
             this.detectedColors = colors;
             this.selectedFilaments = [];
 
-            const limitedColors = (colors || []).slice(0, this.maxExtruders);
             // Use actual detected colors from the 3MF file, not preset colors.
             // Preset colors default to #FFFFFF which would mask the real file colors.
-            this.sliceSettings.filament_colors = limitedColors.length > 0
-                ? limitedColors.map((c) => c || '#FFFFFF')
+            const allColors = colors || [];
+            this.sliceSettings.filament_colors = allColors.length > 0
+                ? allColors.map((c) => c || '#FFFFFF')
                 : this.extruderPresets.map((p) => p.color_hex || '#FFFFFF');
-            this.sliceSettings.extruder_assignments = limitedColors.map((_, idx) => idx);
+            // Default assignments: first 4 get identity, extras round-robin
+            this.sliceSettings.extruder_assignments = allColors.map((_, idx) =>
+                idx < this.maxExtruders ? idx : idx % this.maxExtruders);
 
             if (!colors || colors.length === 0) {
                 this.multicolorNotice = null;
@@ -1572,15 +1572,10 @@ function app() {
                 return;
             }
 
-            if (colors.length > this.maxExtruders) {
-                this.multicolorNotice = `Detected ${colors.length} colors, but U1 supports up to ${this.maxExtruders} extruders. Defaulting to single-filament mode.`;
-                this.setDefaultFilament();
-                return;
-            }
-
             // Single-color files always use single-filament mode.
             // Multicolor mapping would pad to 2+ extruders and can crash Orca.
             if (colors.length <= 1) {
+                this.multicolorNotice = null;
                 this.setDefaultFilament();
                 return;
             }
@@ -1588,8 +1583,8 @@ function app() {
             this.multicolorNotice = null;
             this.selectedFilament = null;
 
-            const mappedFromPresets = this.mapDetectedColorsToPresetSlots(limitedColors);
-            if (mappedFromPresets && mappedFromPresets.filamentIds.length === limitedColors.length) {
+            const mappedFromPresets = this.mapDetectedColorsToPresetSlots(allColors);
+            if (mappedFromPresets && mappedFromPresets.filamentIds.length === allColors.length) {
                 this.selectedFilaments = mappedFromPresets.filamentIds;
                 this.sliceSettings.extruder_assignments = mappedFromPresets.assignments;
                 // Use the preset/extruder colors (what's physically loaded), not the
@@ -1631,17 +1626,11 @@ function app() {
         },
 
         /**
-         * Set extruder assignment while keeping assignments unique.
-         * If target extruder is already used, swap assignments.
+         * Set extruder assignment for a colour index.
+         * Multiple colours can share the same extruder (needed for >4 colour files).
          */
         setExtruderAssignment(colorIdx, extruderIdx) {
             const assignments = this.sliceSettings.extruder_assignments || [];
-            const prev = assignments[colorIdx];
-            const conflictIdx = assignments.findIndex((v, i) => i !== colorIdx && v === extruderIdx);
-
-            if (conflictIdx >= 0) {
-                assignments[conflictIdx] = prev;
-            }
             assignments[colorIdx] = extruderIdx;
             this.sliceSettings.extruder_assignments = [...assignments];
             // Default filament selection follows machine preset for chosen extruder.

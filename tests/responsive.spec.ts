@@ -11,7 +11,7 @@ test.describe('Responsive Design', () => {
     test(`renders correctly at ${vp.name} (${vp.width}x${vp.height})`, async ({ page }) => {
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await page.goto('/');
-      await page.waitForLoadState('networkidle');
+      await page.waitForLoadState('domcontentloaded');
 
       // Header should be visible at all sizes
       const header = page.locator('h1');

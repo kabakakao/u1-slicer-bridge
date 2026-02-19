@@ -347,12 +347,12 @@ async def slice_upload(upload_id: int, request: SliceRequest):
 
         # Auto-expand single filament to match source file's required colour count.
         # Handles both multi-extruder (per-object assignment) and SEMM painted files
-        # where detected_colors exceeds active_extruders.
-        required_extruders = max(
+        # where detected_colors exceeds active_extruders.  Cap at 4 (U1 max).
+        required_extruders = min(4, max(
             len(active_extruders) if active_extruders else 0,
             len(detected_colors),
-        )
-        if required_extruders > 1 and len(filaments) < required_extruders and required_extruders <= 4:
+        ))
+        if required_extruders > 1 and len(filaments) < required_extruders:
             job_logger.info(
                 f"Auto-expanding filament list from {len(filaments)} to {required_extruders} "
                 f"to match source file's active extruder/colour count"
@@ -373,18 +373,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             if extruder_remap:
                 job_logger.info(f"Applying extruder remap: {extruder_remap}")
 
-        multicolor_slot_count = max(
-            len(active_extruders) if active_extruders else 0,
-            len(detected_colors),
-        )
-        if len(filaments) > 1 and multicolor_slot_count > 4:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Model requires {multicolor_slot_count} color/extruder slots, but U1 supports up to 4. "
-                    "Use single-filament slicing or reduce colors to 4 or fewer."
-                ),
-            )
+        # For >4 source extruders, we must remap in the 3MF pre-slice
+        has_overflow_extruders = any(s > 4 for s in extruder_remap) if extruder_remap else False
 
         # Create slicing job record
         await conn.execute(
@@ -536,7 +526,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_settings=filament_settings,
                 overrides=overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=None,
+                extruder_remap=extruder_remap if has_overflow_extruders else None,
                 preserve_geometry=True,
                 precomputed_is_bambu=file_meta["is_bambu"],
                 precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
@@ -575,8 +565,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
 
         if len(filaments) > 1 and extruder_remap:
-            ordered_sources = sorted(extruder_remap.keys())
-            target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
+            if has_overflow_extruders:
+                # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
+                # Post-slice remap only needs to fix compaction within 1-4.
+                effective_extruders = sorted(set(extruder_remap.values()))
+                target_tools = [ext - 1 for ext in effective_extruders]
+            else:
+                ordered_sources = sorted(extruder_remap.keys())
+                target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
             remap_result = slicer.remap_compacted_tools(gcode_workspace_path, target_tools)
             if remap_result.get("applied"):
                 job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")
@@ -854,12 +850,12 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
 
         # Auto-expand single filament to match source file's required colour count.
         # Handles both multi-extruder (per-object assignment) and SEMM painted files
-        # where detected_colors exceeds active_extruders.
-        required_extruders = max(
+        # where detected_colors exceeds active_extruders.  Cap at 4 (U1 max).
+        required_extruders = min(4, max(
             len(active_extruders) if active_extruders else 0,
             len(detected_colors),
-        )
-        if required_extruders > 1 and len(filaments) < required_extruders and required_extruders <= 4:
+        ))
+        if required_extruders > 1 and len(filaments) < required_extruders:
             job_logger.info(
                 f"Auto-expanding filament list from {len(filaments)} to {required_extruders} "
                 f"to match source file's active extruder/colour count"
@@ -880,19 +876,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             if extruder_remap:
                 job_logger.info(f"Applying extruder remap: {extruder_remap}")
 
-        multicolor_slot_count = max(
-            len(active_extruders) if active_extruders else 0,
-            len(detected_colors),
-        )
-        if len(filaments) > 1 and multicolor_slot_count > 4:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Model requires {multicolor_slot_count} color/extruder slots, but U1 supports up to 4. "
-                    "Use single-filament slicing or reduce colors to 4 or fewer."
-                ),
-            )
-        
+        # For >4 source extruders, we must remap in the 3MF pre-slice
+        has_overflow_extruders = any(s > 4 for s in extruder_remap) if extruder_remap else False
+
         # Log filaments being used
         filament_names = [f["name"] for f in filaments]
         job_logger.info(f"Using filaments: {', '.join(filament_names)}")
@@ -1049,7 +1035,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_settings=filament_settings,
                 overrides=overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=None,
+                extruder_remap=extruder_remap if has_overflow_extruders else None,
                 precomputed_is_bambu=file_meta["is_bambu"],
                 precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
                 precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
@@ -1065,7 +1051,20 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         job_logger.info("Invoking Orca Slicer...")
         slicer = OrcaSlicer(printer_profile)
 
-        result = await slicer.slice_3mf_async(embedded_3mf, workspace, plate_index=request.plate_id)
+        # Bambu files define plates via Metadata/plate_*.json, not <item> indices.
+        # Our multi_plate_parser maps each <item> to a "plate" (1-indexed), but
+        # Orca's --slice uses the plate_*.json numbering.  Most Bambu exports
+        # have a single plate_1.json containing all objects, so we always target
+        # plate 1 for Orca regardless of which <item> the user selected.
+        effective_plate_id = request.plate_id
+        if file_meta["is_bambu"] and request.plate_id != 1:
+            job_logger.info(
+                f"Bambu file — using Orca plate 1 instead of requested "
+                f"plate {request.plate_id} (Bambu plate numbering differs from item index)"
+            )
+            effective_plate_id = 1
+
+        result = await slicer.slice_3mf_async(embedded_3mf, workspace, plate_index=effective_plate_id)
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
@@ -1086,8 +1085,14 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
 
         if len(filaments) > 1 and extruder_remap:
-            ordered_sources = sorted(extruder_remap.keys())
-            target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
+            if has_overflow_extruders:
+                # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
+                # Post-slice remap only needs to fix compaction within 1-4.
+                effective_extruders = sorted(set(extruder_remap.values()))
+                target_tools = [ext - 1 for ext in effective_extruders]
+            else:
+                ordered_sources = sorted(extruder_remap.keys())
+                target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
             remap_result = slicer.remap_compacted_tools(gcode_workspace_path, target_tools)
             if remap_result.get("applied"):
                 job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")

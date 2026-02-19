@@ -142,6 +142,95 @@ class ProfileEmbedder:
 
                     zout.writestr(item, data)
 
+    @staticmethod
+    def _strip_non_printable_items(source_3mf: Path, dest_3mf: Path) -> bool:
+        """Remove build items marked ``printable="0"`` and their associated objects.
+
+        Bambu Studio keeps non-printable copies of objects on the plate
+        (e.g. previous arrangements, hidden duplicates).  Trimesh loads all
+        geometry indiscriminately, so including them doubles the mesh and can
+        crash Orca Slicer.
+
+        Returns True if any items were stripped.
+        """
+        try:
+            with zipfile.ZipFile(source_3mf, 'r') as zf:
+                if '3D/3dmodel.model' not in zf.namelist():
+                    return False
+                root = ET.fromstring(zf.read('3D/3dmodel.model'))
+        except Exception:
+            return False
+
+        ns = {'m': 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'}
+        build = root.find('.//m:build', ns) or root.find('.//build')
+        if build is None:
+            return False
+
+        # Identify non-printable items
+        non_printable_ids: set[str] = set()
+        for item in list(build):
+            tag = item.tag.split('}')[-1] if '}' in item.tag else item.tag
+            if tag != 'item':
+                continue
+            if item.get('printable') == '0':
+                oid = item.get('objectid')
+                if oid:
+                    non_printable_ids.add(oid)
+                build.remove(item)
+
+        if not non_printable_ids:
+            return False
+
+        logger.info(f"Stripping non-printable build items (objectids={non_printable_ids})")
+
+        # Remove the <object> elements that are only used by non-printable items.
+        # Collect IDs still referenced by remaining (printable) items.
+        remaining_ids: set[str] = set()
+        for item in build:
+            tag = item.tag.split('}')[-1] if '}' in item.tag else item.tag
+            if tag == 'item':
+                oid = item.get('objectid')
+                if oid:
+                    remaining_ids.add(oid)
+
+        remove_ids = non_printable_ids - remaining_ids
+        if remove_ids:
+            resources = root.find('.//m:resources', ns) or root.find('.//resources')
+            if resources is not None:
+                for obj in list(resources):
+                    if obj.get('id') in remove_ids:
+                        resources.remove(obj)
+
+        # Collect sub-model paths referenced by removed objects for later cleanup
+        removed_paths: set[str] = set()
+        for resources_elem in root.iter():
+            tag = resources_elem.tag.split('}')[-1] if '}' in resources_elem.tag else resources_elem.tag
+            if tag != 'resources':
+                continue
+            for obj in resources_elem:
+                if obj.get('id') in remove_ids:
+                    for comp in obj.iter():
+                        ctag = comp.tag.split('}')[-1] if '}' in comp.tag else comp.tag
+                        if ctag == 'component':
+                            p = comp.get('{http://schemas.microsoft.com/3dmanufacturing/production/2015/06}path')
+                            if p:
+                                removed_paths.add(p.lstrip('/'))
+
+        new_model = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+        with zipfile.ZipFile(source_3mf, 'r') as zin:
+            with zipfile.ZipFile(dest_3mf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                for info in zin.infolist():
+                    if info.filename == '3D/3dmodel.model':
+                        zout.writestr(info, new_model)
+                    elif info.filename in removed_paths:
+                        logger.debug(f"Skipping sub-model for non-printable object: {info.filename}")
+                        continue
+                    else:
+                        zout.writestr(info, zin.read(info.filename))
+
+        return True
+
     def _rebuild_with_trimesh(self, source_3mf: Path, dest_3mf: Path) -> None:
         """Rebuild 3MF with trimesh to extract clean geometry.
 
@@ -160,14 +249,25 @@ class ProfileEmbedder:
             logger.info(f"Rebuilding Bambu 3MF with trimesh: {source_3mf.name}")
 
             load_source = source_3mf
-            temp_stripped: Path | None = None
+            temp_files: list[Path] = []
+
+            # Strip non-printable build items — trimesh loads all geometry
+            # indiscriminately, so non-printable copies double the mesh.
+            temp_np = source_3mf.parent / f"{source_3mf.stem}_printable_{uuid.uuid4().hex[:8]}.3mf"
+            if self._strip_non_printable_items(source_3mf, temp_np):
+                load_source = temp_np
+                temp_files.append(temp_np)
+                logger.info("Stripped non-printable build items before trimesh rebuild")
+            elif temp_np.exists():
+                temp_np.unlink()
 
             # Strip modifier parts before trimesh load — trimesh doesn't
             # understand modifier semantics and duplicates geometry otherwise.
-            if self._has_modifier_parts(source_3mf):
-                temp_stripped = source_3mf.parent / f"{source_3mf.stem}_nomod_{uuid.uuid4().hex[:8]}.3mf"
-                self._strip_modifier_parts(source_3mf, temp_stripped)
-                load_source = temp_stripped
+            if self._has_modifier_parts(load_source):
+                temp_mod = load_source.parent / f"{load_source.stem}_nomod_{uuid.uuid4().hex[:8]}.3mf"
+                self._strip_modifier_parts(load_source, temp_mod)
+                load_source = temp_mod
+                temp_files.append(temp_mod)
                 logger.info("Stripped modifier parts before trimesh rebuild")
 
             try:
@@ -177,8 +277,9 @@ class ProfileEmbedder:
                 # Export as clean 3MF
                 scene.export(str(dest_3mf), file_type='3mf')
             finally:
-                if temp_stripped is not None and temp_stripped.exists():
-                    temp_stripped.unlink()
+                for tf in temp_files:
+                    if tf.exists():
+                        tf.unlink()
 
             logger.info(f"Rebuilt clean 3MF: {dest_3mf.name} ({dest_3mf.stat().st_size / 1024 / 1024:.2f} MB)")
 
@@ -283,6 +384,35 @@ class ProfileEmbedder:
             padded.append(padded[-1])
         return padded
 
+    # Keys whose list values are NOT per-filament and should not be padded.
+    _NON_FILAMENT_LIST_KEYS = frozenset({
+        'compatible_printers',
+        'compatible_prints',
+    })
+
+    @staticmethod
+    def _pad_per_filament_arrays(config: Dict[str, Any], target_count: int) -> None:
+        """Pad all short per-filament arrays to *target_count* by repeating the last element.
+
+        Orca expects every per-filament array in project_settings to have the
+        same length.  When filament_colour has *target_count* entries but other
+        arrays (from the base filament profile) are still length 1, Orca reads
+        past the array bounds and segfaults.
+        """
+        padded = 0
+        for key, value in config.items():
+            if key in ProfileEmbedder._NON_FILAMENT_LIST_KEYS:
+                continue
+            if isinstance(value, list) and 0 < len(value) < target_count:
+                while len(value) < target_count:
+                    value.append(value[-1])
+                padded += 1
+        if padded:
+            logger.info(
+                "Padded %d per-filament arrays to %d entries",
+                padded, target_count,
+            )
+
     @staticmethod
     def _sanitize_index_field(config: Dict[str, Any], key: str, minimum: int) -> None:
         raw = config.get(key)
@@ -328,6 +458,30 @@ class ProfileEmbedder:
             return float(str(value).strip())
         except Exception:
             return fallback
+
+    @staticmethod
+    def _has_paint_data_zip(source_3mf: Path) -> bool:
+        """Check if a 3MF file contains per-triangle paint_color data."""
+        MAX_SCAN = 32 * 1024 * 1024
+        CHUNK = 1024 * 1024
+        needle = b"paint_color"
+        try:
+            with zipfile.ZipFile(source_3mf, 'r') as zf:
+                for name in zf.namelist():
+                    if not name.endswith(".model"):
+                        continue
+                    scanned = 0
+                    with zf.open(name) as f:
+                        while scanned < MAX_SCAN:
+                            chunk = f.read(CHUNK)
+                            if not chunk:
+                                break
+                            if needle in chunk:
+                                return True
+                            scanned += len(chunk)
+        except Exception:
+            pass
+        return False
 
     def _sanitize_wipe_tower_position(
         self,
@@ -449,9 +603,17 @@ class ProfileEmbedder:
             bed_single = [config['bed_temperature_initial_layer'][0]]
         config['bed_temperature_initial_layer_single'] = bed_single
 
-        # U1 workflow targets explicit extruder slots (E1-E4), not single-nozzle MMU swaps.
-        # Keep this off to avoid inflated load/unload toolchange behavior and time estimates.
-        config['single_extruder_multi_material'] = '0'
+        # Painted files (per-triangle paint_color) require SEMM mode so Orca
+        # reads the paint data and generates per-face tool changes.  Non-painted
+        # multicolour files (per-object extruder assignments) don't need it.
+        has_paint = self._has_paint_data_zip(source_3mf)
+        if has_paint and target_slots > 1:
+            config['single_extruder_multi_material'] = '1'
+            # Ooze prevention is incompatible with SEMM + wipe tower
+            config['ooze_prevention'] = '0'
+            logger.info("Enabling SEMM mode for painted multicolour file")
+        else:
+            config['single_extruder_multi_material'] = '0'
 
         logger.info(
             "Built assignment-preserving config with %s extruder slots "
@@ -529,15 +691,19 @@ class ProfileEmbedder:
             has_multi_assignments = precomputed_has_multi_assignments if precomputed_has_multi_assignments is not None else self._has_multi_extruder_assignments(source_3mf)
             has_layer_changes = precomputed_has_layer_changes if precomputed_has_layer_changes is not None else self._has_layer_tool_changes(source_3mf)
 
-            # Use assignment-preserving path for either per-object multicolor
-            # OR layer-based tool changes (MultiAsSingle dual-colour).
-            # Layer tool changes live in custom_gcode_per_layer.xml which
-            # the trimesh rebuild path would destroy.
+            # Use assignment-preserving path for Bambu multicolor files.
+            # This covers per-object extruder assignments, layer-based tool
+            # changes (MultiAsSingle), AND per-triangle paint data.  The
+            # trimesh rebuild path strips all of these, producing a plain
+            # single-colour mesh that crashes Orca when multicolour settings
+            # are applied.  The slicer's --allow-newer-file flag lets Orca
+            # load the original Bambu geometry directly.
             needs_preserve = has_multi_assignments or has_layer_changes
-            if is_bambu and requested_filament_count > 1 and needs_preserve:
+            if is_bambu and requested_filament_count > 1:
                 reason = (
                     "layer-based tool changes" if has_layer_changes
-                    else "model extruder assignments"
+                    else "model extruder assignments" if has_multi_assignments
+                    else "multicolour filament config"
                 )
                 logger.info(
                     f"Detected Bambu multicolor file with {reason} - "
@@ -591,6 +757,13 @@ class ProfileEmbedder:
                 config['enable_arc_fitting'] = '1'
 
             logger.debug(f"Merged config with {len(config)} keys")
+
+            # Pad per-filament arrays to match requested_filament_count.
+            # Orca indexes per-filament arrays by filament number; if filament_colour
+            # indicates N filaments but other arrays are length 1, Orca reads past
+            # bounds and segfaults at "Initializing StaticPrintConfigs".
+            if requested_filament_count > 1:
+                self._pad_per_filament_arrays(config, requested_filament_count)
 
             if not enable_flow_calibrate and 'machine_start_gcode' in config:
                 config['machine_start_gcode'] = self._strip_flow_calibrate(config['machine_start_gcode'])

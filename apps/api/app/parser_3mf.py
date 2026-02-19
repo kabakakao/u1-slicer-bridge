@@ -317,16 +317,13 @@ def detect_colors_from_3mf(file_path: Path) -> List[str]:
                 settings_data = zf.read("Metadata/project_settings.config")
                 settings = json.loads(settings_data)
 
-                # Detect single-extruder multi-material (painted) files.
-                # These have one object-level extruder assignment but use
-                # multiple filament colours via per-triangle paint_color.
-                # IMPORTANT: single_extruder_multi_material alone is not enough —
-                # it may just be the machine AMS config.  We also require actual
-                # paint_color data in the mesh to confirm painting is used.
+                # Detect painted multicolor files.  These use per-triangle
+                # paint_color attributes with multiple filament colours.
+                # Some exports set single_extruder_multi_material=1, others
+                # leave it at 0 — so we detect based on actual paint data.
                 filament_colors = settings.get("filament_colour", [])
-                is_semm = str(settings.get("single_extruder_multi_material", "0")) == "1"
 
-                if is_semm and isinstance(filament_colors, list) and len(filament_colors) > 1:
+                if isinstance(filament_colors, list) and len(filament_colors) > 1:
                     if _has_paint_data(zf):
                         active_colors = [c for c in filament_colors if c]
                         if active_colors:

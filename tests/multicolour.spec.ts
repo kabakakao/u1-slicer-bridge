@@ -54,8 +54,8 @@ test.describe('Multicolour Support', () => {
     expect(hasFile || hasDefault).toBe(true);
   });
 
-  test('file with >4 colors shows notice and falls back to single filament', async ({ page }) => {
-    // Dragon Scale has 7 metadata colors (but active colors may be <=4 after fix)
+  test('file with >4 colors maps extras to available extruders', async ({ page }) => {
+    // Dragon Scale has 7 metadata colors — extras should be mapped to E1-E4
     await uploadFile(page, 'Dragon Scale infinity.3mf');
     // Wait for plates to load using Alpine v3 API
     await page.waitForFunction(() => {
@@ -70,8 +70,22 @@ test.describe('Multicolour Support', () => {
 
     const notice = await getAppState(page, 'multicolorNotice');
     const colors = await getAppState(page, 'detectedColors') as string[];
-    // Either shows a notice or has <= 4 active colors
-    expect(notice !== null || colors.length <= 4).toBe(true);
+    const assignments = await getAppState(page, 'sliceSettings.extruder_assignments') as number[];
+    const filaments = await getAppState(page, 'selectedFilaments') as any[];
+
+    // No rejection notice — >4 colors are now handled
+    expect(notice).toBeNull();
+    // All detected colors preserved
+    expect(colors.length).toBeGreaterThanOrEqual(1);
+    // If multicolor, assignments should all be within 0-3 (E1-E4)
+    if (colors.length > 1 && assignments) {
+      for (const a of assignments) {
+        expect(a).toBeGreaterThanOrEqual(0);
+        expect(a).toBeLessThanOrEqual(3);
+      }
+      // Should be in multicolor mode (selectedFilaments populated)
+      expect(filaments.length).toBeGreaterThan(0);
+    }
   });
 
   test('multicolour API: upload detects colors', async ({ request }) => {
