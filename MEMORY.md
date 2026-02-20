@@ -2,6 +2,36 @@
 
 > Concise bug fix journal. For full implementation history, see [AGENTS.md](AGENTS.md).
 
+## Configure Back-Nav Multicolour State Loss (2026-02-20)
+
+### Symptom
+- After slicing a multicolour file and clicking `Back to configure`, configure view could lose multicolour assignments and show fallback single-filament summary.
+- In some paths, selected file size showed `0.00 MB` after returning.
+
+### Root Cause
+- Complete-step navigation could rely on partially populated `selectedUpload` state (job-origin context), without rehydrating authoritative upload metadata (`detected_colors`, `file_size`).
+
+### Fix
+- `app.js::goBackToConfigure()` now rehydrates upload data via `GET /upload/{id}` and plates via `GET /uploads/{id}/plates`.
+- Re-applies detected colors only when color state is missing/downgraded, preserving normal configured state while restoring broken cases.
+- Added regression test: `tests/slicing.spec.ts` â€” `back to configure preserves multicolour state`.
+
+## Upload Progress Stuck at 0% (2026-02-20)
+
+### Symptom
+- Some clients showed `Uploading... 0%` indefinitely during file upload instead of progressing to `Preparing file`.
+
+### Root Cause
+- Service worker intercepted all requests (including multipart `POST /api/upload`), which can stall upload streams on certain browser/device combinations.
+
+### Fix
+- `apps/web/sw.js` now only intercepts same-origin `GET` requests.
+- Non-GET requests (including upload POSTs) bypass the service worker completely.
+
+### Regression
+- `npm run test:smoke` passed.
+- `npm run test:upload` passed.
+
 ## 3D G-code Viewer (M12) — 2026-02-17
 
 ### Implementation
@@ -38,6 +68,18 @@
 - Replaced trimesh with XML vertex scanning for upload-time bounds
 - `_calculate_xml_bounds()` scans `<vertex>` elements directly
 - trimesh still used at slice time for Bambu geometry rebuild
+
+## Copies Grid Overlap Fix (2026-02-20)
+
+### Root Cause
+`_scan_object_bounds()` in `multi_plate_parser.py` scanned vertex bounds from each component's mesh but never applied the component transform offsets. Both components of the dual-colour cube referenced the same mesh, so combined bounds equaled one cube's bounds (10mm), ignoring the +/-7.455mm assembly offsets. Actual footprint is 24.9mm wide.
+
+### Fix
+Parse each component's `transform` attribute and apply translation offsets to vertex bounds before combining. Also auto-enables prime tower for multi-color copies.
+
+### Regression Tests
+- `copies.spec.ts`: "multi-component assembly dimensions account for component offsets" (width >20mm)
+- `copies.spec.ts`: "copies grid has no overlapping objects" (grid cell spacing > object size)
 
 ## Multicolour Stability
 

@@ -102,6 +102,7 @@ function app() {
 
         // Multiple copies (M32)
         copyCount: 1,
+        copySelectValue: '1',
         copyCountInput: null,
         copiesApplying: false,
         copyGridInfo: null,  // { cols, rows, fits_bed, max_copies }
@@ -1264,6 +1265,7 @@ function app() {
                     // Reset to single copy
                     await fetch(`/api/upload/${this.selectedUpload.upload_id}/copies`, { method: 'DELETE' });
                     this.copyCount = 1;
+                    this.copySelectValue = '1';
                     this.copyGridInfo = null;
                 } else {
                     const response = await fetch(`/api/upload/${this.selectedUpload.upload_id}/copies`, {
@@ -1274,10 +1276,13 @@ function app() {
                     if (!response.ok) {
                         const err = await response.json().catch(() => ({ detail: 'Failed' }));
                         this.showError(err.detail || 'Failed to apply copies');
+                        // Revert select to current copyCount
+                        this.copySelectValue = [1, 2, 4, 6, 9].includes(this.copyCount) ? String(this.copyCount) : 'custom';
                         return;
                     }
                     const result = await response.json();
                     this.copyCount = n;
+                    this.copySelectValue = [1, 2, 4, 6, 9].includes(n) ? String(n) : 'custom';
                     this.copyGridInfo = result;
                     if (!result.fits_bed) {
                         this.showError(`${n} copies may exceed the build plate. Consider fewer copies.`);
@@ -1505,6 +1510,7 @@ function app() {
             this.printSending = false;
             this.printState = null;
             this.copyCount = 1;
+            this.copySelectValue = '1';
             this.copyCountInput = null;
             this.copiesApplying = false;
             this.copyGridInfo = null;
@@ -1518,7 +1524,7 @@ function app() {
         /**
          * Return to configure step with all settings preserved (for reslicing).
          */
-        goBackToConfigure() {
+        async goBackToConfigure() {
             this.sliceResult = null;
             this.sliceProgress = 0;
             this.currentStep = 'configure';
@@ -1527,6 +1533,47 @@ function app() {
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
                 this.sliceInterval = null;
+            }
+
+            // Rehydrate upload details when returning from complete view.
+            // This preserves multicolour metadata even if selectedUpload was
+            // populated from a job record that lacks detected_colors/file_size.
+            const uploadId = this.selectedUpload?.upload_id;
+            if (!uploadId) return;
+
+            try {
+                const [uploadDetails, platesData] = await Promise.all([
+                    api.getUpload(uploadId).catch(() => null),
+                    api.getUploadPlates(uploadId).catch(() => null),
+                ]);
+
+                if (uploadDetails) {
+                    this.selectedUpload = { ...this.selectedUpload, ...uploadDetails };
+
+                    const serverColors = uploadDetails.detected_colors || [];
+                    const missingColors = !this.detectedColors || this.detectedColors.length === 0;
+                    const downgradedColors =
+                        serverColors.length > 1 &&
+                        ((this.detectedColors?.length || 0) <= 1 || (this.selectedFilaments?.length || 0) <= 1);
+
+                    if (missingColors || downgradedColors) {
+                        if (this.filaments.length === 0) {
+                            await this.loadFilaments();
+                        }
+                        this.applyDetectedColors(serverColors);
+                    }
+                }
+
+                if (platesData && platesData.is_multi_plate && Array.isArray(platesData.plates)) {
+                    this.selectedUpload.is_multi_plate = true;
+                    this.selectedUpload.plate_count = platesData.plate_count;
+                    this.plates = platesData.plates;
+                } else if (this.selectedUpload) {
+                    this.selectedUpload.is_multi_plate = false;
+                    this.plates = [];
+                }
+            } catch (err) {
+                console.warn('Failed to rehydrate upload after returning to configure:', err);
             }
         },
 

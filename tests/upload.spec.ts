@@ -6,6 +6,13 @@ test.describe('Upload Workflow', () => {
     await waitForApp(page);
   });
 
+  test('service worker bypasses non-GET requests (upload stall regression)', async ({ page }) => {
+    const swResponse = await page.request.get('/sw.js');
+    expect(swResponse.ok()).toBe(true);
+    const swText = await swResponse.text();
+    expect(swText).toContain("if (req.method !== 'GET') return;");
+  });
+
   test('uploading a single-plate 3MF reaches configure step', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     const step = await getAppState(page, 'currentStep');

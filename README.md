@@ -29,7 +29,9 @@ upload .3mf/.stl → validate plate → configure → slice → preview → prin
 - Print control via Moonraker (send to printer, pause/resume/cancel)
 - Printer status page with live progress, temperatures, and state monitoring
 - Configurable Moonraker URL (persisted in database)
+- Multiple copies support (1-100 copies with auto grid layout, component-aware spacing)
 - File management (browse, download, delete uploads and sliced files)
+- Settings backup/restore (export/import filaments, presets, defaults as JSON)
 - PWA support (installable on desktop, with Share Target API for future Android companion app)
 - Modern web UI with settings modal and 3-step slice workflow
 
@@ -174,6 +176,9 @@ All data is stored under `/data`:
 | M29 | 3-way setting modes - Per-setting model/orca/override with file detection |
 | M30 | STL upload support - Wrap STL in 3MF via trimesh for slicing |
 | M26 | MakerWorld URL import - Paste URL to preview and download 3MF with optional cookie auth |
+| M32 | Multiple copies - Grid layout engine for duplicating objects on the build plate |
+| M34 | Vertical layer slider - Side-mounted vertical range input for G-code viewer |
+| M35 | Settings backup/restore - Export/import all settings as portable JSON |
 
 ### Not Yet Implemented
 
@@ -182,8 +187,9 @@ All data is stored under `/data`:
 | M14 | Multi-machine support |
 | M19 | Slicer selection (OrcaSlicer vs Snapmaker Orca) |
 | M31 | Android companion app - Lightweight WebView wrapper with share target |
+| M33 | Move objects on build plate - Interactive drag-to-position before slicing |
 
-**Progress:** 30.7 / 32 milestones complete (96%)
+**Progress:** 34 / 38 milestones complete (89%)
 
 ## Non-Goals (v1)
 

@@ -82,7 +82,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ✅ M34 Vertical layer slider - Side-mounted vertical range input for G-code layer navigation
 ✅ M35 Settings backup/restore - Export/import all settings (filaments, presets, defaults) as portable JSON
 
-**Current:** 33.7 / 36 complete (94%)
+**Current:** 34 / 38 complete (89%)
 
 ---
 
@@ -203,12 +203,12 @@ When adding vendored libraries, CDN dependencies, or new pip/npm packages:
 4. If tests fail, fix and re-run — do not leave failing tests
 
 **After making changes, offer the user a choice:**
-- "I can run the **fast regression** (`npm run test:fast`, ~5 min, 84 tests incl. 1 slice sanity), **targeted tests** (`npm run test:<suite>`), or the **full suite** (`npm test`, ~60 min). Which do you prefer?"
+- "I can run the **fast regression** (`npm run test:fast`, ~5 min, 110 tests incl. 1 slice sanity), **targeted tests** (`npm run test:<suite>`), or the **full suite** (`npm test`, ~60 min, 148 tests). Which do you prefer?"
 - For very targeted changes (1-2 files, clear scope), default to running targeted tests or `test:fast`.
 - For broad changes (multiple files, API + frontend, refactors), recommend `test:fast` or full suite.
 
 ```bash
-# Fast regression (84 tests incl. calicube slice sanity, ~5 min)
+# Fast regression (110 tests incl. calicube slice sanity, ~5 min)
 npm run test:fast
 
 # Quick smoke tests (always run, ~15 seconds, no slicer needed)
@@ -232,6 +232,8 @@ npm test
 | Error handling/edge cases | `npm run test:errors` |
 | File deletion or management | `npm run test:files` |
 | File-level print settings | `npm run test:file-settings` |
+| Copies/duplicator changes | `npm run test:copies` |
+| Settings backup/restore | `npm run test:backup` |
 | Test file changes only | The affected suite(s) |
 | Any significant or cross-cutting change | `npm test` (full suite) |
 
@@ -665,6 +667,30 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Fix**: For multicolour requests (`extruder_count > 1`), slice endpoints now override load/unload times to `0` in project settings.
 - **Result**: Plate 2 estimate dropped from ~2h to ~50m with prime tower enabled (and ~25m without prime tower), matching expected behavior much better.
 
+**Fixed: Copies Grid Overlap on Multi-Component Assemblies**
+- **Problem**: Dual-colour cube (two separate 10mm cubes offset in assembly) with 4 copies showed 6 visible cubes instead of 8. Adjacent copies overlapped in the center of the grid.
+- **Root Cause**: `_scan_object_bounds()` in `multi_plate_parser.py` scanned vertex bounds from each component's mesh but **never applied the component transform offsets**. Both components referenced the same mesh, so combined bounds equaled one cube's bounds (10mm), ignoring the +/-7.455mm offsets. Actual assembly footprint is 24.9mm wide.
+- **Fix**: Parse each component's `transform` attribute and apply translation offsets (`vals[9]`, `vals[10]`, `vals[11]`) to vertex bounds before combining.
+- **Result**: Object dimensions correctly reported as 24.9x10.5x10.0mm; grid spacing prevents overlap.
+- **Regression tests added**: `copies.spec.ts` — "multi-component assembly dimensions account for component offsets" (verifies width >20mm) and "copies grid has no overlapping objects" (verifies grid cell spacing exceeds object size).
+
+**Fixed: Auto-enable Prime Tower for Multi-Color Copies**
+- **Problem**: Multi-color files with copies >1 dumped 85% of extrusion as orphan purge/wipe material around objects when prime tower was disabled.
+- **Fix**: `routes_slice.py` auto-enables `enable_prime_tower` when `copies > 1` AND `extruder_count > 1`.
+
+**Implemented: Copies UI Dropdown for Mobile**
+- **Problem**: Copies button row (1, 2, 4, 6, 9 + custom input) overflowed on mobile screens.
+- **Fix**: Replaced with `<select>` dropdown with native OS picker. "Custom..." option reveals number input. Compact and works well on all screen sizes.
+
+**Implemented: Settings Backup/Restore (M35)**
+- Export all settings (filaments, extruder presets, slicing defaults) as portable JSON via `GET /presets/backup`.
+- Import settings from JSON via `POST /presets/restore`. Round-trip compatible.
+- Available in Settings modal as "Backup Settings" and "Restore Settings" buttons.
+
+**Implemented: Vertical Layer Slider (M34)**
+- Side-mounted vertical range input replaces horizontal layer slider in G-code viewer.
+- Touch-optimized with `touch-action: none` to prevent mobile pull-to-refresh conflicts.
+
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.
 
@@ -786,8 +812,8 @@ All tests use Playwright and live in `tests/`. Config is in `playwright.config.t
 **Prerequisites:** Docker services running, `npm install`, `npx playwright install chromium`.
 
 ```bash
-npm run test:fast              # Fast regression (84 tests, ~5 min, incl. slice sanity)
-npm test                       # Run ALL tests (122 tests, ~60 min)
+npm run test:fast              # Fast regression (110 tests, ~5 min, incl. slice sanity)
+npm test                       # Run ALL tests (148 tests, ~60 min)
 npm run test:smoke             # Quick smoke tests (~15s, no slicer needed)
 npm run test:upload            # Upload workflow
 npm run test:slice             # Slicing end-to-end (slow, needs slicer)
@@ -801,6 +827,8 @@ npm run test:settings          # Settings modal, presets, filament CRUD
 npm run test:files             # File management (delete)
 npm run test:errors            # Error handling and edge cases
 npm run test:file-settings     # File-level print settings detection
+npm run test:copies            # Multiple copies grid layout and overlap prevention
+npm run test:backup            # Settings backup/restore import/export
 npm run test:report            # View HTML test report
 ```
 
@@ -827,6 +855,9 @@ tests/
   file-settings.spec.ts     File-level print settings detection
   settings.spec.ts          Settings modal, printer defaults, filament library, presets
   errors.spec.ts            Error handling, edge cases, delete safety
+  stl-upload.spec.ts        STL upload, wrapping, and slicing
+  copies.spec.ts            Multiple copies grid, overlap prevention, dropdown UI
+  backup-restore.spec.ts    Settings backup/restore export/import
 ```
 
 ### Test Fixtures
@@ -863,8 +894,11 @@ Test 3MF files live in `test-data/`:
 | slice-plate | Slow | Yes | Individual plate slicing |
 | multicolour-slice | Slow | Yes | Multi-colour slicing workflow |
 | viewer | Slow | Yes | Canvas rendering, layer controls, API |
+| stl-upload | Medium | Yes | STL upload, wrapping, slicing |
+| copies | Medium | Yes* | Grid layout, overlap prevention, dropdown UI |
+| backup | Fast | No | Settings export/import round-trip |
 
-*file-management creates and deletes its own test data
+*copies slice test needs slicer; other copies tests are fast API-only
 
 ### Writing New Tests
 

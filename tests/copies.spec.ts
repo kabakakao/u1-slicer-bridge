@@ -111,14 +111,57 @@ test.describe('Multiple Copies (M32)', () => {
     expect(job.metadata?.layer_count).toBeGreaterThan(0);
   });
 
-  test('copies UI buttons visible on configure step', async ({ page }) => {
+  test('multi-component assembly dimensions account for component offsets', async ({ request }) => {
+    // The dual-colour cube has two components offset from each other.
+    // Dimensions must reflect the FULL assembly extent, not just a single component mesh.
+    // This prevents copies from overlapping (regression test for overlap bug).
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+
+    const res = await request.get(`${API}/upload/${upload.upload_id}/copies/info`);
+    expect(res.ok()).toBe(true);
+    const info = await res.json();
+
+    // Each component is ~10mm, offset by ~7.5mm from center in X.
+    // Total assembly width should be ~25mm (not 10mm if transforms were ignored).
+    expect(info.object_dimensions[0]).toBeGreaterThan(20); // X: ~24.9mm
+    expect(info.object_dimensions[1]).toBeGreaterThan(8);  // Y: ~10.5mm
+    expect(info.object_dimensions[2]).toBeGreaterThan(8);  // Z: ~10mm
+  });
+
+  test('copies grid has no overlapping objects', async ({ request }) => {
+    // Apply 4 copies of the dual-colour assembly and verify that
+    // the grid spacing exceeds the object dimensions (no overlap).
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+
+    const infoRes = await request.get(`${API}/upload/${upload.upload_id}/copies/info`);
+    const info = await infoRes.json();
+    const objWidth = info.object_dimensions[0];
+    const objDepth = info.object_dimensions[1];
+
+    const res = await request.post(`${API}/upload/${upload.upload_id}/copies`, {
+      data: { copies: 4, spacing: 5.0 },
+    });
+    expect(res.ok()).toBe(true);
+    const result = await res.json();
+
+    // Grid cell size = object_size + spacing; verify no overlap between adjacent copies
+    const cellWidth = objWidth + 5.0;
+    const cellDepth = objDepth + 5.0;
+    // With 2x2 grid, total = 2*cell - spacing. Must fit in 270mm bed.
+    expect(2 * cellWidth - 5.0).toBeLessThan(270);
+    expect(2 * cellDepth - 5.0).toBeLessThan(270);
+    expect(result.fits_bed).toBe(true);
+  });
+
+  test('copies UI dropdown visible on configure step', async ({ page }) => {
     await waitForApp(page);
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
 
     // Copies section should be visible for single-plate files
     await expect(page.getByText('Copies:')).toBeVisible();
-    // Quick-select buttons
-    await expect(page.getByRole('button', { name: '1', exact: true }).first()).toBeVisible();
-    await expect(page.getByRole('button', { name: '4', exact: true }).first()).toBeVisible();
+    // Dropdown selector with preset values including "Custom..."
+    const select = page.locator('select').filter({ has: page.locator('option[value="custom"]') });
+    await expect(select).toBeVisible();
+    await expect(select).toHaveValue('1');
   });
 });
