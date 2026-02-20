@@ -506,7 +506,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["skirt_distance"] = str(request.skirt_distance)
         if request.skirt_height is not None:
             overrides["skirt_height"] = str(request.skirt_height)
-        if request.enable_prime_tower:
+        # Auto-enable prime tower for multi-color copies: without it, the slicer
+        # dumps purge/wipe material around the objects creating visible artifacts.
+        need_prime_tower = request.enable_prime_tower
+        if copies_count > 1 and extruder_count > 1 and not need_prime_tower:
+            need_prime_tower = True
+            job_logger.info("Auto-enabling prime tower for multi-color copies")
+
+        if need_prime_tower:
             overrides["enable_prime_tower"] = "1"
             if request.prime_volume is not None:
                 overrides["prime_volume"] = str(max(0, int(request.prime_volume)))
@@ -794,6 +801,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"Upload {upload_id} not found")
             raise HTTPException(status_code=404, detail="Upload not found")
 
+        # Copies don't apply to plate-based slicing
+        copies_count = 1
+
         # Check if this is a multi-plate file
         source_3mf = Path(upload["file_path"])
         if not source_3mf.exists():
@@ -1032,7 +1042,14 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["skirt_distance"] = str(request.skirt_distance)
         if request.skirt_height is not None:
             overrides["skirt_height"] = str(request.skirt_height)
-        if request.enable_prime_tower:
+        # Auto-enable prime tower for multi-color copies: without it, the slicer
+        # dumps purge/wipe material around the objects creating visible artifacts.
+        need_prime_tower = request.enable_prime_tower
+        if copies_count > 1 and extruder_count > 1 and not need_prime_tower:
+            need_prime_tower = True
+            job_logger.info("Auto-enabling prime tower for multi-color copies")
+
+        if need_prime_tower:
             overrides["enable_prime_tower"] = "1"
             if request.prime_volume is not None:
                 overrides["prime_volume"] = str(max(0, int(request.prime_volume)))
