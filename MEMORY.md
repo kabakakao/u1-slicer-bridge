@@ -105,3 +105,9 @@ Runtime schema migration via `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
   - `240_000` for arm64, non-localhost base URLs, or `PLAYWRIGHT_SLOW_ENV=1`
   - `120_000` for standard local runs
 - **Files**: `playwright.config.ts`
+
+## Pi Arm64 API Slice Timeout Tuning (2026-02-21)
+- **Symptom**: Full-suite arm64 runs still had risk on API-driven slice paths due to fixed 120s helper timeouts.
+- **Cause**: `apiSlice`, `apiSlicePlate`, and `waitForJobComplete` in `tests/helpers.ts` used hardcoded 120s limits.
+- **Fix**: Made API slice request/poll timeouts adaptive (`240s` in slow env, `120s` otherwise), aligned with arm64 test runtime characteristics.
+- **Files**: `tests/helpers.ts`
