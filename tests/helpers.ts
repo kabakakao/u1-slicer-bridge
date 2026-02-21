@@ -3,6 +3,12 @@ import path from 'path';
 import fs from 'fs';
 
 export const API = 'http://localhost:8000';
+const IS_ARM64 = process.arch === 'arm64';
+const IS_SLOW_TEST_ENV = IS_ARM64 || process.env.PLAYWRIGHT_SLOW_ENV === '1';
+const UPLOAD_TRANSITION_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 180_000 : 60_000;
+const UPLOAD_LIST_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 90_000 : 30_000;
+const CONFIGURE_STEP_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 90_000 : 30_000;
+const API_UPLOAD_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 180_000 : 60_000;
 
 /** Wait for Alpine.js to fully initialize the app */
 export async function waitForApp(page: Page) {
@@ -56,7 +62,7 @@ export async function uploadFile(page: Page, fixtureName: string) {
       }
     }
     return body?.__x?.$data?.currentStep === expected;
-  }, 'configure', { timeout: 60_000 });
+  }, 'configure', { timeout: UPLOAD_TRANSITION_TIMEOUT_MS });
 }
 
 /** Navigate to the configure step for an already-uploaded file by filename */
@@ -74,7 +80,7 @@ export async function selectUploadByName(page: Page, filename: string) {
       }
     }
     return false;
-  }, undefined, { timeout: 30_000 });
+  }, undefined, { timeout: UPLOAD_LIST_TIMEOUT_MS });
   // Find the file card containing this filename within the modal and click its "Slice" button.
   // Each card is a div.rounded-lg wrapper containing both filename and Slice button.
   const card = modal.locator('.rounded-lg').filter({ hasText: filename }).first();
@@ -89,7 +95,7 @@ export async function selectUploadByName(page: Page, filename: string) {
       }
     }
     return body?.__x?.$data?.currentStep === expected;
-  }, 'configure', { timeout: 30_000 });
+  }, 'configure', { timeout: CONFIGURE_STEP_TIMEOUT_MS });
 }
 
 /** Wait for slicing to complete (up to 2.5 minutes).
@@ -130,7 +136,7 @@ export async function apiUpload(request: APIRequestContext, fixtureName: string)
         buffer,
       },
     },
-    timeout: 60_000,  // Large files (e.g. Dragon Scale 3.6MB) need more than 15s
+    timeout: API_UPLOAD_TIMEOUT_MS,
   });
   expect(res.ok()).toBe(true);
   return res.json();

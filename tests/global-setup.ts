@@ -13,6 +13,14 @@ const BASELINE_FILE = path.join(__dirname, '.test-baseline');
  * slow to start (baseline 0 would delete everything).
  */
 export default async function globalSetup() {
+  const shouldCleanup = process.env.TEST_CLEANUP_UPLOADS === '1';
+  if (!shouldCleanup) {
+    if (fs.existsSync(BASELINE_FILE)) {
+      fs.unlinkSync(BASELINE_FILE);
+    }
+    return;
+  }
+
   let maxId = 0;
   const maxRetries = 10;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {

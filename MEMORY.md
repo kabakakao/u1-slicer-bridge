@@ -2,6 +2,17 @@
 
 > Concise bug fix journal. For full implementation history, see [AGENTS.md](AGENTS.md).
 
+## Pi Arm64 Regression Stability (2026-02-21)
+
+- **Symptom**: Fast regression on Raspberry Pi arm64 timed out in multiplate/multicolour upload flows and removed uploaded files after tests.
+- **Cause**:
+  1. Test cleanup was enabled by default in this branch.
+  2. Upload/UI wait timeouts were too tight for slower arm64 hardware.
+- **Fix**:
+  1. Playwright cleanup now runs only when `TEST_CLEANUP_UPLOADS=1`.
+  2. `tests/helpers.ts` now scales upload/UI/API upload timeouts on arm64 (or when `PLAYWRIGHT_SLOW_ENV=1`).
+- **Files**: `tests/global-setup.ts`, `tests/global-teardown.ts`, `tests/helpers.ts`
+
 ## Multi-Arch Slicer Packaging (2026-02-20)
 
 ### AppImage → Flatpak Migration
