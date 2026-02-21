@@ -291,3 +291,16 @@ Typical timing for a simple cube:
 - Slicing: 30-60 seconds (depends on complexity)
 - Multi-plate parsing: ~30 seconds for large files (3-4MB)
 - Viewer metadata extraction: 1-2 seconds
+
+## Recent Testing Notes (2026-02-21)
+
+- Cleanup safety: test upload/job cleanup is now opt-in.
+- Default test runs preserve uploads/jobs in shared instances.
+- Enable cleanup explicitly when needed:
+
+```bash
+TEST_CLEANUP_UPLOADS=1 npm test
+```
+
+- Browser regression coverage for the scaling-spacing fix exists in
+  `tests/copies.spec.ts` (`browser flow: scale increases full assembly XY footprint`).

@@ -35,8 +35,8 @@ test.describe('Upload Workflow', () => {
   test('configure step shows filament selection', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     // Should see either detected colors or filament dropdown
-    // Should see the Colours & Filaments accordion
-    await expect(page.getByText(/Colours & Filaments/i)).toBeVisible();
+    // Should see the Colours/Filaments accordion.
+    await expect(page.getByText(/Colours.*Filaments/i)).toBeVisible();
   });
 
   test('configure step shows Slice Now button', async ({ page }) => {
@@ -55,12 +55,12 @@ test.describe('Upload Workflow', () => {
   test('customize mode preserves detected colors (not all white)', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
 
-    // File has 2 detected colors — verify they are loaded
+    // File has 2 detected colors - verify they are loaded.
     const detectedColors = await getAppState(page, 'detectedColors') as string[];
     expect(detectedColors?.length).toBeGreaterThan(0);
 
-    // Expand the Colours & Filaments accordion
-    await page.getByText('Colours & Filaments').click();
+    // Expand the Colours/Filaments accordion.
+    await page.getByText(/Colours.*Filaments/i).click();
     // Click Customise button to toggle filament override mode
     await page.getByRole('button', { name: 'Customise' }).click();
 
@@ -90,3 +90,4 @@ test.describe('Upload Workflow', () => {
     expect(step).toBe('configure');
   });
 });
+

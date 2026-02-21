@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, apiUpload, getDefaultFilament, waitForJobComplete, API } from './helpers';
+import { waitForApp, uploadFile, apiUpload, getDefaultFilament, waitForJobComplete, waitForSliceComplete, getAppState, API } from './helpers';
 
 test.describe('Multiple Copies (M32)', () => {
   test.setTimeout(180_000);
@@ -163,5 +163,78 @@ test.describe('Multiple Copies (M32)', () => {
     const select = page.locator('select').filter({ has: page.locator('option[value="custom"]') });
     await expect(select).toBeVisible();
     await expect(select).toHaveValue('1');
+  });
+
+  test('scale increases full assembly XY footprint (not just Z)', async ({ request }) => {
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+    const fil = await getDefaultFilament(request);
+
+    const sliceAndGetSpan = async (scalePercent: number) => {
+      const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
+        data: {
+          filament_ids: [fil.id, fil.id],
+          layer_height: 0.2,
+          infill_density: 15,
+          supports: false,
+          scale_percent: scalePercent,
+        },
+        timeout: 180_000,
+      });
+      expect(sliceRes.ok()).toBe(true);
+      const job = await waitForJobComplete(request, await sliceRes.json());
+      expect(job.status).toBe('completed');
+
+      const metaRes = await request.get(`${API}/jobs/${job.job_id}/gcode/metadata`);
+      expect(metaRes.ok()).toBe(true);
+      const meta = await metaRes.json();
+      const b = meta.bounds;
+      return {
+        x: b.max_x - b.min_x,
+        y: b.max_y - b.min_y,
+        z: b.max_z - b.min_z,
+      };
+    };
+
+    const span100 = await sliceAndGetSpan(100);
+    const span500 = await sliceAndGetSpan(500);
+
+    // Regression: internal component offsets must scale too.
+    // Previously only geometry changed while XY spacing stayed near-constant.
+    expect(span500.x).toBeGreaterThan(span100.x * 3);
+    expect(span500.y).toBeGreaterThan(span100.y * 3);
+    expect(span500.z).toBeGreaterThan(span100.z * 2.5);
+  });
+
+  test('browser flow: scale increases full assembly XY footprint', async ({ page, request }) => {
+    await waitForApp(page);
+    await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
+
+    const getSpanFromLatestSlice = async () => {
+      const sliceResult = await getAppState(page, 'sliceResult') as any;
+      expect(sliceResult?.job_id).toBeTruthy();
+      let metaRes = await request.get(`${API}/jobs/${sliceResult.job_id}/gcode/metadata`);
+      for (let i = 0; i < 5 && !metaRes.ok(); i++) {
+        await page.waitForTimeout(300);
+        metaRes = await request.get(`${API}/jobs/${sliceResult.job_id}/gcode/metadata`);
+      }
+      expect(metaRes.ok()).toBe(true);
+      const meta = await metaRes.json();
+      const b = meta.bounds;
+      return {
+        x: b.max_x - b.min_x,
+        y: b.max_y - b.min_y,
+      };
+    };
+
+    const scaleInput = page.locator('div:has(span:has-text("Scale:")) input[type="number"]').first();
+    await scaleInput.fill('500');
+    await page.getByRole('button', { name: /Slice Now/i }).click();
+    await waitForSliceComplete(page);
+    const span500 = await getSpanFromLatestSlice();
+
+    // Browser-path guard for spacing scaling regression:
+    // old behavior produced ~107mm X span at 500% due to unscaled component offsets.
+    expect(span500.x).toBeGreaterThan(120);
+    expect(span500.y).toBeGreaterThan(80);
   });
 });

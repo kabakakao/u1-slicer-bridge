@@ -221,6 +221,7 @@ def apply_copies_to_3mf(
     output_path: Path,
     copies: int,
     spacing: float = 5.0,
+    layout_scale_factor: float = 1.0,
 ) -> Dict:
     """Create a modified 3MF with multiple copies arranged in a grid.
 
@@ -231,16 +232,27 @@ def apply_copies_to_3mf(
         output_path: Where to write the modified 3MF
         copies: Number of copies (including the original)
         spacing: Gap between copies in mm
+        layout_scale_factor: Scale multiplier used for grid layout dimensions and gap.
+            This is needed when slicer-side scaling is applied after copy placement.
 
     Returns:
         Dict with grid info: cols, rows, fits_bed, positions, max_copies
     """
     if copies < 1:
         raise ValueError("copies must be >= 1")
+    if layout_scale_factor <= 0:
+        raise ValueError("layout_scale_factor must be > 0")
 
     # Get object dimensions for layout calculation
     obj_w, obj_d, obj_h = get_object_dimensions(source_path)
-    logger.info(f"Object dimensions: {obj_w:.1f} x {obj_d:.1f} x {obj_h:.1f} mm")
+    effective_obj_w = obj_w * layout_scale_factor
+    effective_obj_d = obj_d * layout_scale_factor
+    effective_spacing = spacing * layout_scale_factor
+    logger.info(
+        f"Object dimensions: {obj_w:.1f} x {obj_d:.1f} x {obj_h:.1f} mm "
+        f"(layout scale {layout_scale_factor:.3f} -> {effective_obj_w:.1f} x {effective_obj_d:.1f}, "
+        f"spacing {effective_spacing:.1f}mm)"
+    )
 
     if copies == 1:
         # Just copy the file as-is
@@ -250,12 +262,12 @@ def apply_copies_to_3mf(
             "cols": 1,
             "rows": 1,
             "fits_bed": True,
-            "max_copies": estimate_max_copies(obj_w, obj_d, spacing),
+            "max_copies": estimate_max_copies(effective_obj_w, effective_obj_d, effective_spacing),
             "object_dimensions": [round(obj_w, 1), round(obj_d, 1), round(obj_h, 1)],
         }
 
-    positions = calculate_grid_layout(obj_w, obj_d, copies, spacing)
-    fits = grid_fits_bed(obj_w, obj_d, copies, spacing)
+    positions = calculate_grid_layout(effective_obj_w, effective_obj_d, copies, effective_spacing)
+    fits = grid_fits_bed(effective_obj_w, effective_obj_d, copies, effective_spacing)
     cols = math.ceil(math.sqrt(copies))
     rows = math.ceil(copies / cols)
 
@@ -345,6 +357,6 @@ def apply_copies_to_3mf(
         "cols": cols,
         "rows": rows,
         "fits_bed": fits,
-        "max_copies": estimate_max_copies(obj_w, obj_d, spacing),
+        "max_copies": estimate_max_copies(effective_obj_w, effective_obj_d, effective_spacing),
         "object_dimensions": [round(obj_w, 1), round(obj_d, 1), round(obj_h, 1)],
     }

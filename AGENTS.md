@@ -917,3 +917,17 @@ When implementing a new feature or fixing a bug:
 3. Every bug fix should include a test that would have caught the bug.
 4. After changes, deploy to Docker and run at least the targeted test suite.
 5. Offer the user a choice: `test:fast` (~5 min), targeted tests, or full suite (~60 min).
+
+### Scale and Layout Notes (2026-02-21)
+
+- For Bambu-style multi-component assemblies (for example `calib-cube-10-dual-colour-merged.3mf`), internal spacing is defined in both:
+  - `3D/3dmodel.model` component transforms
+  - `Metadata/model_settings.config` matrix metadata
+- When applying scale, update both sources. Scaling only `model_settings.config` is insufficient and can leave model blocks overlapping in XY.
+- For high `copies + scale` combinations that exceed the bed, fail fast with a clear fit error instead of producing overlapping output.
+
+### Test Data Cleanup Safety (2026-02-21)
+
+- Playwright upload cleanup is now opt-in via `TEST_CLEANUP_UPLOADS=1`.
+- Default test runs preserve uploads/jobs in shared/local instances.
+- Use explicit orphan cleanup for disk hygiene: remove only files not referenced by DB paths (`uploads.file_path`, `uploads.copies_path`, `slicing_jobs.gcode_path`, `slicing_jobs.log_path`).
