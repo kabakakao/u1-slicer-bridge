@@ -5,45 +5,65 @@
 ## Configure Back-Nav Multicolour State Loss (2026-02-20)
 
 ### Symptom
-- After slicing a multicolour file and clicking `Back to configure`, configure view could lose multicolour assignments and show fallback single-filament summary.
-- In some paths, selected file size showed `0.00 MB` after returning.
+- After slicing a multicolour file and clicking `Back to configure`, configure view could lose multicolour assignments and show a fallback single-filament summary.
+- In some paths, the selected file size showed `0.00 MB` after navigating back.
 
 ### Root Cause
-- Complete-step navigation could rely on partially populated `selectedUpload` state (job-origin context), without rehydrating authoritative upload metadata (`detected_colors`, `file_size`).
+- The complete-step navigation could rely on partially populated `selectedUpload` state (job-origin context) without rehydrating authoritative upload metadata such as `detected_colors` or `file_size`.
 
 ### Fix
-- `app.js::goBackToConfigure()` now rehydrates upload data via `GET /upload/{id}` and plates via `GET /uploads/{id}/plates`.
-- Re-applies detected colors only when color state is missing/downgraded, preserving normal configured state while restoring broken cases.
-- Added regression test: `tests/slicing.spec.ts` â€” `back to configure preserves multicolour state`.
+- `app.js::goBackToConfigure()` now rehydrates upload data via `GET /upload/{id}` and refreshes plate data via `GET /uploads/{id}/plates`.
+- Detected colors are re-applied only when a colour state is missing or has fallen back, preserving the standard configured state while restoring broken cases.
+- Added regression test `tests/slicing.spec.ts` - `back to configure preserves multicolour state`.
 
 ## Upload Progress Stuck at 0% (2026-02-20)
 
 ### Symptom
-- Some clients showed `Uploading... 0%` indefinitely during file upload instead of progressing to `Preparing file`.
+- Some clients showed `Uploading... 0%` indefinitely and never transitioned to `Preparing file`.
 
 ### Root Cause
-- Service worker intercepted all requests (including multipart `POST /api/upload`), which can stall upload streams on certain browser/device combinations.
+- The service worker intercepted all requests, including multipart `POST /api/upload`, which can stall upload streams on certain browsers or devices.
 
 ### Fix
 - `apps/web/sw.js` now only intercepts same-origin `GET` requests.
-- Non-GET requests (including upload POSTs) bypass the service worker completely.
+- Non-GET requests, including upload POSTs, bypass the service worker entirely.
 
 ### Regression
 - `npm run test:smoke` passed.
 - `npm run test:upload` passed.
 
-## 3D G-code Viewer (M12) — 2026-02-17
+## Pi Arm64 Regression Stability (2026-02-21)
+
+- Symptom: Fast regression on Raspberry Pi arm64 timed out in multiplate/multicolour upload flows and removed uploads after tests.
+- Cause:
+  1. Test cleanup was enabled by default.
+  2. Upload/UI timeouts were too tight for slower arm64 hardware.
+- Fix:
+  1. Playwright cleanup now requires `TEST_CLEANUP_UPLOADS=1`.
+  2. `tests/helpers.ts` scales upload/UI/API timeouts for arm64 or when `PLAYWRIGHT_SLOW_ENV=1`.
+- Files: `tests/global-setup.ts`, `tests/global-teardown.ts`, `tests/helpers.ts`
+
+## Multi-Arch Slicer Packaging (2026-02-20)
+
+### AppImage -> Flatpak Migration
+- Symptom: AppImage-based Orca install blocked multi-arch container builds.
+- Cause: The pinned AppImage path was not portable across `amd64` and `aarch64`.
+- Fix: Switched the API Docker image to install Snapmaker Orca from architecture-specific GitHub Flatpak bundles (`x86_64`/`aarch64`) and invoke the installed binary directly, avoiding `flatpak run` and unstable `bwrap` namespaces. The build now installs the pinned bundle with `--no-deps` and avoids adding Flathub remotes for deterministic installs.
+- Files: `apps/api/Dockerfile`
+- Note: The Dockerfile now resolves `fdm_process_common.json` dynamically from the Flatpak installation path.
+
+## 3D G-code Viewer (M12) â 2026-02-17
 
 ### Implementation
 - Replaced 2D canvas viewer with gcode-preview v2.18.0 + Three.js r159 (vendored in `apps/web/lib/`)
-- Alpine.js component wraps gcode-preview; Three.js objects stored in closure (NOT Alpine properties — Proxy breaks non-configurable props)
+- Alpine.js component wraps gcode-preview; Three.js objects stored in closure (NOT Alpine properties â Proxy breaks non-configurable props)
 - Full G-code fetched via `/api/jobs/{id}/download`, parsed client-side by gcode-preview
 - Mouse controls match OrcaSlicer: left=rotate, middle/right=pan, scroll=zoom
 
 ### Key Bugs Fixed
-1. **TIMELAPSE tool color bug** — `TIMELAPSE_START`/`TIMELAPSE_TAKE_FRAME` parsed as `gcode="t"`, misidentified as tool changes → `state.t=undefined` → hotpink fallback. Fix: comment out with regex before processGCode.
-2. **Black rendered as white** — Gradient replaces lightness (0.1-0.8), black (S=0) becomes gray/white. Fix: `disableGradient: true`.
-3. **Auto filament colors ignoring presets** — `mappedColors` from `mapDetectedColorsToPresetSlots()` was unused; `syncFilamentColors()` used wrong preset index. Fix: use `mappedFromPresets.mappedColors` and `assignments[idx]`.
+1. **TIMELAPSE tool color bug** â `TIMELAPSE_START`/`TIMELAPSE_TAKE_FRAME` parsed as `gcode="t"`, misidentified as tool changes â `state.t=undefined` â hotpink fallback. Fix: comment out with regex before processGCode.
+2. **Black rendered as white** â Gradient replaces lightness (0.1-0.8), black (S=0) becomes gray/white. Fix: `disableGradient: true`.
+3. **Auto filament colors ignoring presets** â `mappedColors` from `mapDetectedColorsToPresetSlots()` was unused; `syncFilamentColors()` used wrong preset index. Fix: use `mappedFromPresets.mappedColors` and `assignments[idx]`.
 
 ## Recent Fixes (2026-02-16)
 
@@ -120,12 +140,12 @@ Parse each component's `transform` attribute and apply translation offsets to ve
 ## Multicolour Stability
 
 ### Key Fixes Applied
-1. **plater_name metadata** — cleared in `model_settings.config` (segfault trigger)
-2. **>4 colors** — rejected at API level, frontend falls back to single-filament
-3. **Plate extraction** — uses `--slice <plate_id>` instead of geometry extraction
-4. **SEMM painted files** — detected via `paint_color` attributes + `single_extruder_multi_material`
-5. **Layer tool changes** — `custom_gcode_per_layer.xml` type=2 entries detected and preserved
-6. **Machine load/unload times** — zeroed for multicolour (prevents 2x time inflation)
+1. **plater_name metadata** â cleared in `model_settings.config` (segfault trigger)
+2. **>4 colors** â rejected at API level, frontend falls back to single-filament
+3. **Plate extraction** â uses `--slice <plate_id>` instead of geometry extraction
+4. **SEMM painted files** â detected via `paint_color` attributes + `single_extruder_multi_material`
+5. **Layer tool changes** â `custom_gcode_per_layer.xml` type=2 entries detected and preserved
+6. **Machine load/unload times** â zeroed for multicolour (prevents 2x time inflation)
 
 ### Working Paths
 - Trimesh rebuild: stable but single-tool output only (drops assignment semantics)
@@ -139,7 +159,7 @@ Parse each component's `transform` attribute and apply translation offsets to ve
 - `_ensure_preset_rows()` handles schema migration at runtime
 
 ### 3MF Sanitization
-- Parameter clamping: `raft_first_layer_expansion`, `tree_support_wall_count`, `prime_volume`, `prime_tower_brim_width` etc. (Bambu `-1` → `0`)
+- Parameter clamping: `raft_first_layer_expansion`, `tree_support_wall_count`, `prime_volume`, `prime_tower_brim_width` etc. (Bambu `-1` â `0`)
 - Metadata stripped: `slice_info.config`, `cut_information.xml`, `filament_sequence.json`
 - Wipe tower position clamped within 270mm bed bounds
 - `plater_name` cleared to prevent segfaults
@@ -155,3 +175,17 @@ Orca requires string arrays: `["200"]` not `[200]`. Wrap with `str()`.
 ### Database
 asyncpg can't handle multi-statement SQL. Schema split into individual statements in `db.py`.
 Runtime schema migration via `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
+
+## Pi Arm64 Playwright Timeout Tuning (2026-02-21)
+- **Symptom**: `test:fast` on Raspberry Pi timed out at exactly 120s on large multi-plate/multicolour uploads even after helper timeout increases.
+- **Cause**: Playwright global per-test timeout remained fixed at `120_000`, capping slower arm64 runs before helper-level waits could complete.
+- **Fix**: `playwright.config.ts` now uses adaptive test timeout:
+  - `240_000` for arm64, non-localhost base URLs, or `PLAYWRIGHT_SLOW_ENV=1`
+  - `120_000` for standard local runs
+- **Files**: `playwright.config.ts`
+
+## Pi Arm64 API Slice Timeout Tuning (2026-02-21)
+- **Symptom**: Full-suite arm64 runs still had risk on API-driven slice paths due to fixed 120s helper timeouts.
+- **Cause**: `apiSlice`, `apiSlicePlate`, and `waitForJobComplete` in `tests/helpers.ts` used hardcoded 120s limits.
+- **Fix**: Made API slice request/poll timeouts adaptive (`240s` in slow env, `120s` otherwise), aligned with arm64 test runtime characteristics.
+- **Files**: `tests/helpers.ts`
