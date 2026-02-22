@@ -53,7 +53,7 @@ git clone https://github.com/taylormadearmy/u1-slicer-bridge.git
 cd u1-slicer-bridge
 cp .env.example .env          # Optional: edit to set MOONRAKER_URL for printer control
 docker compose up -d --build
-# Open http://localhost:8080
+# Open http://localhost:8234 (or change `WEB_PORT` in `.env` before starting)
 ```
 
 Verify: `curl http://localhost:8000/healthz`
