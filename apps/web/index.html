@@ -1972,7 +1972,7 @@
                                                  :src="webcamImageUrl(webcam, i)"
                                                  @error="handleWebcamImageError(webcam, i)"
                                                  :alt="webcam.name || `Webcam ${i+1}`"
-                                                 class="w-full h-full object-cover"
+                                                 class="w-full h-full object-contain"
                                                  loading="lazy" referrerpolicy="no-referrer" />
                                             <p x-show="!webcamImageAvailable(webcam, i)" class="text-xs text-gray-400">No preview URL</p>
                                         </div>
