@@ -691,6 +691,13 @@ Multi-plate files were being treated as a single giant plate, causing:
 - Side-mounted vertical range input replaces horizontal layer slider in G-code viewer.
 - Touch-optimized with `touch-action: none` to prevent mobile pull-to-refresh conflicts.
 
+**Implemented: Webcam Integration in Printer Status Overlay**
+- Added Moonraker webcam discovery (`/server/webcams/list`) and exposes webcam metadata via `GET /printer/status`.
+- Overlay shows webcam tiles with external open-icon action; relative webcam URLs are resolved against Moonraker host origin (without API port).
+- Preview behavior is robust: prefers `snapshot_url`, falls back to `stream_url` on image error, and refreshes preview URLs on reload/reopen (cache-busting nonce).
+- Webcam panel is collapsed by default and webcam payload is only requested when expanded (`include_webcams=true`).
+- Regression coverage in `tests/webcams.spec.ts` includes collapsed payload gating, expanded API path, preview fallback, and overlay reopen refresh.
+
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.
 

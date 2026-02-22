@@ -2,6 +2,15 @@
 
 > Concise bug fix journal. For full implementation history, see [AGENTS.md](AGENTS.md).
 
+## Printer Status Webcam Feature (2026-02-22)
+
+### Summary
+- Added full webcam support to the Printer Status overlay: discovery from Moonraker, API exposure on `GET /printer/status`, and tile rendering in the web UI.
+- Webcam panel is collapsed by default and requests webcam payload only when expanded (`include_webcams=true`).
+- Relative webcam URLs are resolved against Moonraker host origin (no API port), while absolute URLs are preserved.
+- Preview pipeline is resilient: prefer `snapshot_url`, fallback to `stream_url` on image error, and refresh preview URL on reopen/reload via cache-busting nonce.
+- Regression coverage lives in `tests/webcams.spec.ts` (collapsed gating, expanded API path, fallback behavior, reopen refresh).
+
 ## Configure Back-Nav Multicolour State Loss (2026-02-20)
 
 ### Symptom

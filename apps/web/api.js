@@ -379,8 +379,9 @@ class ApiClient {
     /**
      * Get printer status
      */
-    async getPrinterStatus() {
-        return this.fetch('/printer/status');
+    async getPrinterStatus(includeWebcams = false) {
+        const params = includeWebcams ? '?include_webcams=true' : '';
+        return this.fetch(`/printer/status${params}`);
     }
 
     /**

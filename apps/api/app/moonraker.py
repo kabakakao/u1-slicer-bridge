@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any
+from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 
 
@@ -173,6 +174,46 @@ class MoonrakerClient:
             "bed_target": heater_bed.get("target", 0.0),
             "extruders": extruders,
         }
+
+    def _resolve_moonraker_url(self, value: str) -> str:
+        """Resolve possibly-relative Moonraker webcam URLs to absolute URLs."""
+        if not value:
+            return ""
+        value = str(value).strip()
+        if not value:
+            return ""
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
+        parsed = urlparse(self.base_url)
+        webcam_origin = self.base_url
+        if parsed.scheme and parsed.hostname:
+            host = parsed.hostname
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            webcam_origin = urlunparse((parsed.scheme, host, "", "", "", ""))
+
+        return urljoin(f"{webcam_origin}/", value.lstrip("/"))
+
+    async def get_webcams(self) -> list[Dict[str, Any]]:
+        """Get configured webcams from Moonraker."""
+        if not self.client:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        response = await self.client.get("/server/webcams/list")
+        response.raise_for_status()
+
+        webcam_items = response.json().get("result", {}).get("webcams", [])
+        webcams = []
+        for webcam in webcam_items:
+            stream_url = webcam.get("stream_url") or webcam.get("streamUrl") or ""
+            snapshot_url = webcam.get("snapshot_url") or webcam.get("snapshotUrl") or ""
+            webcams.append({
+                "name": webcam.get("name") or "Webcam",
+                "enabled": bool(webcam.get("enabled", True)),
+                "stream_url": self._resolve_moonraker_url(stream_url),
+                "snapshot_url": self._resolve_moonraker_url(snapshot_url),
+            })
+        return webcams
 
 
 # Global client instance
