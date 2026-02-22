@@ -20,6 +20,9 @@ npm test
 # Quick smoke tests only (~15 seconds)
 npm run test:smoke
 
+# If your local web UI is on a different port (for example 8234):
+PLAYWRIGHT_BASE_URL=http://localhost:8234 npm run test:smoke
+
 # Run specific test suites
 npm run test:upload            # Upload workflow
 npm run test:slice             # Slicing end-to-end (slow, requires slicer)

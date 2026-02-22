@@ -13,9 +13,11 @@ const BASELINE_FILE = path.join(__dirname, '.test-baseline');
  * slow to start (baseline 0 would delete everything).
  */
 export default async function globalSetup() {
-  if (process.env.TEST_CLEANUP_UPLOADS !== '1') {
-    // Cleanup is opt-in. Keep a sentinel baseline so teardown can skip safely.
-    fs.writeFileSync(BASELINE_FILE, '-1');
+  const shouldCleanup = process.env.TEST_CLEANUP_UPLOADS === '1';
+  if (!shouldCleanup) {
+    if (fs.existsSync(BASELINE_FILE)) {
+      fs.unlinkSync(BASELINE_FILE);
+    }
     return;
   }
 
