@@ -71,6 +71,8 @@ function app() {
         presetsLoaded: false,
         presetsSaving: false,
         presetMessage: null,
+        presetMessageOk: true,
+        afcSyncing: false,
         maxExtruders: 4,
         multicolorNotice: null,
 
@@ -78,6 +80,7 @@ function app() {
         printerConnected: false,
         printerBusy: false,
         printerStatus: 'Checking...',
+        printerAfcSlots: [],
 
         // Printer settings (for Settings modal)
         printerSettings: { moonraker_url: '', makerworld_cookies: '' },
@@ -237,6 +240,7 @@ function app() {
                 const status = await api.getPrinterStatus();
                 this.printerConnected = status.connected;
                 this.printerBusy = ['printing', 'paused'].includes(status.print_status?.state);
+                this.printerAfcSlots = status.print_status?.afc_slots || [];
                 // Show print progress in header when actively printing
                 if (status.print_status && status.print_status.state === 'printing') {
                     const pct = Math.round((status.print_status.progress || 0) * 100);
@@ -250,6 +254,7 @@ function app() {
             } catch (err) {
                 this.printerConnected = false;
                 this.printerStatus = 'Error';
+                this.printerAfcSlots = [];
                 console.error('Failed to check printer status:', err);
             }
         },
@@ -330,6 +335,7 @@ function app() {
             if (!this.presetsLoaded) return; // Don't save before presets loaded from server
             this.presetsSaving = true;
             this.presetMessage = null;
+            this.presetMessageOk = true;
 
             try {
                 const payload = {
@@ -367,17 +373,137 @@ function app() {
 
                 await api.saveExtruderPresets(payload);
                 this.presetMessage = 'Extruder presets saved.';
+                this.presetMessageOk = true;
                 this.applyPresetDefaults();
                 this.resetJobOverrideSettings();
             } catch (err) {
                 this.presetMessage = `Failed to save presets: ${err.message}`;
+                this.presetMessageOk = false;
                 this.showError(this.presetMessage);
             } finally {
                 this.presetsSaving = false;
                 setTimeout(() => {
                     this.presetMessage = null;
-                }, 3000);
+                }, 5000);
             }
+        },
+
+        async loadAfcColorsIntoPresets() {
+            this.presetMessage = null;
+            this.presetMessageOk = true;
+            this.afcSyncing = true;
+            try {
+                await this.checkPrinterStatus();
+                const slots = (this.printerAfcSlots || []).filter((slot) => slot && slot.color && slot.loaded !== false);
+
+                if (!this.printerConnected) {
+                    this.presetMessage = 'Printer offline — cannot load AFC colors.';
+                    this.presetMessageOk = false;
+                    return;
+                }
+
+                if (slots.length === 0) {
+                    this.presetMessage = 'No loaded AFC colors found.';
+                    this.presetMessageOk = false;
+                    return;
+                }
+
+                const slotIndexFromLabel = (label) => {
+                    if (!label || typeof label !== 'string') return null;
+                    const match = label.match(/(\d+)/);
+                    if (!match) return null;
+                    const n = Number(match[1]);
+                    if (!Number.isFinite(n) || n < 1 || n > this.maxExtruders) return null;
+                    return n - 1;
+                };
+
+                const used = new Set();
+                let sequentialFallback = 0;
+                const nextFree = () => {
+                    while (sequentialFallback < this.maxExtruders && used.has(sequentialFallback)) {
+                        sequentialFallback += 1;
+                    }
+                    return sequentialFallback < this.maxExtruders ? sequentialFallback : null;
+                };
+
+                for (const afc of slots) {
+                    const explicitIdx = slotIndexFromLabel(afc.label);
+                    let idx = (explicitIdx !== null && !used.has(explicitIdx)) ? explicitIdx : nextFree();
+                    if (idx === null) break;
+                    used.add(idx);
+                    this.extruderPresets[idx].color_hex = afc.color;
+
+                    const matchedFilament = this.findFilamentMatchForAfcSlot(afc);
+                    if (matchedFilament?.id) {
+                        this.extruderPresets[idx].filament_id = matchedFilament.id;
+                    }
+                }
+
+                await this.saveExtruderPresets();
+                this.presetMessage = 'Loaded AFC colors into extruder presets.';
+                this.presetMessageOk = true;
+            } catch (err) {
+                this.presetMessage = `Failed to load AFC colors: ${err.message}`;
+                this.presetMessageOk = false;
+                this.showError(this.presetMessage);
+            } finally {
+                this.afcSyncing = false;
+            }
+        },
+
+        normalizeAfcMaterialType(materialType) {
+            if (!materialType || typeof materialType !== 'string') return null;
+            const compact = materialType.trim().toUpperCase().replace(/\s+/g, '');
+            const aliases = {
+                'PLA+': 'PLA',
+                'PLAPLUS': 'PLA',
+                'PET-G': 'PETG',
+                'ABS+': 'ABS',
+                'NYLON': 'PA',
+            };
+            return aliases[compact] || compact;
+        },
+
+        findFilamentMatchForAfcSlot(afc) {
+            if (!afc || !Array.isArray(this.filaments) || this.filaments.length === 0) return null;
+
+            const targetMaterial = this.normalizeAfcMaterialType(afc.material_type);
+            const targetManufacturer = (afc.manufacturer || '').trim().toLowerCase();
+
+            let best = null;
+            let bestScore = -1;
+
+            for (const filament of this.filaments) {
+                if (!filament) continue;
+
+                let score = 0;
+                const filamentMaterial = this.normalizeAfcMaterialType(filament.material || '');
+                const filamentName = (filament.name || '').toLowerCase();
+
+                if (targetMaterial && filamentMaterial === targetMaterial) {
+                    score += 100;
+                }
+
+                if (targetManufacturer) {
+                    if (filamentName.includes(targetManufacturer)) {
+                        score += 40;
+                    } else {
+                        const manufacturerTokens = targetManufacturer.split(/\s+/).filter(Boolean);
+                        if (manufacturerTokens.some((token) => token.length >= 3 && filamentName.includes(token))) {
+                            score += 20;
+                        }
+                    }
+                }
+
+                if (filament.is_default) score += 5;
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = filament;
+                }
+            }
+
+            return bestScore > 0 ? best : null;
         },
 
         /**
@@ -602,6 +728,7 @@ function app() {
             this.showSettingsModal = false;
             this.showStorageDrawer = false;
             this.showPrinterStatus = true;
+            this.checkPrinterStatus();
             // Start polling for live updates
             this.pollPrintStatus();
             if (!this.printMonitorInterval) {

@@ -691,6 +691,28 @@ Multi-plate files were being treated as a single giant plate, causing:
 - Side-mounted vertical range input replaces horizontal layer slider in G-code viewer.
 - Touch-optimized with `touch-action: none` to prevent mobile pull-to-refresh conflicts.
 
+**Implemented: Moonraker AFC Color Readout in Printer Status**
+- **Problem**: Printer AFC UI could show loaded spool colors, but U1 Slicer Bridge printer overlay did not display them.
+- **Fix**:
+  1. `moonraker.py` now discovers AFC-related printer objects dynamically via `/printer/objects/list` and extracts hex colors from AFC status payloads.
+  2. `GET /printer/status` now requests print status with `include_afc=True` and returns `print_status.afc_slots`.
+  3. Printer Status overlay renders an `Loaded AFC Colors` section with slot label, swatch, and loaded/not-loaded hint.
+- **Result**: Loaded AFC colors from Moonraker are visible directly in the app's Printer Status view.
+
+**Implemented: Load AFC Colors into Extruder Presets (Settings)**
+- **What changed**:
+  1. Added `Load AFC Colors` action in Settings → Printer Defaults → Extruder Presets.
+  2. Frontend refreshes printer status, reads `print_status.afc_slots`, and applies loaded AFC colors to preset slots E1-E4.
+  3. Slot mapping uses numeric label hints when present (e.g., `Slot 2`, `Lane 3`) and falls back to first-free sequential assignment.
+  4. AFC payload now includes `material_type` and `manufacturer` when available.
+  5. Settings action now best-effort matches and assigns filament profiles by AFC material type and manufacturer hint.
+  6. Printer overview shows material type inline; manufacturer appears in tooltip.
+- **Result**: Users can sync currently loaded AFC spool colors directly into default extruder preset colors.
+
+**Improved: Settings Feedback for AFC Sync**
+- Added visible success/error status messages in `Settings → Printer Defaults` for `Load AFC Colors` (instead of toast-only behavior).
+- Added in-button loading state (`Syncing...`) while AFC preset sync is running.
+
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.
 

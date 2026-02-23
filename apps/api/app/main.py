@@ -137,7 +137,7 @@ async def printer_status():
         # Also query print status for header display
         print_status = None
         try:
-            print_status = await client.query_print_status()
+            print_status = await client.query_print_status(include_afc=True)
         except Exception:
             pass  # Non-critical
 
@@ -1025,6 +1025,8 @@ def _parse_filament_profile_payload(file_name: str, payload: dict) -> dict:
         "slicer_settings": slicer_settings if slicer_settings else None,
         "is_recognized": is_orca_profile or matched_keys > 0,
     }
+
+
 
 
 @app.post("/filaments/import")
