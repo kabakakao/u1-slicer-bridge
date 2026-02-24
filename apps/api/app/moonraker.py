@@ -175,24 +175,39 @@ class MoonrakerClient:
             "extruders": extruders,
         }
 
-    def _resolve_moonraker_url(self, value: str) -> str:
+    def _build_base_url(self, keep_port: bool) -> str:
+        parsed_base = urlparse(self.base_url)
+        if not (parsed_base.scheme and parsed_base.hostname):
+            return f"{self.base_url.rstrip('/')}/"
+
+        if keep_port and parsed_base.netloc:
+            netloc = parsed_base.netloc
+        else:
+            host = parsed_base.hostname
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            netloc = host
+
+        return urlunparse((
+            parsed_base.scheme,
+            netloc,
+            (parsed_base.path.rstrip("/") + "/") if parsed_base.path else "/",
+            "",
+            "",
+            "",
+        ))
+
+    def _resolve_moonraker_url(self, value: str, keep_port: bool = False) -> str:
         """Resolve possibly-relative Moonraker webcam URLs to absolute URLs."""
         if not value:
             return ""
         value = str(value).strip()
         if not value:
             return ""
-        if value.startswith("http://") or value.startswith("https://"):
+        parsed_value = urlparse(value)
+        if parsed_value.scheme:
             return value
-        parsed = urlparse(self.base_url)
-        webcam_origin = self.base_url
-        if parsed.scheme and parsed.hostname:
-            host = parsed.hostname
-            if ":" in host and not host.startswith("["):
-                host = f"[{host}]"
-            webcam_origin = urlunparse((parsed.scheme, host, "", "", "", ""))
-
-        return urljoin(f"{webcam_origin}/", value.lstrip("/"))
+        return urljoin(self._build_base_url(keep_port=keep_port), value.lstrip("/"))
 
     async def get_webcams(self) -> list[Dict[str, Any]]:
         """Get configured webcams from Moonraker."""
@@ -207,11 +222,17 @@ class MoonrakerClient:
         for webcam in webcam_items:
             stream_url = webcam.get("stream_url") or webcam.get("streamUrl") or ""
             snapshot_url = webcam.get("snapshot_url") or webcam.get("snapshotUrl") or ""
+            stream_primary = self._resolve_moonraker_url(stream_url, keep_port=False)
+            snapshot_primary = self._resolve_moonraker_url(snapshot_url, keep_port=False)
+            stream_alt = self._resolve_moonraker_url(stream_url, keep_port=True)
+            snapshot_alt = self._resolve_moonraker_url(snapshot_url, keep_port=True)
             webcams.append({
                 "name": webcam.get("name") or "Webcam",
                 "enabled": bool(webcam.get("enabled", True)),
-                "stream_url": self._resolve_moonraker_url(stream_url),
-                "snapshot_url": self._resolve_moonraker_url(snapshot_url),
+                "stream_url": stream_primary,
+                "snapshot_url": snapshot_primary,
+                "stream_url_alt": stream_alt if stream_alt and stream_alt != stream_primary else "",
+                "snapshot_url_alt": snapshot_alt if snapshot_alt and snapshot_alt != snapshot_primary else "",
             })
         return webcams
 

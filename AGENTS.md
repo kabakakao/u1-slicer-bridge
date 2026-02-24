@@ -695,7 +695,8 @@ Multi-plate files were being treated as a single giant plate, causing:
 **Implemented: Webcam Integration in Printer Status Overlay**
 - Added Moonraker webcam discovery (`/server/webcams/list`) and exposes webcam metadata via `GET /printer/status`.
 - Overlay shows webcam tiles with external open-icon action; relative webcam URLs are resolved against Moonraker host origin (without API port).
-- Preview behavior is robust: prefers `snapshot_url`, falls back to `stream_url` on image error, and refreshes preview URLs on reload/reopen (cache-busting nonce).
+- Preview behavior is robust: prefers `snapshot_url`, falls back to alternate URL variants (`snapshot` alt, then `stream`, then `stream` alt) on image error, and refreshes preview URLs on reload/reopen (cache-busting nonce).
+- Backend now returns optional alternate webcam URL fields (`snapshot_url_alt`, `stream_url_alt`) so browser runtime can auto-switch between no-port and keep-port variants based on real image load success.
 - Webcam panel is collapsed by default and webcam payload is only requested when expanded (`include_webcams=true`).
 - Regression coverage in `tests/webcams.spec.ts` includes collapsed payload gating, expanded API path, preview fallback, and overlay reopen refresh.
 

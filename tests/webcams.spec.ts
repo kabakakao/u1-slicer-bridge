@@ -146,6 +146,39 @@ test.describe('Webcam Overlay', () => {
     expect(result.after).toContain('/mock/stream-ok.jpg');
   });
 
+  test('preview tries alternate webcam URL variants after image errors', async ({ page }) => {
+    await waitForApp(page);
+
+    const result = await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      const scope = body?._x_dataStack?.find((s: any) => 'printerWebcams' in s && typeof s.handleWebcamImageError === 'function');
+      if (!scope) throw new Error('Alpine scope not found');
+      scope.webcamImageFallback = {};
+      scope.webcamImageNonce = 456;
+      const webcam = {
+        name: 'Alt Cam',
+        enabled: true,
+        snapshot_url: '/mock/no-port-snapshot.jpg',
+        snapshot_url_alt: '/mock/with-port-snapshot.jpg',
+        stream_url: '/mock/no-port-stream.jpg',
+        stream_url_alt: '/mock/with-port-stream.jpg',
+      };
+      const first = scope.webcamImageUrl(webcam, 0);
+      scope.handleWebcamImageError(webcam, 0);
+      const second = scope.webcamImageUrl(webcam, 0);
+      scope.handleWebcamImageError(webcam, 0);
+      const third = scope.webcamImageUrl(webcam, 0);
+      scope.handleWebcamImageError(webcam, 0);
+      const fourth = scope.webcamImageUrl(webcam, 0);
+      return { first, second, third, fourth };
+    });
+
+    expect(result.first).toContain('/mock/no-port-snapshot.jpg');
+    expect(result.second).toContain('/mock/with-port-snapshot.jpg');
+    expect(result.third).toContain('/mock/no-port-stream.jpg');
+    expect(result.fourth).toContain('/mock/with-port-stream.jpg');
+  });
+
   test('closing and reopening overlay refreshes webcam preview URL', async ({ page }) => {
     await waitForApp(page);
 

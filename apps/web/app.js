@@ -2234,19 +2234,31 @@ function app() {
 
         webcamOpenUrl(webcam) {
             if (!webcam) return '';
-            return webcam.stream_url || webcam.snapshot_url || '';
+            return webcam.stream_url || webcam.stream_url_alt || webcam.snapshot_url || webcam.snapshot_url_alt || '';
         },
 
         webcamImageKey(webcam, index) {
-            return `${index}:${webcam?.name || ''}:${webcam?.snapshot_url || ''}:${webcam?.stream_url || ''}`;
+            return `${index}:${webcam?.name || ''}:${webcam?.snapshot_url || ''}:${webcam?.snapshot_url_alt || ''}:${webcam?.stream_url || ''}:${webcam?.stream_url_alt || ''}`;
+        },
+
+        webcamImageCandidates(webcam) {
+            if (!webcam) return [];
+            const candidates = [
+                webcam.snapshot_url,
+                webcam.snapshot_url_alt,
+                webcam.stream_url,
+                webcam.stream_url_alt,
+            ].filter(Boolean);
+            return [...new Set(candidates)];
         },
 
         webcamImageUrl(webcam, index) {
             if (!webcam) return '';
             const key = this.webcamImageKey(webcam, index);
-            const baseUrl = (!this.webcamImageFallback[key] && webcam.snapshot_url)
-                ? webcam.snapshot_url
-                : (webcam.stream_url || '');
+            const candidates = this.webcamImageCandidates(webcam);
+            if (candidates.length === 0) return '';
+            const stage = Number(this.webcamImageFallback[key] || 0);
+            const baseUrl = candidates[Math.min(stage, candidates.length - 1)] || '';
             if (!baseUrl) return '';
             const separator = baseUrl.includes('?') ? '&' : '?';
             return `${baseUrl}${separator}_cb=${this.webcamImageNonce}`;
@@ -2258,10 +2270,11 @@ function app() {
 
         handleWebcamImageError(webcam, index) {
             const key = this.webcamImageKey(webcam, index);
-            if (this.webcamImageFallback[key]) return;
-            if (webcam?.snapshot_url && webcam?.stream_url && webcam.snapshot_url !== webcam.stream_url) {
-                this.webcamImageFallback[key] = true;
-            }
+            const candidates = this.webcamImageCandidates(webcam);
+            if (candidates.length <= 1) return;
+            const current = Number(this.webcamImageFallback[key] || 0);
+            if (current >= candidates.length - 1) return;
+            this.webcamImageFallback[key] = current + 1;
         },
 
         /**

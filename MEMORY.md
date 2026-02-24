@@ -2,6 +2,30 @@
 
 > Concise bug fix journal. For full implementation history, see [AGENTS.md](AGENTS.md).
 
+## Webcam Path-Validity Fallback (2026-02-23)
+
+### Symptom
+- Some deployments require webcam paths without the Moonraker API port, while others require port-preserved webcam URLs.
+- A single fixed resolution strategy caused broken webcam previews for one side or the other.
+
+### Root Cause
+- URL resolution had to choose one output style (`with port` or `without port`) before browser load-time, but actual reachability is environment-dependent.
+
+### Fix
+- Backend now provides both variants for relative webcam URLs:
+  - primary browser-facing URLs (`snapshot_url`, `stream_url`, no API port)
+  - alternates with port preserved (`snapshot_url_alt`, `stream_url_alt`)
+- Frontend webcam preview now performs staged runtime fallback on image load errors:
+  1. `snapshot_url`
+  2. `snapshot_url_alt`
+  3. `stream_url`
+  4. `stream_url_alt`
+- Absolute URLs with any scheme (`https://`, `rtsp://`, etc.) remain unchanged.
+
+### Regression
+- Playwright webcam suite: `npm run test:webcams` passed
+- Smoke suite: `npm run test:smoke` passed
+
 ## Printer Status Webcam Feature (2026-02-22)
 
 ### Summary
