@@ -202,7 +202,7 @@ class MoonrakerClient:
         status = query_response.json().get("result", {}).get("status", {})
 
         slots: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, Optional[str], Optional[str]]] = set()
+        seen: set[tuple[str, str, Optional[str], Optional[str], Optional[bool], Optional[bool]]] = set()
 
         def _walk(path: str, node: Any):
             if isinstance(node, dict):
@@ -210,15 +210,17 @@ class MoonrakerClient:
                 if color:
                     label = self._extract_slot_label(path, node)
                     loaded = self._extract_loaded_state(node)
+                    tool_loaded = self._extract_tool_loaded_state(node)
                     material_type = self._extract_material_type(node)
                     manufacturer = self._extract_manufacturer(node)
-                    key = (label, color, material_type, manufacturer)
+                    key = (label, color, material_type, manufacturer, loaded, tool_loaded)
                     if key not in seen:
                         seen.add(key)
                         slots.append({
                             "label": label,
                             "color": color,
                             "loaded": loaded,
+                            "tool_loaded": tool_loaded,
                             "material_type": material_type,
                             "manufacturer": manufacturer,
                         })
@@ -270,7 +272,16 @@ class MoonrakerClient:
 
     @staticmethod
     def _extract_loaded_state(node: dict[str, Any]) -> Optional[bool]:
-        bool_keys = ["loaded", "is_loaded", "filament_present", "has_filament"]
+        bool_keys = ["loaded", "is_loaded", "filament_present", "has_filament", "load", "prep"]
+        for key in bool_keys:
+            value = node.get(key)
+            if isinstance(value, bool):
+                return value
+        return None
+
+    @staticmethod
+    def _extract_tool_loaded_state(node: dict[str, Any]) -> Optional[bool]:
+        bool_keys = ["tool_loaded", "loaded_to_tool", "loaded_to_nozzle", "nozzle_loaded"]
         for key in bool_keys:
             value = node.get(key)
             if isinstance(value, bool):
@@ -339,6 +350,10 @@ class MoonrakerClient:
             "vendor_name",
             "maker",
             "filament_brand",
+            "material_brand",
+            "spool_brand",
+            "mfr",
+            "supplier",
         ]
         for key in manufacturer_keys:
             value = node.get(key)
@@ -346,6 +361,55 @@ class MoonrakerClient:
                 cleaned = value.strip()
                 if cleaned:
                     return cleaned
+
+        # Generic fallback: any key that hints at manufacturer/brand/vendor
+        for key, value in node.items():
+            key_l = str(key).lower()
+            if any(token in key_l for token in ("manufacturer", "brand", "vendor", "maker", "mfr", "supplier")):
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+                if isinstance(value, list) and value and isinstance(value[0], str) and value[0].strip():
+                    return value[0].strip()
+
+        # Heuristic fallback from profile/name-like fields (e.g., "Bambu PLA Basic")
+        for key in ("filament_name", "spool_name", "profile_name", "material_name", "name"):
+            value = node.get(key)
+            if not isinstance(value, str):
+                continue
+            guessed = MoonrakerClient._guess_manufacturer_from_name(value)
+            if guessed:
+                return guessed
+
+        return None
+
+    @staticmethod
+    def _guess_manufacturer_from_name(name: str) -> Optional[str]:
+        if not isinstance(name, str):
+            return None
+        text = name.strip()
+        if not text:
+            return None
+
+        known = {
+            "bambu": "Bambu",
+            "sunlu": "Sunlu",
+            "esun": "eSUN",
+            "polymaker": "Polymaker",
+            "prusament": "Prusament",
+            "snapmaker": "Snapmaker",
+        }
+        lower = text.lower()
+        for token, canonical in known.items():
+            if token in lower:
+                return canonical
+
+        first = re.split(r"[\s_\-]+", text)[0].strip("()[]")
+        if not first or len(first) < 3:
+            return None
+        if re.fullmatch(r"(?i)(pla|petg|abs|asa|tpu|pc|pa|pva)", first):
+            return None
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9+._]*", first):
+            return first
         return None
 
     async def query_print_status(self, include_afc: bool = False) -> Dict[str, Any]:

@@ -1957,12 +1957,14 @@
                         <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                             <template x-for="(slot, i) in printerAfcSlots" :key="`${slot.label}-${slot.color}-${i}`">
                                 <div class="flex items-center gap-2 p-2 bg-white rounded border border-indigo-100"
-                                     :title="slot.manufacturer ? `Manufacturer: ${slot.manufacturer}` : ''">
+                                     :title="`Manufacturer: ${slot.manufacturer || 'not reported by printer'}`">
                                     <div class="w-4 h-4 rounded-full border border-gray-300" :style="`background-color: ${slot.color || '#e5e7eb'}`"></div>
                                     <div class="min-w-0">
                                         <p class="font-medium text-gray-800 truncate" x-text="slot.label || `Slot ${i+1}`"></p>
                                         <p class="text-[11px]" :class="slot.loaded === false ? 'text-gray-400' : 'text-indigo-700'"
-                                           x-text="slot.material_type ? `${slot.material_type} · ${slot.loaded === false ? 'Not loaded' : 'Loaded'}` : (slot.loaded === false ? 'Not loaded' : 'Loaded')"></p>
+                                           x-text="slot.material_type
+                                              ? `${slot.material_type} · ${slot.tool_loaded === true ? 'At nozzle' : (slot.loaded === true ? 'Loaded in lane' : 'Not loaded')}`
+                                              : (slot.tool_loaded === true ? 'At nozzle' : (slot.loaded === true ? 'Loaded in lane' : 'Not loaded'))"></p>
                                     </div>
                                 </div>
                             </template>

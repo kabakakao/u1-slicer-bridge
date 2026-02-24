@@ -2,38 +2,26 @@
 
 > Concise bug fix journal. For full implementation history, see [AGENTS.md](AGENTS.md).
 
-## Moonraker AFC Colors in Printer Overlay (2026-02-22)
+## Moonraker AFC End-to-End Integration (2026-02-22)
 
 ### Symptom
-- Moonraker AFC showed correct loaded spool colors, but the app's Printer Status overlay only showed temperatures and print state.
+- AFC data was only partially usable in-app: no complete printer overlay coverage, no one-click preset sync, limited material/manufacturer visibility, and no lane-vs-nozzle load distinction.
 
 ### Root Cause
-- The backend status payload did not query or expose AFC objects/colors; frontend had no AFC data to render.
+- AFC lane payloads from Moonraker were not fully extracted and propagated through API/UI (`color`, `material_type`, `manufacturer`, `tool_loaded`), and settings flow lacked a direct AFC-to-preset bridge.
 
 ### Fix
-- `apps/api/app/moonraker.py`: Added dynamic AFC object discovery (`/printer/objects/list`) and recursive color extraction from AFC status objects (`afc_slots`).
-- `apps/api/app/main.py`: `GET /printer/status` now calls `query_print_status(include_afc=True)`.
-- `apps/web/app.js`: Stores `status.print_status.afc_slots` in `printerAfcSlots` and refreshes on opening Printer Status.
-- `apps/web/index.html`: Added `Loaded AFC Colors` section with swatch, slot label, and loaded/not-loaded hint.
+- `apps/api/app/moonraker.py`: Added dynamic AFC object discovery and recursive extraction of `color`, `loaded`, `tool_loaded`, `material_type`, `manufacturer`.
+- `apps/api/app/main.py`: `GET /printer/status` returns AFC slot data via `query_print_status(include_afc=True)`.
+- `apps/web/index.html`: Printer overlay now shows AFC swatches, material type, manufacturer tooltip, and precise status labels:
+  - `At nozzle` (`tool_loaded=true`)
+  - `Loaded in lane` (`loaded=true`)
+  - `Not loaded`.
+- `apps/web/app.js`: Added `Load AFC Colors` workflow to map AFC slots to E1-E4, apply colors, and best-effort assign matching filament profile by material/manufacturer.
+- Settings feedback now includes visible success/error status and loading state (`Syncing...`) for AFC sync.
 
-## Load AFC Colors into Presets (2026-02-22)
-
-### Symptom
-- AFC colors were visible in Printer Status, but users still had to manually copy those colors into Settings → Extruder Presets.
-
-### Fix
-- Added `Load AFC Colors` button in Settings.
-- `app.js::loadAfcColorsIntoPresets()` refreshes printer status, reads `print_status.afc_slots`, maps colors to E1-E4, and saves presets immediately.
-- Mapping prefers numeric slot hints in labels (`Slot 2`, `Lane 3`), with sequential first-free fallback.
-- AFC slot extraction now includes `material_type` and `manufacturer` when present in Moonraker object payloads.
-- Profile assignment is best-effort by material match first, then manufacturer tokens against filament profile names.
-- Printer status overview now shows material type inline; manufacturer is provided via tooltip.
-
-## AFC Sync Feedback (2026-02-22)
-
-### AFC Feedback
-- `presetMessage` existed in app state but was not rendered in Settings UI.
-- Added inline success/error message panel + loading state for `Load AFC Colors` so users get explicit confirmation.
+### Validation
+- Live-validated against Moonraker host `{moonrakerIp}:7125` with mixed states (for example E0 tool-loaded while E1 lane-loaded only).
 
 ## Configure Back-Nav Multicolour State Loss (2026-02-20)
 
