@@ -1960,7 +1960,7 @@
                                      :title="`Manufacturer: ${slot.manufacturer || 'not reported by printer'}`">
                                     <div class="w-4 h-4 rounded-full border border-gray-300" :style="`background-color: ${slot.color || '#e5e7eb'}`"></div>
                                     <div class="min-w-0">
-                                        <p class="font-medium text-gray-800 truncate" x-text="slot.label || `Slot ${i+1}`"></p>
+                                        <p class="font-medium text-gray-800 truncate" x-text="`E${i+1}`"></p>
                                         <p class="text-[11px]" :class="slot.loaded === false ? 'text-gray-400' : 'text-indigo-700'"
                                            x-text="slot.material_type
                                               ? `${slot.material_type} · ${slot.tool_loaded === true ? 'At nozzle' : (slot.loaded === true ? 'Loaded in lane' : 'Not loaded')}`
