@@ -5,9 +5,10 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import re
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass
 
 from config import PrinterProfile
@@ -169,22 +170,20 @@ class OrcaSlicer:
         output_name: str = "output.gcode",
         plate_index: Optional[int] = None,
         scale_factor: Optional[float] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> Dict:
         """Execute Orca Slicer CLI with pre-built 3MF file.
-
-        This is simpler than slice_bundle() - no --load-settings needed,
-        all settings are embedded in the 3MF file.
 
         Args:
             three_mf_path: Path to 3MF file with embedded settings
             workspace: Working directory for output
             output_name: Output G-code filename (default: output.gcode)
+            plate_index: Plate to slice (None = all)
+            scale_factor: Scale factor (1.0 = no scaling)
+            progress_callback: Optional callback(percent, message) for real-time progress
 
         Returns:
             Dict with success, stdout, stderr, exit_code
-
-        Raises:
-            SlicingError: If 3MF file not found or slicing fails
         """
         if not three_mf_path.exists():
             raise SlicingError(f"3MF file not found: {three_mf_path}")
@@ -195,12 +194,46 @@ class OrcaSlicer:
             "xvfb-run", "-a",
             str(self.orca_bin),
             "--slice", slice_arg,
-            "--allow-newer-file",  # Allow Bambu Studio 3MF files with newer versions
+            "--allow-newer-file",
             "--outputdir", str(workspace),
         ]
+
+        # Set up named pipe for real-time progress from OrcaSlicer
+        pipe_path = None
+        if progress_callback:
+            pipe_path = str(workspace / f"progress_{os.getpid()}.pipe")
+            try:
+                os.mkfifo(pipe_path)
+                cmd.extend(["--pipe", pipe_path])
+            except OSError:
+                pipe_path = None  # Fall back to no progress
+
         if scale_factor is not None and abs(float(scale_factor) - 1.0) > 1e-6:
             cmd.extend(["--scale", str(float(scale_factor))])
         cmd.append(str(three_mf_path))
+
+        # Start pipe reader thread (reads JSON progress lines from OrcaSlicer)
+        reader_thread = None
+        if pipe_path:
+            def _read_progress_pipe():
+                try:
+                    with open(pipe_path, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                                pct = data.get("total_percent", 0)
+                                msg = data.get("message", "")
+                                progress_callback(pct, msg)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                except OSError:
+                    pass
+
+            reader_thread = threading.Thread(target=_read_progress_pipe, daemon=True)
+            reader_thread.start()
 
         # Execute with timeout
         try:
@@ -208,7 +241,7 @@ class OrcaSlicer:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout
+                timeout=300,
                 env={"DISPLAY": ":99"}
             )
 
@@ -222,6 +255,14 @@ class OrcaSlicer:
             raise SlicingError("Slicing timed out after 5 minutes")
         except Exception as e:
             raise SlicingError(f"Slicing command failed: {str(e)}")
+        finally:
+            if reader_thread:
+                reader_thread.join(timeout=3)
+            if pipe_path:
+                try:
+                    os.unlink(pipe_path)
+                except OSError:
+                    pass
 
     async def slice_3mf_async(
         self,
@@ -230,11 +271,13 @@ class OrcaSlicer:
         output_name: str = "output.gcode",
         plate_index: Optional[int] = None,
         scale_factor: Optional[float] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> Dict:
         """Async version of slice_3mf — acquires semaphore to limit concurrent processes."""
         async with _get_slicer_semaphore():
             return await asyncio.to_thread(
-                self.slice_3mf, three_mf_path, workspace, output_name, plate_index, scale_factor
+                self.slice_3mf, three_mf_path, workspace, output_name,
+                plate_index, scale_factor, progress_callback
             )
 
     def parse_gcode_metadata(self, gcode_path: Path) -> Dict:
