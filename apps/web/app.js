@@ -71,6 +71,9 @@ function app() {
         presetsLoaded: false,
         presetsSaving: false,
         presetMessage: null,
+        presetMessageOk: true,
+        _presetMessageTimer: null,
+        afcSyncing: false,
         maxExtruders: 4,
         multicolorNotice: null,
 
@@ -79,6 +82,7 @@ function app() {
         printerBusy: false,
         printerStatus: 'Checking...',
         printerWebcams: [],
+        printerAfcSlots: [],
         webcamsExpanded: false,
         webcamImageFallback: {},
         webcamImageNonce: Date.now(),
@@ -250,6 +254,7 @@ function app() {
                     this.webcamImageFallback = {};
                     this.webcamImageNonce = Date.now();
                 }
+                this.printerAfcSlots = status.print_status?.afc_slots || [];
                 // Show print progress in header when actively printing
                 if (status.print_status && status.print_status.state === 'printing') {
                     const pct = Math.round((status.print_status.progress || 0) * 100);
@@ -388,10 +393,95 @@ function app() {
                 this.showError(this.presetMessage);
             } finally {
                 this.presetsSaving = false;
-                setTimeout(() => {
+                if (this._presetMessageTimer) clearTimeout(this._presetMessageTimer);
+                this._presetMessageTimer = setTimeout(() => {
                     this.presetMessage = null;
-                }, 3000);
+                }, 5000);
             }
+        },
+
+        async loadAfcColorsIntoPresets() {
+            this.presetMessage = null;
+            this.presetMessageOk = true;
+            this.afcSyncing = true;
+            try {
+                await this.checkPrinterStatus();
+                const slots = (this.printerAfcSlots || []).filter((slot) => slot && slot.color && slot.loaded !== false);
+
+                if (!this.printerConnected) {
+                    this.presetMessage = 'Printer offline — cannot load AFC colors.';
+                    this.presetMessageOk = false;
+                    return;
+                }
+
+                if (slots.length === 0) {
+                    this.presetMessage = 'No loaded AFC colors found.';
+                    this.presetMessageOk = false;
+                    return;
+                }
+
+                for (let i = 0; i < Math.min(slots.length, this.maxExtruders); i++) {
+                    const slot = slots[i];
+                    this.extruderPresets[i].color_hex = slot.color;
+
+                    if (slot.material_type && this.filaments && this.filaments.length > 0) {
+                        const match = this.findFilamentMatchForAfcSlot(slot);
+                        if (match) {
+                            this.extruderPresets[i].filament_id = match.id;
+                        }
+                    }
+                }
+
+                await this.saveExtruderPresets();
+                if (this._presetMessageTimer) clearTimeout(this._presetMessageTimer);
+                this.presetMessage = 'Loaded AFC colors into extruder presets.';
+                this.presetMessageOk = true;
+                this._presetMessageTimer = setTimeout(() => { this.presetMessage = null; }, 5000);
+            } catch (err) {
+                this.presetMessage = `Failed to load AFC colors: ${err.message}`;
+                this.presetMessageOk = false;
+                this.showError(this.presetMessage);
+            } finally {
+                this.afcSyncing = false;
+            }
+        },
+
+        normalizeAfcMaterialType(value) {
+            if (!value || typeof value !== 'string') return '';
+            const compact = value.trim().toUpperCase().replace(/\s+/g, '');
+            const aliases = {
+                'PLA+': 'PLA', 'PLAPLUS': 'PLA', 'PET-G': 'PETG',
+                'ABS+': 'ABS', 'NYLON': 'PA', 'PA6': 'PA', 'PA12': 'PA',
+            };
+            return aliases[compact] || compact;
+        },
+
+        findFilamentMatchForAfcSlot(slot) {
+            if (!slot.material_type || !this.filaments || this.filaments.length === 0) return null;
+            const afcMat = this.normalizeAfcMaterialType(slot.material_type);
+            let bestMatch = null;
+            let bestScore = 0;
+            for (const fil of this.filaments) {
+                let score = 0;
+                const filMat = this.normalizeAfcMaterialType(fil.material);
+                if (filMat === afcMat) score += 100;
+                else continue;
+                if (slot.manufacturer && fil.name) {
+                    const mfr = slot.manufacturer.toLowerCase();
+                    const name = fil.name.toLowerCase();
+                    if (name.includes(mfr) || mfr.includes(name.split(' ')[0])) score += 40;
+                    else {
+                        const tokens = mfr.split(/[\s_\-]+/);
+                        if (tokens.some((t) => t.length >= 3 && name.includes(t))) score += 20;
+                    }
+                }
+                if (!bestMatch) score += 5;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMatch = fil;
+                }
+            }
+            return bestScore > 0 ? bestMatch : null;
         },
 
         /**
