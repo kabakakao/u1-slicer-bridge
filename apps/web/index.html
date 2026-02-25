@@ -1954,6 +1954,49 @@
                               x-text="(printState?.state || 'standby').charAt(0).toUpperCase() + (printState?.state || 'standby').slice(1)"></span>
                     </div>
 
+                    <!-- Webcams (collapsed by default) -->
+                    <div x-show="printerConnected" class="mb-5 border border-gray-200 rounded-lg">
+                        <button @click="toggleWebcamsExpanded()"
+                                class="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-gray-50 transition rounded-lg">
+                            <p class="text-sm font-medium text-gray-900">Webcams</p>
+                            <span class="text-xs font-medium text-gray-500" x-text="webcamsExpanded ? 'Hide' : 'Show'"></span>
+                        </button>
+
+                        <div x-show="webcamsExpanded" x-cloak class="px-3 pb-3">
+                            <div x-show="printerWebcams.length === 0" class="text-xs text-gray-500 px-1 py-2">
+                                No webcams found.
+                            </div>
+                            <div x-show="printerWebcams.length > 0" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <template x-for="(webcam, i) in printerWebcams" :key="`${webcam.name || 'webcam'}-${i}`">
+                                    <div class="rounded-lg border border-gray-200 overflow-hidden bg-gray-50">
+                                        <div class="px-3 py-2 border-b border-gray-200 flex items-center justify-between">
+                                            <p class="text-xs font-medium text-gray-700 truncate" x-text="webcam.name || `Webcam ${i+1}`"></p>
+                                            <a x-show="webcamOpenUrl(webcam)" :href="webcamOpenUrl(webcam)" target="_blank"
+                                               rel="noopener noreferrer"
+                                               title="Open webcam in new tab"
+                                               aria-label="Open webcam in new tab"
+                                               class="inline-flex items-center justify-center p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition">
+                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 3h7m0 0v7m0-7L10 14M5 7v12h12v-5"/>
+                                                </svg>
+                                                <span class="sr-only">Open</span>
+                                            </a>
+                                        </div>
+                                        <div class="aspect-video bg-black flex items-center justify-center">
+                                            <img x-show="webcamImageAvailable(webcam, i)"
+                                                 :src="webcamImageUrl(webcam, i)"
+                                                 @error="handleWebcamImageError(webcam, i)"
+                                                 :alt="webcam.name || `Webcam ${i+1}`"
+                                                 class="w-full h-full object-contain"
+                                                 loading="lazy" referrerpolicy="no-referrer" />
+                                            <p x-show="!webcamImageAvailable(webcam, i)" class="text-xs text-gray-400">No preview URL</p>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Active Print Section (visible when printing/paused) -->
                     <template x-if="printState?.state === 'printing' || printState?.state === 'paused'">
                         <div>

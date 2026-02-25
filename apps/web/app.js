@@ -78,6 +78,10 @@ function app() {
         printerConnected: false,
         printerBusy: false,
         printerStatus: 'Checking...',
+        printerWebcams: [],
+        webcamsExpanded: false,
+        webcamImageFallback: {},
+        webcamImageNonce: Date.now(),
 
         // Printer settings (for Settings modal)
         printerSettings: { moonraker_url: '', makerworld_cookies: '' },
@@ -191,14 +195,14 @@ function app() {
             this.fetchVersion(); // non-blocking
             this.loadOrcaDefaults(); // non-blocking
             this.loadPrinterSettings(); // non-blocking, pre-load for settings modal
-            this.checkPrinterStatus(); // non-blocking — updates header indicator async
+            this.checkPrinterStatus(false); // non-blocking — updates header indicator async
             await this.loadFilaments();
             await this.loadExtruderPresets();
             await this.loadRecentUploads();
             await this.loadJobs();
 
             // Set up periodic printer status check
-            setInterval(() => this.checkPrinterStatus(), 30000); // Every 30 seconds
+            setInterval(() => this.checkPrinterStatus(this.webcamsExpanded), 30000); // Every 30 seconds
 
             // Handle PWA share target — auto-populate MakerWorld URL if shared
             this._handleShareTarget();
@@ -234,11 +238,18 @@ function app() {
         /**
          * Check printer connection status
          */
-        async checkPrinterStatus() {
+        async checkPrinterStatus(includeWebcams = false) {
             try {
-                const status = await api.getPrinterStatus();
+                const status = await api.getPrinterStatus(includeWebcams);
                 this.printerConnected = status.connected;
                 this.printerBusy = ['printing', 'paused'].includes(status.print_status?.state);
+                if (includeWebcams) {
+                    this.printerWebcams = Array.isArray(status.webcams)
+                        ? status.webcams.filter(cam => cam && cam.enabled !== false)
+                        : [];
+                    this.webcamImageFallback = {};
+                    this.webcamImageNonce = Date.now();
+                }
                 // Show print progress in header when actively printing
                 if (status.print_status && status.print_status.state === 'printing') {
                     const pct = Math.round((status.print_status.progress || 0) * 100);
@@ -252,6 +263,7 @@ function app() {
             } catch (err) {
                 this.printerConnected = false;
                 this.printerStatus = 'Error';
+                if (includeWebcams) this.printerWebcams = [];
                 console.error('Failed to check printer status:', err);
             }
         },
@@ -601,14 +613,30 @@ function app() {
             this.showStorageDrawer = false;
         },
 
-        openPrinterStatus() {
+        async openPrinterStatus() {
             this.showSettingsModal = false;
             this.showStorageDrawer = false;
             this.showPrinterStatus = true;
+            if (this.webcamsExpanded) {
+                this.webcamImageFallback = {};
+                this.webcamImageNonce = Date.now();
+            }
+            await this.checkPrinterStatus(this.webcamsExpanded);
             // Start polling for live updates
             this.pollPrintStatus();
             if (!this.printMonitorInterval) {
                 this.startPrintMonitorPolling();
+            }
+        },
+
+        async toggleWebcamsExpanded() {
+            this.webcamsExpanded = !this.webcamsExpanded;
+            if (this.webcamsExpanded) {
+                this.webcamImageFallback = {};
+                this.webcamImageNonce = Date.now();
+                await this.checkPrinterStatus(true);
+            } else {
+                this.webcamImageFallback = {};
             }
         },
 
@@ -2202,6 +2230,51 @@ function app() {
         printProgressPercent() {
             if (!this.printState || !this.printState.progress) return 0;
             return Math.round(this.printState.progress * 100);
+        },
+
+        webcamOpenUrl(webcam) {
+            if (!webcam) return '';
+            return webcam.stream_url || webcam.stream_url_alt || webcam.snapshot_url || webcam.snapshot_url_alt || '';
+        },
+
+        webcamImageKey(webcam, index) {
+            return `${index}:${webcam?.name || ''}:${webcam?.snapshot_url || ''}:${webcam?.snapshot_url_alt || ''}:${webcam?.stream_url || ''}:${webcam?.stream_url_alt || ''}`;
+        },
+
+        webcamImageCandidates(webcam) {
+            if (!webcam) return [];
+            const candidates = [
+                webcam.snapshot_url,
+                webcam.snapshot_url_alt,
+                webcam.stream_url,
+                webcam.stream_url_alt,
+            ].filter(Boolean);
+            return [...new Set(candidates)];
+        },
+
+        webcamImageUrl(webcam, index) {
+            if (!webcam) return '';
+            const key = this.webcamImageKey(webcam, index);
+            const candidates = this.webcamImageCandidates(webcam);
+            if (candidates.length === 0) return '';
+            const stage = Number(this.webcamImageFallback[key] || 0);
+            const baseUrl = candidates[Math.min(stage, candidates.length - 1)] || '';
+            if (!baseUrl) return '';
+            const separator = baseUrl.includes('?') ? '&' : '?';
+            return `${baseUrl}${separator}_cb=${this.webcamImageNonce}`;
+        },
+
+        webcamImageAvailable(webcam, index) {
+            return Boolean(this.webcamImageUrl(webcam, index));
+        },
+
+        handleWebcamImageError(webcam, index) {
+            const key = this.webcamImageKey(webcam, index);
+            const candidates = this.webcamImageCandidates(webcam);
+            if (candidates.length <= 1) return;
+            const current = Number(this.webcamImageFallback[key] || 0);
+            if (current >= candidates.length - 1) return;
+            this.webcamImageFallback[key] = current + 1;
         },
 
         /**
