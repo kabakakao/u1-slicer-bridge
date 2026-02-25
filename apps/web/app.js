@@ -82,6 +82,7 @@ function app() {
         printerBusy: false,
         printerStatus: 'Checking...',
         printerWebcams: [],
+        printerHasAfc: false,
         printerAfcSlots: [],
         webcamsExpanded: false,
         webcamImageFallback: {},
@@ -254,6 +255,7 @@ function app() {
                     this.webcamImageFallback = {};
                     this.webcamImageNonce = Date.now();
                 }
+                this.printerHasAfc = status.print_status?.has_afc || false;
                 this.printerAfcSlots = status.print_status?.afc_slots || [];
                 // Show print progress in header when actively printing
                 if (status.print_status && status.print_status.state === 'printing') {
