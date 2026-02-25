@@ -27,7 +27,7 @@ Purpose: keep the pre-slice viewer fast enough for M33 placement while building 
 
 - [x] Do not load placement viewer geometry before a multi-plate selection is made
 - [x] Ensure plate thumbnails/cards render before placement viewer work starts
-- [ ] Lazy-load placement viewer only when `Object Placement` is visible (or after plate selection settles)
+- [x] Lazy-load placement viewer only when `Object Placement` is visible (or after plate selection settles)
 - [x] Add simple loading states specific to placement viewer (`Loading layout`, `Loading preview mesh`)
 
 ### Phase 2: Geometry Budget / Decimation
@@ -65,7 +65,7 @@ Purpose: keep the pre-slice viewer fast enough for M33 placement while building 
 - [x] `/geometry` extents regression (non-zero Z + matches layout bounds)
 - [x] Large-model geometry decimation regression (Shashibo)
 - [x] Placement viewer drag -> slice bounds shift regression
-- [ ] Multi-plate Shashibo `slice-plate` requested plate routing regression (`@extended`)
+- [x] Multi-plate Shashibo `slice-plate` requested plate routing regression (`@extended`)
 - [ ] Placement viewer lazy-load regression (thumbnails visible before placement viewer fetch)
 
 ## Notes

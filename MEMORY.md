@@ -2,6 +2,28 @@
 
 > Concise bug fix journal. For full implementation history, see [AGENTS.md](AGENTS.md).
 
+## M33 Viewer/G-code Preview Visual Parity (Global Flip/Mirror Illusion) (2026-02-25)
+
+### Symptoms
+- Pre-slice `Object Placement` viewer and post-slice G-code viewer could show the same object + prime tower in apparently mirrored/flipped relative positions.
+- User reported this across multiple files (Shashibo plate 5/6 and simple/single-plate cases), indicating a global viewer-frame issue rather than a model-specific placement bug.
+
+### Root Cause
+- The pre-slice mesh viewer (`mesh-viewer.js`) was using a different bed-axis world mapping and default camera pose than the G-code viewer (`gcode-preview`).
+- Placement data itself was not necessarily mirrored, but the two viewers projected the bed with different visual conventions, making relative positions look wrong when compared side-by-side.
+
+### Fix
+- Aligned pre-slice viewer bed-axis visual orientation with `gcode-preview`:
+  - updated bed `Y -> world Z` mapping in `mesh-viewer.js`
+  - updated object/proxy/prime-tower local geometry `Y` handling to match the new viewer frame
+  - aligned the pre-slice viewer default camera vector/target to the G-code viewer's default orientation
+- Result: pre-slice and post-slice viewers now present consistent on-screen relative placement (object vs prime tower) without relying on camera guesswork.
+
+### Validation
+- `npm run test:smoke`
+- `npm run test:viewer`
+- manual screenshot comparison of pre-slice vs G-code preview after rebuild/redeploy
+
 ## Aux Fan Object-Transform Slice Failures: Backend U1 Build Volume Mismatch (2026-02-24)
 
 ### Symptoms

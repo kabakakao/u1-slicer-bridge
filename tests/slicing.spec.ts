@@ -1040,12 +1040,38 @@ test.describe('Slicing Workflow', () => {
       return false;
     }, undefined, { timeout: 15_000 });
 
-    // Scan a grid of likely points until a drag lands on the object mesh.
+    // Prefer a precise on-screen object point from the viewer scene state. Fall
+    // back to a grid scan if the debug hook is unavailable.
     const box = await canvas.boundingBox();
     expect(box).not.toBeNull();
     const dragDx = Math.min(24, box!.width * 0.04);
     const dragDy = -Math.min(8, box!.height * 0.02);
     const candidates: Array<[number, number]> = [];
+    const preciseTarget = await page.evaluate(() => {
+      const viewer = (window as any).__u1PlacementViewer;
+      if (!viewer?.camera || !viewer?.renderer || !viewer?.objectMeshes) return null;
+      const firstEntry = Array.from(viewer.objectMeshes.entries?.() || [])[0];
+      if (!firstEntry) return null;
+      const group = firstEntry[1];
+      if (!group?.getWorldPosition) return null;
+      const world = new (window as any).THREE.Vector3();
+      group.getWorldPosition(world);
+      const projected = world.clone().project(viewer.camera);
+      const rect = viewer.renderer.domElement.getBoundingClientRect();
+      const x = rect.left + ((projected.x + 1) / 2) * rect.width;
+      const y = rect.top + ((-projected.y + 1) / 2) * rect.height;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      return { x, y };
+    });
+    if (preciseTarget && Number.isFinite(preciseTarget.x) && Number.isFinite(preciseTarget.y)) {
+      const rx = (preciseTarget.x - box!.x) / box!.width;
+      const ry = (preciseTarget.y - box!.y) / box!.height;
+      candidates.push([rx, ry]);
+      // Small local offsets increase odds of hitting actual mesh instead of label sprite.
+      candidates.push([rx + 0.03, ry + 0.02]);
+      candidates.push([rx - 0.03, ry + 0.02]);
+      candidates.push([rx, ry + 0.04]);
+    }
     for (const ry of [0.35, 0.45, 0.55, 0.65, 0.75, 0.82]) {
       for (const rx of [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]) {
         candidates.push([rx, ry]);
@@ -1054,8 +1080,8 @@ test.describe('Slicing Workflow', () => {
 
     let edits = null as any;
     for (const [rx, ry] of candidates) {
-      const startX = box!.x + box!.width * rx;
-      const startY = box!.y + box!.height * ry;
+      const startX = box!.x + box!.width * Math.min(0.95, Math.max(0.05, rx));
+      const startY = box!.y + box!.height * Math.min(0.95, Math.max(0.05, ry));
       await page.mouse.move(startX, startY);
       await page.mouse.down();
       await page.mouse.move(startX + dragDx, startY + dragDy, { steps: 10 });
