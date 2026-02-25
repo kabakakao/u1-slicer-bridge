@@ -40,13 +40,14 @@ Upload 3MF/STL → validate plate bounds → configure filament/settings → sli
 
 ## Milestones & Plans
 
-Milestone status lives in [AGENTS.md](AGENTS.md) (section: "Milestones Status"). **34/38 milestones complete (89%).**
+Milestone status lives in [AGENTS.md](AGENTS.md) (section: "Milestones Status"). **34/39 milestones complete (87%).**
 
 Remaining milestones (not implemented):
 - **M14** — Multi-machine support (other printer models)
 - **M19** — Slicer selection (OrcaSlicer vs Snapmaker Orca) — see `memory/milestone-slicer-selection.md`
 - **M31** — Android companion app (WebView wrapper)
-- **M33** — Move objects on build plate (interactive drag-to-position)
+- **M33** — Move objects on build plate (interactive drag-to-position) — see `memory/milestone-3d-viewer-and-move-objects.md`
+- **M36** — AI-powered model colorization (depends on M33) — see `memory/milestone-ai-colorization.md`
 
 Optional/future milestones with detailed plans in `memory/`:
 - `memory/milestone-makerworld-integration.md` — M26 MakerWorld link import (implemented)
@@ -54,6 +55,8 @@ Optional/future milestones with detailed plans in `memory/`:
 - `memory/milestone-multiple-copies.md` — M32 copies implementation (implemented)
 - `memory/milestone-vertical-layer-slider.md` — M34 layer slider (implemented)
 - `memory/milestone-settings-backup.md` — M35 backup/restore (implemented)
+- `memory/milestone-3d-viewer-and-move-objects.md` — Pre-slice 3D viewer + M33 move objects
+- `memory/milestone-ai-colorization.md` — M36 AI colorization (segmentation + Claude Vision)
 
 ## Critical Conventions
 

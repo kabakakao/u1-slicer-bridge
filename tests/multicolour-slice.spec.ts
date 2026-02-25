@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { API, apiUpload, getDefaultFilament, waitForJobComplete } from './helpers';
+import { API, apiUpload, getDefaultFilament, waitForJobComplete, apiSliceDualColour } from './helpers';
 
 test.describe('Multicolour Slicing End-to-End (M11)', () => {
   test.setTimeout(180_000);
@@ -7,44 +7,16 @@ test.describe('Multicolour Slicing End-to-End (M11)', () => {
   test('dual-colour file slices with two filament_ids', async ({ request }) => {
     const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
     expect(upload.detected_colors?.length).toBeGreaterThanOrEqual(2);
-
-    // Get two filament profiles (use same one twice if only one exists)
-    const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
-    const filaments = (await filRes.json()).filaments;
-    const fil1 = filaments[0];
-    const fil2 = filaments.length > 1 ? filaments[1] : filaments[0];
-
-    const res = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
-      data: {
-        filament_ids: [fil1.id, fil2.id],
-        layer_height: 0.2,
-        infill_density: 15,
-        supports: false,
-      },
-      timeout: 120_000,
-    });
-    expect(res.ok()).toBe(true);
-    const job = await waitForJobComplete(request, await res.json());
+    const job = await apiSliceDualColour(request, String(upload.upload_id));
     expect(job.status).toBe('completed');
     expect(job.metadata.layer_count).toBeGreaterThan(0);
   });
 
   test('dual-colour file stores filament_colors in job', async ({ request }) => {
     const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
-    const fil = await getDefaultFilament(request);
-
-    const res = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
-      data: {
-        filament_ids: [fil.id, fil.id],
-        filament_colors: ['#FF0000', '#0000FF'],
-        layer_height: 0.2,
-        infill_density: 15,
-        supports: false,
-      },
-      timeout: 120_000,
+    const job = await apiSliceDualColour(request, String(upload.upload_id), {
+      filament_colors: ['#FF0000', '#0000FF'],
     });
-    expect(res.ok()).toBe(true);
-    const job = await waitForJobComplete(request, await res.json());
     expect(job.status).toBe('completed');
 
     // Fetch job and check filament_colors
@@ -58,21 +30,10 @@ test.describe('Multicolour Slicing End-to-End (M11)', () => {
 
   test('multicolour slice with prime tower succeeds', async ({ request }) => {
     const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
-    const fil = await getDefaultFilament(request);
-
-    const res = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
-      data: {
-        filament_ids: [fil.id, fil.id],
-        layer_height: 0.2,
-        infill_density: 15,
-        supports: false,
-        enable_prime_tower: true,
-        prime_tower_width: 40,
-      },
-      timeout: 120_000,
+    const job = await apiSliceDualColour(request, String(upload.upload_id), {
+      enable_prime_tower: true,
+      prime_tower_width: 40,
     });
-    expect(res.ok()).toBe(true);
-    const job = await waitForJobComplete(request, await res.json());
     expect(job.status).toBe('completed');
   });
 

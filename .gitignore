@@ -70,6 +70,7 @@ temp/
 *.tmp
 tmp_*
 *.gcode
+TODO.local.md
 
 # Testing artifacts
 node_modules/

@@ -81,8 +81,9 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ❌ M33 Move objects on build plate - Interactive drag-to-position objects before slicing
 ✅ M34 Vertical layer slider - Side-mounted vertical range input for G-code layer navigation
 ✅ M35 Settings backup/restore - Export/import all settings (filaments, presets, defaults) as portable JSON
+❌ M36 AI-powered model colorization - Segment single-color models into geometric regions, assign colors (manual + Claude Vision AI suggestions), output paint_color 3MF for multi-color printing. Depends on M33 (shared 3D viewer). See `memory/milestone-ai-colorization.md`
 
-**Current:** 34 / 38 complete (89%)
+**Current:** 34 / 39 complete (87%)
 
 ---
 
@@ -203,14 +204,21 @@ When adding vendored libraries, CDN dependencies, or new pip/npm packages:
 3. Run the appropriate tests (see table below)
 4. If tests fail, fix and re-run — do not leave failing tests
 
+**Do not run heavy suites in parallel** (for example `test:slice`, `test:extended`, or `npm test` alongside another slicer-dependent suite).
+- They contend for the same Docker services / slicer resources and can cause false timeouts or flaky failures.
+- Run heavy suites sequentially.
+
 **After making changes, offer the user a choice:**
-- "I can run the **fast regression** (`npm run test:fast`, ~5 min, 110 tests incl. 1 slice sanity), **targeted tests** (`npm run test:<suite>`), or the **full suite** (`npm test`, ~60 min, 148 tests). Which do you prefer?"
+- "I can run the **fast regression** (`npm run test:fast`), **extended regression** (`npm run test:extended` for heavy multi-plate/transform cases), **targeted tests** (`npm run test:<suite>`), or the **full suite** (`npm test`). Which do you prefer?"
 - For very targeted changes (1-2 files, clear scope), default to running targeted tests or `test:fast`.
 - For broad changes (multiple files, API + frontend, refactors), recommend `test:fast` or full suite.
 
 ```bash
-# Fast regression (110 tests incl. calicube slice sanity, ~5 min)
+# Fast regression (~103 tests, ~2 min; excludes heavy @extended multiplate/transform cases)
 npm run test:fast
+
+# Extended regression (~7 tests, ~5 min; heavy multi-plate / slice-plate transform cases)
+npm run test:extended
 
 # Quick smoke tests (always run, ~15 seconds, no slicer needed)
 npm run test:smoke
@@ -813,7 +821,8 @@ All tests use Playwright and live in `tests/`. Config is in `playwright.config.t
 **Prerequisites:** Docker services running, `npm install`, `npx playwright install chromium`.
 
 ```bash
-npm run test:fast              # Fast regression (110 tests, ~5 min, incl. slice sanity)
+npm run test:fast              # Fast regression (~103 tests, ~2 min)
+npm run test:extended          # Extended regression (~7 heavy tests, ~5 min)
 npm test                       # Run ALL tests (148 tests, ~60 min)
 npm run test:smoke             # Quick smoke tests (~15s, no slicer needed)
 npm run test:upload            # Upload workflow
@@ -917,7 +926,7 @@ When implementing a new feature or fixing a bug:
 2. If the feature opens a new area (e.g., print control), create a new spec file.
 3. Every bug fix should include a test that would have caught the bug.
 4. After changes, deploy to Docker and run at least the targeted test suite.
-5. Offer the user a choice: `test:fast` (~5 min), targeted tests, or full suite (~60 min).
+5. Offer the user a choice: `test:fast` (~2 min), `test:extended` (~5 min), targeted tests, or full suite (~60 min).
 
 ### Scale and Layout Notes (2026-02-21)
 

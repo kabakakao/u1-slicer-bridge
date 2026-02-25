@@ -4,6 +4,9 @@
  */
 
 function app() {
+    let placementViewer = null;
+    let placementViewerRefreshQueued = false;
+
     return {
         // UI State
         dragOver: false,
@@ -57,6 +60,24 @@ function app() {
         selectedPlate: null,       // Selected plate ID for multi-plate files
         plates: [],               // Available plates for selected upload
         platesLoading: false,     // Loading state for plates
+        objectLayout: null,       // M33: build-item layout metadata for editing
+        objectLayoutLoading: false,
+        objectLayoutError: null,
+        objectGeometryLoading: false,
+        objectGeometryLod: null,
+        objectGeometry: null,     // M33/M36: optional per-build-item mesh geometry for placement viewer
+        objectGeometryRefinedIndices: [], // build_item_index values fetched at higher LOD
+        placementLoadMetrics: null, // dev telemetry for layout/geometry/viewer timings
+        _placementLoadSeq: 0,
+        _placementLoadTimer: null,
+        _placementPanelObserver: null,
+        _pendingPlacementLoad: null,
+        placementPanelVisible: false,
+        showPlacementModifiers: false, // Viewer-only toggle (hide modifier meshes by default)
+        objectTransformEdits: {}, // build_item_index -> {translate_x_mm, translate_y_mm, rotate_z_deg}
+        objectDrag: null,         // legacy 2D drag state (unused after 3D viewer swap; kept for compatibility)
+        selectedLayoutObject: null, // build_item_index selected in Object Placement UI / 3D viewer
+        placementInteractionMode: 'move', // 'move' | 'rotate'
         detectedColors: [],       // Colors detected from 3MF file
         fileSettings: null,       // Print settings detected from 3MF file
         filamentOverride: false,  // Whether user wants to manually override filament assignment
@@ -138,6 +159,8 @@ function app() {
             prime_tower_brim_width: null,
             prime_tower_brim_chamfer: true,
             prime_tower_brim_chamfer_max_width: null,
+            wipe_tower_x: null,
+            wipe_tower_y: null,
             enable_flow_calibrate: true,
             bed_temp: null,
             bed_type: null,
@@ -164,6 +187,8 @@ function app() {
             prime_tower_brim_width: null,
             prime_tower_brim_chamfer: true,
             prime_tower_brim_chamfer_max_width: null,
+            wipe_tower_x: null,
+            wipe_tower_y: null,
             enable_flow_calibrate: true,
             nozzle_temp: null,
             bed_temp: null,
@@ -966,6 +991,7 @@ function app() {
                 this.selectedPlate = null;
                 this.plates = [];
                 this.platesLoading = false;
+                this.resetObjectLayoutState();
                 this.activeTab = 'upload';
 
                 // Ensure filaments are loaded before assigning (init() may still
@@ -1000,6 +1026,12 @@ function app() {
                         console.log('Single plate file');
                     }
 
+                    if (this.selectedUpload?.is_multi_plate) {
+                        this.resetObjectLayoutState();
+                    } else {
+                        this.queueObjectLayoutLoad(result.upload_id, null, 0);
+                    }
+
                     // Apply file-embedded print settings (support, brim) as defaults
                     const fps = platesData.file_print_settings || result.file_print_settings;
                     this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
@@ -1011,6 +1043,7 @@ function app() {
                     this.platesLoading = false;
                     this.selectedUpload.is_multi_plate = false;
                     this.plates = [];
+                    this.objectLayoutError = null;
                     console.warn('Could not load plates for new upload:', err);
                     // Still try to apply file settings from upload response
                     const fps = result.file_print_settings;
@@ -1074,6 +1107,7 @@ function app() {
                 this.selectedPlate = null;
                 this.plates = [];
                 this.platesLoading = false;
+                this.resetObjectLayoutState();
                 this.activeTab = 'upload';
 
                 if (this.filaments.length === 0) {
@@ -1099,6 +1133,12 @@ function app() {
                     } else {
                         this.selectedUpload.is_multi_plate = false;
                         this.plates = [];
+                    }
+
+                    if (this.selectedUpload?.is_multi_plate) {
+                        this.resetObjectLayoutState();
+                    } else {
+                        this.queueObjectLayoutLoad(result.upload_id, null, 0);
                     }
 
                     const fps = platesData.file_print_settings || result.file_print_settings;
@@ -1149,6 +1189,7 @@ function app() {
             this.selectedPlate = null;
             this.plates = [];
             this.platesLoading = true;
+            this.resetObjectLayoutState();
             this.filamentOverride = false;
             this.resetJobOverrideSettings();
 
@@ -1203,6 +1244,12 @@ function app() {
                 this.applyFileSettings(this.fileSettings);
                 console.log('Applied file print settings:', this.fileSettings);
             }
+
+            if (this.selectedUpload?.is_multi_plate) {
+                this.resetObjectLayoutState();
+            } else {
+                this.queueObjectLayoutLoad(uploadId, null, 0);
+            }
         },
 
         /**
@@ -1239,16 +1286,774 @@ function app() {
             }
         },
 
+        resetObjectLayoutState() {
+            this.objectLayout = null;
+            this.objectLayoutLoading = false;
+            this.objectLayoutError = null;
+            this.objectGeometryLoading = false;
+            this.objectGeometryLod = null;
+            this.objectGeometry = null;
+            this.objectGeometryRefinedIndices = [];
+            this.placementLoadMetrics = null;
+            this._placementLoadSeq = Number(this._placementLoadSeq || 0) + 1; // invalidate inflight requests
+            if (this._placementLoadTimer) {
+                clearTimeout(this._placementLoadTimer);
+                this._placementLoadTimer = null;
+            }
+            this._pendingPlacementLoad = null;
+            this.objectTransformEdits = {};
+            this.selectedLayoutObject = null;
+            if (placementViewer) {
+                placementViewer.setLayout(null, null);
+            }
+        },
+
+        initPlacementPanelObserver() {
+            const panel = this.$refs?.placementPanel;
+            if (!panel) return;
+            if (this._placementPanelObserver) return;
+            const onVisible = () => {
+                this.placementPanelVisible = true;
+                const pending = this._pendingPlacementLoad;
+                if (pending?.uploadId) {
+                    this._pendingPlacementLoad = null;
+                    this.queueObjectLayoutLoad(pending.uploadId, pending.plateId ?? null, 0);
+                }
+            };
+            if (!('IntersectionObserver' in window)) {
+                onVisible();
+                return;
+            }
+            this._placementPanelObserver = new IntersectionObserver((entries) => {
+                const visible = entries.some((e) => e.isIntersecting || e.intersectionRatio > 0);
+                this.placementPanelVisible = visible;
+                if (visible) onVisible();
+            }, { root: null, threshold: 0.05 });
+            this._placementPanelObserver.observe(panel);
+        },
+
+        _isPlacementPanelVisibleForLoading() {
+            // Multi-plate files benefit most from lazy-loading; for single-plate keep current behavior
+            // if the observer is not ready yet to avoid blank panels.
+            if (!this.selectedUpload?.is_multi_plate) return true;
+            return !!this.placementPanelVisible;
+        },
+
+        async loadObjectLayout(uploadId = null, plateId = null) {
+            uploadId = uploadId || this.selectedUpload?.upload_id;
+            if (!uploadId) return;
+
+            if (plateId == null && this.selectedUpload?.is_multi_plate) {
+                plateId = this.selectedPlate || null;
+            }
+
+            if (this.selectedUpload?.is_multi_plate && !plateId) {
+                this.objectLayoutLoading = false;
+                this.objectLayoutError = null;
+                this.objectGeometryLoading = false;
+                this.objectGeometryLod = null;
+                this.objectLayout = null;
+                this.objectGeometry = null;
+                this.objectTransformEdits = {};
+                this.selectedLayoutObject = null;
+                this.placementLoadMetrics = null;
+                this.schedulePlacementViewerRefresh();
+                return;
+            }
+
+            if (!this._isPlacementPanelVisibleForLoading()) {
+                this._pendingPlacementLoad = { uploadId, plateId: plateId ?? null };
+                return;
+            }
+
+            this.objectLayoutLoading = true;
+            this.objectGeometryLoading = false;
+            this.objectGeometryLod = null;
+            this.objectLayoutError = null;
+            this.objectGeometry = null;
+            this.objectGeometryRefinedIndices = [];
+            const requestedUploadId = uploadId;
+            const requestedPlateId = plateId ?? null;
+            const requestSeq = Number(this._placementLoadSeq || 0) + 1;
+            this._placementLoadSeq = requestSeq;
+            const tStart = this._placementNow();
+            const metrics = {
+                upload_id: requestedUploadId,
+                plate_id: requestedPlateId,
+                include_modifiers: !!this.showPlacementModifiers,
+            };
+
+            const isStale = () => {
+                if (Number(this._placementLoadSeq || 0) !== requestSeq) return true;
+                if (this.selectedUpload?.upload_id !== requestedUploadId) return true;
+                if ((this.selectedUpload?.is_multi_plate || false) && (this.selectedPlate || null) !== requestedPlateId) return true;
+                return false;
+            };
+
+            try {
+                const tLayout0 = this._placementNow();
+                const layout = await api.getUploadLayout(requestedUploadId, requestedPlateId);
+                metrics.layout_fetch_ms = Math.round((this._placementNow() - tLayout0) * 10) / 10;
+                metrics.layout_backend_ms = Number(layout?.timing_ms?.total || 0) || null;
+
+                if (isStale()) return;
+
+                this.objectLayout = layout;
+                if (this.isObjectPlacementTransformApproximate()) {
+                    this.objectTransformEdits = {};
+                    this.placementInteractionMode = 'move';
+                }
+                this.objectLayoutLoading = false;
+                this.objectGeometry = null; // render proxies immediately
+                this.objectGeometryLoading = true;
+                this.objectGeometryLod = 'proxies';
+                const firstObj = Array.isArray(layout?.objects) && layout.objects.length > 0 ? Number(layout.objects[0].build_item_index || 0) : null;
+                const currentSel = Number(this.selectedLayoutObject || 0);
+                const hasCurrent = Array.isArray(layout?.objects) && layout.objects.some(o => Number(o.build_item_index || 0) === currentSel);
+                this.selectedLayoutObject = hasCurrent ? currentSel : (firstObj || null);
+                metrics.first_preview_ms = Math.round((this._placementNow() - tStart) * 10) / 10;
+                this.placementLoadMetrics = { ...metrics };
+                window.__u1PlacementViewerMetrics = this.placementLoadMetrics;
+                this.schedulePlacementViewerRefresh();
+
+                this.objectGeometryLod = 'placement_low';
+                const tGeomLow0 = this._placementNow();
+                let lowGeometry = null;
+                try {
+                    lowGeometry = await api.getUploadGeometry(
+                        requestedUploadId,
+                        requestedPlateId,
+                        !!this.showPlacementModifiers,
+                        'placement_low',
+                    );
+                } catch (geomErr) {
+                    console.warn('Failed to load placement geometry low LOD (falling back to proxies):', geomErr);
+                }
+                if (isStale()) return;
+
+                metrics.geometry_low_fetch_ms = Math.round((this._placementNow() - tGeomLow0) * 10) / 10;
+                metrics.geometry_low_backend_ms = Number(lowGeometry?.timing_ms?.total || 0) || null;
+                if (lowGeometry) {
+                    this.objectGeometry = lowGeometry;
+                    this.objectGeometryLod = String(lowGeometry?.lod || 'placement_low');
+                } else {
+                    this.objectGeometryLod = 'proxies';
+                }
+                this.objectGeometryLoading = false;
+                this.placementLoadMetrics = { ...(this.placementLoadMetrics || {}), ...metrics };
+                window.__u1PlacementViewerMetrics = this.placementLoadMetrics;
+                this.schedulePlacementViewerRefresh();
+
+                if (!lowGeometry) {
+                    metrics.total_visible_ms = Math.round((this._placementNow() - tStart) * 10) / 10;
+                    this.placementLoadMetrics = { ...(this.placementLoadMetrics || {}), ...metrics };
+                    window.__u1PlacementViewerMetrics = this.placementLoadMetrics;
+                    console.info('[placement-viewer] load metrics', this.placementLoadMetrics);
+                    return;
+                }
+                await this.refineSelectedPlacementGeometry(requestedUploadId, requestedPlateId, metrics, isStale, tStart);
+            } catch (err) {
+                if (isStale()) return;
+                this.objectLayoutLoading = false;
+                this.objectGeometryLoading = false;
+                this.objectGeometryLod = null;
+                this.objectLayoutError = err.message || 'Failed to load object layout';
+                console.warn('Failed to load object layout:', err);
+                this.schedulePlacementViewerRefresh();
+            }
+        },
+
+        selectLayoutObject(buildItemIndex) {
+            const idx = Number(buildItemIndex || 0);
+            this.selectedLayoutObject = Number.isInteger(idx) && idx > 0 ? idx : null;
+            if (placementViewer) {
+                placementViewer.setSelected(this.selectedLayoutObject);
+            }
+            if (this.selectedLayoutObject && this.objectLayout && !this.objectLayoutLoading) {
+                this.refineSelectedPlacementGeometry(this.selectedUpload?.upload_id, this.selectedPlate || null);
+            }
+        },
+
+        togglePlacementModifiers() {
+            if (!this.selectedUpload?.upload_id) return;
+            this.loadObjectLayout(this.selectedUpload.upload_id, this.selectedPlate || null);
+        },
+
+        _mergePlacementGeometryObjects(baseGeometry, refinedGeometry) {
+            if (!baseGeometry || !Array.isArray(baseGeometry.objects) || !refinedGeometry || !Array.isArray(refinedGeometry.objects)) {
+                return refinedGeometry || baseGeometry || null;
+            }
+            const mergedByIndex = new Map();
+            for (const obj of baseGeometry.objects) {
+                const idx = Number(obj?.build_item_index || 0);
+                if (idx > 0) mergedByIndex.set(idx, obj);
+            }
+            for (const obj of refinedGeometry.objects) {
+                const idx = Number(obj?.build_item_index || 0);
+                if (idx > 0) mergedByIndex.set(idx, obj);
+            }
+            return {
+                ...baseGeometry,
+                ...refinedGeometry,
+                objects: Array.from(mergedByIndex.values()).sort((a, b) => Number(a?.build_item_index || 0) - Number(b?.build_item_index || 0)),
+            };
+        },
+
+        async refineSelectedPlacementGeometry(uploadId = null, plateId = null, metrics = null, isStaleFn = null, tStart = null) {
+            uploadId = uploadId || this.selectedUpload?.upload_id;
+            if (!uploadId || !this.objectGeometry || this.objectLayoutLoading || !this.objectLayout) return;
+            const selectedIdx = Number(this.selectedLayoutObject || 0);
+            if (!Number.isInteger(selectedIdx) || selectedIdx < 1) return;
+
+            const existing = Array.isArray(this.objectGeometry?.objects)
+                ? this.objectGeometry.objects.find((o) => Number(o?.build_item_index || 0) === selectedIdx)
+                : null;
+            if (!existing) return;
+            const alreadyRefined = (this.objectGeometryRefinedIndices || []).includes(selectedIdx);
+            const needsRefine = !!existing.mesh_decimated || Number(existing.triangle_count || 0) < Number(existing.original_triangle_count || 0);
+            if (!needsRefine || alreadyRefined) {
+                if (metrics && tStart != null) {
+                    metrics.total_visible_ms = Math.round((this._placementNow() - tStart) * 10) / 10;
+                    this.placementLoadMetrics = { ...(this.placementLoadMetrics || {}), ...metrics };
+                    window.__u1PlacementViewerMetrics = this.placementLoadMetrics;
+                    console.info('[placement-viewer] load metrics', this.placementLoadMetrics);
+                }
+                return;
+            }
+
+            const stale = typeof isStaleFn === 'function' ? isStaleFn : (() => false);
+            this.objectGeometryLoading = true;
+            this.objectGeometryLod = 'placement_high';
+            const tGeomHigh0 = this._placementNow();
+            let highGeometry = null;
+            try {
+                highGeometry = await api.getUploadGeometry(
+                    uploadId,
+                    plateId,
+                    !!this.showPlacementModifiers,
+                    'placement_high',
+                    selectedIdx,
+                );
+            } catch (geomHighErr) {
+                console.warn('Failed to load placement geometry high LOD for selected object:', geomHighErr);
+            }
+            if (stale()) return;
+
+            if (metrics) {
+                metrics.geometry_high_fetch_ms = Math.round((this._placementNow() - tGeomHigh0) * 10) / 10;
+                metrics.geometry_high_backend_ms = Number(highGeometry?.timing_ms?.total || 0) || null;
+            }
+            if (highGeometry) {
+                this.objectGeometry = this._mergePlacementGeometryObjects(this.objectGeometry, highGeometry);
+                this.objectGeometryLod = String(highGeometry?.lod || 'placement_high');
+                this.objectGeometryRefinedIndices = Array.from(new Set([...(this.objectGeometryRefinedIndices || []), selectedIdx]));
+                this.schedulePlacementViewerRefresh();
+            }
+            this.objectGeometryLoading = false;
+            if (metrics && tStart != null) {
+                metrics.total_visible_ms = Math.round((this._placementNow() - tStart) * 10) / 10;
+                this.placementLoadMetrics = { ...(this.placementLoadMetrics || {}), ...metrics };
+                window.__u1PlacementViewerMetrics = this.placementLoadMetrics;
+                console.info('[placement-viewer] load metrics', this.placementLoadMetrics);
+            }
+        },
+
+        initPlacementViewer() {
+            if (!this.$refs || !this.$refs.placementViewerCanvas) return;
+            if (!window.MeshPlacementViewer) return;
+            if (placementViewer && placementViewer.canvas !== this.$refs.placementViewerCanvas) {
+                placementViewer.destroy();
+                placementViewer = null;
+            }
+            if (!placementViewer) {
+                placementViewer = new window.MeshPlacementViewer(this.$refs.placementViewerCanvas, {
+                    onSelect: (buildItemIndex) => {
+                        this.selectLayoutObject(buildItemIndex);
+                    },
+                    getInteractionMode: () => this.placementInteractionMode,
+                    canEditObjects: () => !this.isObjectPlacementTransformApproximate(),
+                    onPoseEdit: (buildItemIndex, nextPose) => {
+                        this.applyPlacementViewerPose(buildItemIndex, nextPose);
+                    },
+                    onPrimeTowerMove: (nextPose) => {
+                        this.applyPlacementPrimeTowerPose(nextPose);
+                    },
+                    onSceneStats: (stats) => {
+                        this.recordPlacementViewerSceneStats(stats);
+                    },
+                });
+                placementViewer.init();
+                window.__u1PlacementViewer = placementViewer;
+            }
+            this.schedulePlacementViewerRefresh();
+        },
+
+        schedulePlacementViewerRefresh() {
+            if (placementViewerRefreshQueued) return;
+            placementViewerRefreshQueued = true;
+            requestAnimationFrame(() => {
+                placementViewerRefreshQueued = false;
+                this.refreshPlacementViewer();
+            });
+        },
+
+        _placementNow() {
+            return (window.performance && typeof window.performance.now === 'function')
+                ? window.performance.now()
+                : Date.now();
+        },
+
+        recordPlacementViewerSceneStats(stats) {
+            const next = {
+                ...(this.placementLoadMetrics || {}),
+                viewer_scene: stats || null,
+            };
+            this.placementLoadMetrics = next;
+            window.__u1PlacementViewerMetrics = next;
+            console.info('[placement-viewer] scene stats', next);
+        },
+
+        refreshPlacementViewer() {
+            if (!placementViewer) return;
+            if (!this.objectLayout || this.objectLayoutError || this.objectLayoutLoading) {
+                placementViewer.setLayout(null, null);
+                placementViewer.setPrimeTower?.(null);
+                return;
+            }
+            const t0 = this._placementNow();
+            placementViewer.setLayout(this.objectLayout, (obj) => this.getObjectEffectivePoseForViewer(obj), this.objectGeometry);
+            placementViewer.setPrimeTower?.(this.getPrimeTowerPreviewConfig());
+            placementViewer.setInteractionMode?.(this.placementInteractionMode);
+            placementViewer.setSelected(this.selectedLayoutObject);
+            placementViewer.refreshPoses();
+            const refreshMs = Math.round((this._placementNow() - t0) * 10) / 10;
+            const next = {
+                ...(this.placementLoadMetrics || {}),
+                viewer_refresh_ms: refreshMs,
+                viewer_geometry_lod: this.objectGeometryLod || null,
+            };
+            this.placementLoadMetrics = next;
+            window.__u1PlacementViewerMetrics = next;
+        },
+
+        setPlacementInteractionMode(mode) {
+            if (this.isObjectPlacementTransformApproximate()) return;
+            const next = (mode === 'rotate') ? 'rotate' : 'move';
+            this.placementInteractionMode = next;
+            if (placementViewer && placementViewer.setInteractionMode) {
+                placementViewer.setInteractionMode(next);
+            }
+        },
+
+        isObjectPlacementTransformApproximate() {
+            const frame = this.objectLayout?.placement_frame || null;
+            if (!frame || typeof frame !== 'object') return false;
+            const caps = frame.capabilities;
+            if (caps && typeof caps === 'object' && Object.prototype.hasOwnProperty.call(caps, 'object_transform_edit')) {
+                return !Boolean(caps.object_transform_edit);
+            }
+            if (!this.selectedUpload?.is_multi_plate) return false;
+            return String(frame.confidence || '').toLowerCase() === 'approximate';
+        },
+
+        getObjectPlacementTransformWarning() {
+            if (!this.isObjectPlacementTransformApproximate()) return '';
+            const notes = Array.isArray(this.objectLayout?.placement_frame?.notes)
+                ? this.objectLayout.placement_frame.notes.filter(Boolean)
+                : [];
+            if (notes.length > 0) return String(notes[0]);
+            return 'Object move/rotate is temporarily disabled for this plate because placement mapping is approximate and can produce misleading previews / failed slices. Prime tower move still works.';
+        },
+
+        getObjectTransformsPayload() {
+            if (this.isObjectPlacementTransformApproximate()) {
+                return [];
+            }
+            const edits = this.objectTransformEdits || {};
+            const payload = [];
+
+            for (const [buildItemIndexRaw, edit] of Object.entries(edits)) {
+                if (!edit) continue;
+                const buildItemIndex = Number(buildItemIndexRaw);
+                if (!Number.isInteger(buildItemIndex) || buildItemIndex < 1) continue;
+
+                const tx = Number(edit.translate_x_mm || 0);
+                const ty = Number(edit.translate_y_mm || 0);
+                const rz = Number(edit.rotate_z_deg || 0);
+                if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(rz) < 1e-9) continue;
+
+                payload.push({
+                    build_item_index: buildItemIndex,
+                    translate_x_mm: tx,
+                    translate_y_mm: ty,
+                    rotate_z_deg: rz,
+                });
+            }
+
+            payload.sort((a, b) => a.build_item_index - b.build_item_index);
+            return payload;
+        },
+
+        getPrimeTowerPreviewConfig() {
+            if (!this.sliceSettings?.enable_prime_tower || !this.objectLayout?.build_volume) return null;
+            const vol = this.objectLayout.build_volume || {};
+            const bedW = Math.max(1, Number(vol.x || 270));
+            const bedH = Math.max(1, Number(vol.y || 270));
+            const width = Math.max(10, Number(this.sliceSettings.prime_tower_width || 35));
+            const brim = Math.max(0, Number(this.sliceSettings.prime_tower_brim_width ?? 3));
+            const footprintW = width + (2 * brim);
+            const footprintH = width + (2 * brim); // approximate preview footprint only
+            const rawX = this.sliceSettings.wipe_tower_x;
+            const rawY = this.sliceSettings.wipe_tower_y;
+            const hasExplicit = Number.isFinite(Number(rawX)) && Number.isFinite(Number(rawY));
+            const defaultAnchor = {
+                x: Math.max(0, bedW - width - brim - 6),
+                y: Math.max(0, bedH - width - brim - 6),
+            };
+            const anchor = this._clampPrimeTowerAnchorPose(
+                hasExplicit ? Number(rawX) : defaultAnchor.x,
+                hasExplicit ? Number(rawY) : defaultAnchor.y,
+                width,
+                bedW,
+                bedH,
+            );
+            return {
+                x: anchor.x,
+                y: anchor.y,
+                width,
+                brim_width: brim,
+                footprint_w: footprintW,
+                footprint_h: footprintH,
+                anchor_is_slicer_coords: true,
+                explicit_position: hasExplicit,
+            };
+        },
+
+        applyPlacementPrimeTowerPose(nextPose) {
+            if (!nextPose || !this.sliceSettings?.enable_prime_tower || !this.objectLayout?.build_volume) return;
+            const vol = this.objectLayout.build_volume || {};
+            const bedW = Math.max(1, Number(vol.x || 270));
+            const bedH = Math.max(1, Number(vol.y || 270));
+            const width = Math.max(10, Number(this.sliceSettings.prime_tower_width || 35));
+            const anchor = this._clampPrimeTowerAnchorPose(
+                Number(nextPose.x || 0),
+                Number(nextPose.y || 0),
+                width,
+                bedW,
+                bedH,
+            );
+            this.sliceSettings.wipe_tower_x = Number(anchor.x.toFixed(3));
+            this.sliceSettings.wipe_tower_y = Number(anchor.y.toFixed(3));
+            this.schedulePlacementViewerRefresh();
+        },
+
+        _clampPrimeTowerAnchorPose(x, y, width, bedW, bedH) {
+            const anchorMaxX = Math.max(0, Number(bedW || 270) - Number(width || 35));
+            const anchorMaxY = Math.max(0, Number(bedH || 270) - Number(width || 35));
+            return {
+                x: Math.min(anchorMaxX, Math.max(0, Number(x || 0))),
+                y: Math.min(anchorMaxY, Math.max(0, Number(y || 0))),
+            };
+        },
+
+        resetPrimeTowerPosition() {
+            this.sliceSettings.wipe_tower_x = null;
+            this.sliceSettings.wipe_tower_y = null;
+            this.schedulePlacementViewerRefresh();
+        },
+
+        onPrimeTowerPreviewSettingChanged() {
+            this.schedulePlacementViewerRefresh();
+        },
+
+        getObjectTransformValue(buildItemIndex, key) {
+            return Number(this.objectTransformEdits?.[buildItemIndex]?.[key] || 0);
+        },
+
+        setObjectTransformField(buildItemIndex, key, value) {
+            if (this.isObjectPlacementTransformApproximate()) return;
+            const idx = Number(buildItemIndex);
+            if (!Number.isInteger(idx) || idx < 1) return;
+            const numeric = Number(value);
+            const next = Number.isFinite(numeric) ? numeric : 0;
+            const current = { ...(this.objectTransformEdits[idx] || {}) };
+            current[key] = next;
+
+            const tx = Number(current.translate_x_mm || 0);
+            const ty = Number(current.translate_y_mm || 0);
+            const rz = Number(current.rotate_z_deg || 0);
+            if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(rz) < 1e-9) {
+                const edits = { ...(this.objectTransformEdits || {}) };
+                delete edits[idx];
+                this.objectTransformEdits = edits;
+                this.schedulePlacementViewerRefresh();
+                return;
+            }
+
+            this.objectTransformEdits = {
+                ...(this.objectTransformEdits || {}),
+                [idx]: {
+                    translate_x_mm: tx,
+                    translate_y_mm: ty,
+                    rotate_z_deg: rz,
+                },
+            };
+            this.schedulePlacementViewerRefresh();
+        },
+
+        resetObjectTransform(buildItemIndex) {
+            const idx = Number(buildItemIndex);
+            if (!Number.isInteger(idx) || idx < 1) return;
+            const edits = { ...(this.objectTransformEdits || {}) };
+            delete edits[idx];
+            this.objectTransformEdits = edits;
+            this.schedulePlacementViewerRefresh();
+        },
+
+        resetAllObjectTransforms() {
+            this.objectTransformEdits = {};
+            this.schedulePlacementViewerRefresh();
+        },
+
+        getObjectBaseTranslation(obj) {
+            // Preferred path: backend returns canonical bed-local pose hints.
+            const uiPose = obj?.ui_base_pose;
+            if (uiPose && typeof uiPose === 'object') {
+                return {
+                    x: Number(uiPose.x || 0),
+                    y: Number(uiPose.y || 0),
+                    z: Number(uiPose.z || 0),
+                };
+            }
+
+            // For Bambu-style multi-plate files, Orca often uses model_settings.config
+            // assemble_item transforms as the effective placement. Prefer that pose in
+            // the placement viewer so preview and slice behavior align. Use assemble XY,
+            // but keep Z from the core build-item transform because some Bambu files
+            // store packed/project-space Z in assemble_item (causes floating previews).
+            const coreT = (obj?.translation || [0, 0, 0]);
+            const t = (
+                (this.selectedUpload?.is_multi_plate && Array.isArray(obj?.assemble_translation) && obj.assemble_translation.length >= 3)
+                    ? obj.assemble_translation
+                    : coreT
+            );
+            return {
+                x: Number(t[0] || 0),
+                y: Number(t[1] || 0),
+                z: Number(coreT[2] || 0),
+            };
+        },
+
+        getPlacementViewerDisplayOffset() {
+            const frame = this.objectLayout?.placement_frame;
+            if (frame && frame.canonical === 'bed_local_xy_mm') {
+                const off = Array.isArray(frame.offset_xy) ? frame.offset_xy : [0, 0];
+                // When ui_base_pose is present, backend has already applied any required
+                // preview normalization. Keep viewer/object edits in bed-local space.
+                const hasUiBasePose = Array.isArray(this.objectLayout?.objects)
+                    && this.objectLayout.objects.some(o => o?.ui_base_pose);
+                if (hasUiBasePose) {
+                    return { x: 0, y: 0 };
+                }
+                return {
+                    x: Number(off[0] || 0),
+                    y: Number(off[1] || 0),
+                };
+            }
+
+            if (!this.selectedUpload?.is_multi_plate || !this.selectedPlate || !this.objectLayout?.build_volume) {
+                return { x: 0, y: 0 };
+            }
+            const objs = Array.isArray(this.objectLayout?.objects) ? this.objectLayout.objects : [];
+            const vol = this.objectLayout.build_volume || {};
+            const bedW = Math.max(1, Number(vol.x || 270));
+            const bedH = Math.max(1, Number(vol.y || 270));
+
+            let centerX = null;
+            let centerY = null;
+            const assembleBounds = objs
+                .map(o => o?.assemble_world_bounds)
+                .filter(b => b?.min && b?.max);
+            if (assembleBounds.length > 0) {
+                let minX = Number.POSITIVE_INFINITY;
+                let minY = Number.POSITIVE_INFINITY;
+                let maxX = Number.NEGATIVE_INFINITY;
+                let maxY = Number.NEGATIVE_INFINITY;
+                for (const b of assembleBounds) {
+                    minX = Math.min(minX, Number(b.min[0] || 0));
+                    minY = Math.min(minY, Number(b.min[1] || 0));
+                    maxX = Math.max(maxX, Number(b.max[0] || 0));
+                    maxY = Math.max(maxY, Number(b.max[1] || 0));
+                }
+                centerX = (minX + maxX) / 2;
+                centerY = (minY + maxY) / 2;
+            } else {
+                const vb = this.objectLayout?.validation?.bounds;
+                if (vb?.min && vb?.max) {
+                    centerX = (Number(vb.min[0] || 0) + Number(vb.max[0] || 0)) / 2;
+                    centerY = (Number(vb.min[1] || 0) + Number(vb.max[1] || 0)) / 2;
+                }
+            }
+
+            if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+                if (objs.length > 0) {
+                    const sum = objs.reduce((acc, o) => {
+                        const t = this.getObjectBaseTranslation(o);
+                        acc.x += t.x;
+                        acc.y += t.y;
+                        return acc;
+                    }, { x: 0, y: 0 });
+                    centerX = sum.x / objs.length;
+                    centerY = sum.y / objs.length;
+                } else {
+                    centerX = bedW / 2;
+                    centerY = bedH / 2;
+                }
+            }
+
+            return {
+                x: (bedW / 2) - Number(centerX || 0),
+                y: (bedH / 2) - Number(centerY || 0),
+            };
+        },
+
+        getObjectEffectivePose(obj) {
+            const base = this.getObjectBaseTranslation(obj);
+            const idx = Number(obj?.build_item_index || 0);
+            const edit = (idx > 0 ? this.objectTransformEdits?.[idx] : null) || {};
+            return {
+                x: base.x + Number(edit.translate_x_mm || 0),
+                y: base.y + Number(edit.translate_y_mm || 0),
+                z: base.z,
+                rotate_z_deg: Number(edit.rotate_z_deg || 0),
+            };
+        },
+
+        getObjectEffectivePoseForViewer(obj) {
+            const pose = this.getObjectEffectivePose(obj);
+            const offset = this.getPlacementViewerDisplayOffset();
+            return {
+                ...pose,
+                x: Number(pose.x || 0) + Number(offset.x || 0),
+                y: Number(pose.y || 0) + Number(offset.y || 0),
+            };
+        },
+
+        applyPlacementViewerPose(buildItemIndex, nextPose) {
+            if (this.isObjectPlacementTransformApproximate()) return;
+            const idx = Number(buildItemIndex || 0);
+            if (!Number.isInteger(idx) || idx < 1) return;
+            const obj = (this.objectLayout?.objects || []).find(o => Number(o.build_item_index || 0) === idx);
+            if (!obj) return;
+
+            const base = this.getObjectBaseTranslation(obj);
+            const offset = this.getPlacementViewerDisplayOffset();
+            const nextX = Number(nextPose?.x || base.x) - Number(offset.x || 0);
+            const nextY = Number(nextPose?.y || base.y) - Number(offset.y || 0);
+            const nextRz = Number(nextPose?.rotate_z_deg || 0);
+
+            this.setObjectTransformField(idx, 'translate_x_mm', nextX - base.x);
+            this.setObjectTransformField(idx, 'translate_y_mm', nextY - base.y);
+            this.setObjectTransformField(idx, 'rotate_z_deg', nextRz);
+        },
+
+        getBedEditorStyle() {
+            const vol = this.objectLayout?.build_volume || {};
+            const w = Math.max(1, Number(vol.x || 270));
+            const h = Math.max(1, Number(vol.y || 270));
+            const ratio = h / w;
+            return `aspect-ratio: ${w} / ${h};`;
+        },
+
+        getObjectMarkerStyle(obj) {
+            const vol = this.objectLayout?.build_volume || {};
+            const bedW = Math.max(1, Number(vol.x || 270));
+            const bedH = Math.max(1, Number(vol.y || 270));
+            const pose = this.getObjectEffectivePose(obj);
+            const xPct = Math.min(100, Math.max(0, (pose.x / bedW) * 100));
+            const yPct = Math.min(100, Math.max(0, 100 - (pose.y / bedH) * 100));
+            return `left:${xPct}%;top:${yPct}%;transform:translate(-50%,-50%) rotate(${pose.rotate_z_deg}deg);`;
+        },
+
+        nudgeObject(buildItemIndex, axis, deltaMm) {
+            if (this.isObjectPlacementTransformApproximate()) return;
+            const key = axis === 'y' ? 'translate_y_mm' : 'translate_x_mm';
+            const current = this.getObjectTransformValue(buildItemIndex, key);
+            this.setObjectTransformField(buildItemIndex, key, current + Number(deltaMm || 0));
+        },
+
+        rotateObjectBy(buildItemIndex, deltaDeg) {
+            if (this.isObjectPlacementTransformApproximate()) return;
+            const current = this.getObjectTransformValue(buildItemIndex, 'rotate_z_deg');
+            this.setObjectTransformField(buildItemIndex, 'rotate_z_deg', current + Number(deltaDeg || 0));
+        },
+
+        beginObjectDrag(event, obj) {
+            if (!obj || !obj.build_item_index) return;
+            if (event.button !== undefined && event.button !== 0) return;
+
+            const bedEl = event.target?.closest?.('[data-bed-editor]');
+            if (!bedEl) return;
+            const rect = bedEl.getBoundingClientRect();
+            if (!rect || rect.width <= 0 || rect.height <= 0) return;
+
+            const idx = Number(obj.build_item_index);
+            this.objectDrag = {
+                build_item_index: idx,
+                startClientX: Number(event.clientX || 0),
+                startClientY: Number(event.clientY || 0),
+                startTx: this.getObjectTransformValue(idx, 'translate_x_mm'),
+                startTy: this.getObjectTransformValue(idx, 'translate_y_mm'),
+                bedRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                bedW: Math.max(1, Number(this.objectLayout?.build_volume?.x || 270)),
+                bedH: Math.max(1, Number(this.objectLayout?.build_volume?.y || 270)),
+            };
+
+            if (event.preventDefault) event.preventDefault();
+        },
+
+        onObjectDragMove(event) {
+            if (!this.objectDrag) return;
+            const d = this.objectDrag;
+            const dxPx = Number(event.clientX || 0) - d.startClientX;
+            const dyPx = Number(event.clientY || 0) - d.startClientY;
+            const dxMm = (dxPx / d.bedRect.width) * d.bedW;
+            const dyMm = (-dyPx / d.bedRect.height) * d.bedH;
+            this.setObjectTransformField(d.build_item_index, 'translate_x_mm', d.startTx + dxMm);
+            this.setObjectTransformField(d.build_item_index, 'translate_y_mm', d.startTy + dyMm);
+            if (event.preventDefault) event.preventDefault();
+        },
+
+        endObjectDrag() {
+            this.objectDrag = null;
+        },
+
+        queueObjectLayoutLoad(uploadId, plateId = null, delayMs = 0) {
+            if (this._placementLoadTimer) {
+                clearTimeout(this._placementLoadTimer);
+                this._placementLoadTimer = null;
+            }
+            this._placementLoadTimer = setTimeout(() => {
+                this._placementLoadTimer = null;
+                this.loadObjectLayout(uploadId, plateId);
+            }, Math.max(0, Number(delayMs || 0)));
+        },
+
         /**
          * Select a plate for slicing
          */
         selectPlate(plateId) {
             this.selectedPlate = plateId;
+            this.objectTransformEdits = {};
+            this.selectedLayoutObject = null;
             // Update detected colors from the selected plate's per-plate colors
             const plate = this.plates.find(p => p.plate_id === plateId);
             if (plate && plate.detected_colors && plate.detected_colors.length > 0) {
                 this.detectedColors = plate.detected_colors;
             }
+            // Let the plate card selection/thumbnail render first, then load the
+            // heavier placement layout/geometry work.
+            this.queueObjectLayoutLoad(this.selectedUpload?.upload_id, plateId, 0);
             console.log('Selected plate:', plateId);
         },
 
@@ -1357,6 +2162,10 @@ function app() {
                     filament_colors: [...(this.sliceSettings.filament_colors || [])],
                     extruder_assignments: [...(this.sliceSettings.extruder_assignments || [0, 1, 2, 3])],
                 };
+                const objectTransforms = this.getObjectTransformsPayload();
+                if (objectTransforms.length > 0) {
+                    sliceSettings.object_transforms = objectTransforms;
+                }
 
                 // Reorder colors and filament_ids based on extruder assignments
                 if (hasMultiFilaments && this.sliceSettings.extruder_assignments) {
@@ -2212,6 +3021,11 @@ function app() {
                 clearInterval(this.sliceInterval);
             }
             this.stopPrintMonitorPolling();
+            if (placementViewer) {
+                placementViewer.destroy();
+                placementViewer = null;
+                window.__u1PlacementViewer = null;
+            }
         },
     };
 }

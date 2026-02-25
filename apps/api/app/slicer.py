@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import re
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 from config import PrinterProfile
@@ -169,6 +169,7 @@ class OrcaSlicer:
         output_name: str = "output.gcode",
         plate_index: Optional[int] = None,
         scale_factor: Optional[float] = None,
+        disable_arrange: bool = False,
     ) -> Dict:
         """Execute Orca Slicer CLI with pre-built 3MF file.
 
@@ -198,6 +199,9 @@ class OrcaSlicer:
             "--allow-newer-file",  # Allow Bambu Studio 3MF files with newer versions
             "--outputdir", str(workspace),
         ]
+        if disable_arrange:
+            # Preserve authored / user-edited placement for M33 transforms.
+            cmd.extend(["--arrange", "0", "--orient", "0"])
         if scale_factor is not None and abs(float(scale_factor) - 1.0) > 1e-6:
             cmd.extend(["--scale", str(float(scale_factor))])
         cmd.append(str(three_mf_path))
@@ -230,11 +234,18 @@ class OrcaSlicer:
         output_name: str = "output.gcode",
         plate_index: Optional[int] = None,
         scale_factor: Optional[float] = None,
+        disable_arrange: bool = False,
     ) -> Dict:
         """Async version of slice_3mf — acquires semaphore to limit concurrent processes."""
         async with _get_slicer_semaphore():
             return await asyncio.to_thread(
-                self.slice_3mf, three_mf_path, workspace, output_name, plate_index, scale_factor
+                self.slice_3mf,
+                three_mf_path,
+                workspace,
+                output_name,
+                plate_index,
+                scale_factor,
+                disable_arrange,
             )
 
     def parse_gcode_metadata(self, gcode_path: Path) -> Dict:
@@ -345,6 +356,39 @@ class OrcaSlicer:
 
         return {"applied": True, "map": tool_map}
 
+    @staticmethod
+    def _scan_xy_bounds(gcode_path: Path) -> Optional[Tuple[float, float, float, float]]:
+        x = None
+        y = None
+        min_x = float("inf")
+        max_x = float("-inf")
+        min_y = float("inf")
+        max_y = float("-inf")
+        seen = False
+        with open(gcode_path, "r", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith(";"):
+                    continue
+                if not (line.startswith("G0") or line.startswith("G1")):
+                    continue
+                mx = re.search(r"\bX(-?\d+(?:\.\d+)?)", line)
+                my = re.search(r"\bY(-?\d+(?:\.\d+)?)", line)
+                if mx:
+                    x = float(mx.group(1))
+                if my:
+                    y = float(my.group(1))
+                if x is None or y is None:
+                    continue
+                seen = True
+                min_x = min(min_x, x)
+                max_x = max(max_x, x)
+                min_y = min(min_y, y)
+                max_y = max(max_y, y)
+        if not seen:
+            return None
+        return (min_x, max_x, min_y, max_y)
+
     def validate_bounds(self, gcode_path: Path, expected_bounds: Optional[Dict] = None) -> bool:
         """Verify G-code movements stay within printer build volume.
 
@@ -375,6 +419,27 @@ class OrcaSlicer:
                 f"Sliced G-code exceeds build volume: "
                 f"Z_max {metadata.max_z:.1f}mm > {self.printer_profile.build_volume_z}mm limit"
             )
+
+        xy_bounds = self._scan_xy_bounds(gcode_path)
+        if xy_bounds is not None:
+            min_x, max_x_scan, min_y, max_y_scan = xy_bounds
+            if min_x < -0.5:
+                raise SlicingError(
+                    f"Sliced G-code exceeds build volume: X_min {min_x:.1f}mm < 0mm limit"
+                )
+            if min_y < -0.5:
+                raise SlicingError(
+                    f"Sliced G-code exceeds build volume: Y_min {min_y:.1f}mm < 0mm limit"
+                )
+            # Keep consistency with metadata-based max checks; scan is a safety net.
+            if max_x_scan > (self.printer_profile.build_volume_x + 0.5):
+                raise SlicingError(
+                    f"Sliced G-code exceeds build volume: X_max {max_x_scan:.1f}mm > {self.printer_profile.build_volume_x}mm limit"
+                )
+            if max_y_scan > (self.printer_profile.build_volume_y + 0.5):
+                raise SlicingError(
+                    f"Sliced G-code exceeds build volume: Y_max {max_y_scan:.1f}mm > {self.printer_profile.build_volume_y}mm limit"
+                )
 
         return True
 

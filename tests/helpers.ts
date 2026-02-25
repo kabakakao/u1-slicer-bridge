@@ -69,6 +69,18 @@ export async function uploadFile(page: Page, fixtureName: string) {
   }, 'configure', { timeout: UPLOAD_TRANSITION_TIMEOUT_MS });
 }
 
+/** Click Slice Now from configure and wait for completion */
+export async function sliceFromConfigure(page: Page) {
+  await page.getByRole('button', { name: /Slice Now/i }).click();
+  await waitForSliceComplete(page);
+}
+
+/** Upload fixture in UI and slice to complete step */
+export async function uiUploadAndSliceToComplete(page: Page, fixtureName: string) {
+  await uploadFile(page, fixtureName);
+  await sliceFromConfigure(page);
+}
+
 /** Navigate to the configure step for an already-uploaded file by filename */
 export async function selectUploadByName(page: Page, filename: string) {
   // Open My Files modal
@@ -163,6 +175,29 @@ export async function apiSlice(
   const fil = await getDefaultFilament(request);
   const data = {
     filament_id: fil.id,
+    layer_height: 0.2,
+    infill_density: 15,
+    supports: false,
+    ...options,
+  };
+  const res = await request.post(`${API}/uploads/${uploadId}/slice`, {
+    data,
+    timeout: API_SLICE_REQUEST_TIMEOUT_MS,
+  });
+  expect(res.ok()).toBe(true);
+  const job = await res.json();
+  return waitForJobComplete(request, job);
+}
+
+/** Slice a dual-colour fixture upload via API (2 filament_ids) and wait for completion */
+export async function apiSliceDualColour(
+  request: APIRequestContext,
+  uploadId: string,
+  options: Record<string, any> = {},
+) {
+  const fil = await getDefaultFilament(request);
+  const data = {
+    filament_ids: [fil.id, fil.id],
     layer_height: 0.2,
     infill_density: 15,
     supports: false,

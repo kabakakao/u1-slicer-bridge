@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, apiUpload, getDefaultFilament, waitForJobComplete, waitForSliceComplete, getAppState, API } from './helpers';
+import { waitForApp, uploadFile, apiUpload, waitForSliceComplete, getAppState, API, apiSliceDualColour } from './helpers';
 
 test.describe('Multiple Copies (M32)', () => {
   test.setTimeout(180_000);
@@ -87,7 +87,6 @@ test.describe('Multiple Copies (M32)', () => {
 
   test('slice with copies produces valid G-code', async ({ request }) => {
     const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
-    const fil = await getDefaultFilament(request);
 
     // Apply 2 copies
     const copiesRes = await request.post(`${API}/upload/${upload.upload_id}/copies`, {
@@ -95,18 +94,7 @@ test.describe('Multiple Copies (M32)', () => {
     });
     expect(copiesRes.ok()).toBe(true);
 
-    // Slice (dual-colour file needs 2 filament_ids)
-    const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
-      data: {
-        filament_ids: [fil.id, fil.id],
-        layer_height: 0.2,
-        infill_density: 15,
-        supports: false,
-      },
-      timeout: 120_000,
-    });
-    expect(sliceRes.ok()).toBe(true);
-    const job = await waitForJobComplete(request, await sliceRes.json());
+    const job = await apiSliceDualColour(request, String(upload.upload_id));
     expect(job.status).toBe('completed');
     expect(job.metadata?.layer_count).toBeGreaterThan(0);
   });
@@ -167,21 +155,11 @@ test.describe('Multiple Copies (M32)', () => {
 
   test('scale increases full assembly XY footprint (not just Z)', async ({ request }) => {
     const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
-    const fil = await getDefaultFilament(request);
 
     const sliceAndGetSpan = async (scalePercent: number) => {
-      const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
-        data: {
-          filament_ids: [fil.id, fil.id],
-          layer_height: 0.2,
-          infill_density: 15,
-          supports: false,
-          scale_percent: scalePercent,
-        },
-        timeout: 180_000,
+      const job = await apiSliceDualColour(request, String(upload.upload_id), {
+        scale_percent: scalePercent,
       });
-      expect(sliceRes.ok()).toBe(true);
-      const job = await waitForJobComplete(request, await sliceRes.json());
       expect(job.status).toBe('completed');
 
       const metaRes = await request.get(`${API}/jobs/${job.job_id}/gcode/metadata`);

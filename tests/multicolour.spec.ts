@@ -54,7 +54,7 @@ test.describe('Multicolour Support', () => {
     expect(hasFile || hasDefault).toBe(true);
   });
 
-  test('file with >4 colors maps extras to available extruders', async ({ page }) => {
+  test('file with >4 colors maps extras to available extruders @extended', async ({ page }) => {
     // Dragon Scale has 7 metadata colors - extras should map to E1-E4.
     await uploadFile(page, 'Dragon Scale infinity.3mf');
     // Wait for plates to load using Alpine v3 API

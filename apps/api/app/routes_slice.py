@@ -8,21 +8,30 @@ import re
 import json
 import zipfile
 import mimetypes
+import time
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 from db import get_pg_pool
 from config import get_printer_profile
 from slicer import OrcaSlicer, SlicingError
 from profile_embedder import ProfileEmbedder, ProfileEmbedError
-from multi_plate_parser import parse_multi_plate_3mf, extract_plate_objects, get_plate_bounds
+from multi_plate_parser import (
+    parse_multi_plate_3mf,
+    extract_plate_objects,
+    get_plate_bounds,
+    list_build_items_3mf,
+    list_build_item_geometry_3mf,
+    _apply_affine_to_bounds_3x4,
+)
 from plate_validator import PlateValidator
 from parser_3mf import detect_colors_from_3mf, detect_colors_per_plate, detect_print_settings, extract_3mf_metadata_batch
 from scale_3mf import apply_uniform_scale_to_3mf, apply_layout_scale_to_3mf
+from transform_3mf import apply_object_transforms_to_3mf
 
 
 router = APIRouter(tags=["slicing"])
@@ -38,6 +47,10 @@ def _is_wipe_tower_conflict(result: Dict[str, object]) -> bool:
     return (
         "gcode path conflicts found between wipetower" in combined
         or "found slicing result conflict" in combined
+        or (
+            "calc_exclude_triangles" in combined
+            and "nothing to be sliced" in combined
+        )
     )
 
 
@@ -57,6 +70,644 @@ async def _apply_scale_if_needed(
     job_logger.info(f"Applying object scale: {scale_percent:.1f}%")
     await asyncio.to_thread(apply_uniform_scale_to_3mf, input_3mf, scaled_path, scale_percent)
     return scaled_path
+
+
+async def _apply_object_transforms_if_needed(
+    input_3mf: Path,
+    workspace: Path,
+    object_transforms: Optional[List[Dict[str, object]]],
+    job_logger: logging.Logger,
+    suffix: str = "",
+) -> Path:
+    """Apply M33 object transforms to a workspace 3MF if requested."""
+    if not object_transforms:
+        return input_3mf
+
+    safe_suffix = f"_{suffix}" if suffix else ""
+    transformed_path = workspace / f"{input_3mf.stem}_transformed{safe_suffix}.3mf"
+    job_logger.info(f"Applying {len(object_transforms)} object transform(s) to 3MF build items")
+    try:
+        result = await asyncio.to_thread(
+            apply_object_transforms_to_3mf,
+            input_3mf,
+            transformed_path,
+            object_transforms,
+        )
+    except ValueError as e:
+        raise SlicingError(f"Invalid object transforms: {e}") from e
+    job_logger.info(f"Applied object transforms: {result.get('applied')}")
+    return transformed_path
+
+
+def _enforce_transformed_bounds_or_raise(
+    file_path: Path,
+    printer_profile,
+    job_logger: logging.Logger,
+    plate_id: Optional[int] = None,
+    baseline_file_path: Optional[Path] = None,
+) -> None:
+    """Fail fast on out-of-bounds object transform layouts (M33)."""
+    validator = PlateValidator(printer_profile)
+    validation = validator.validate_3mf_bounds(file_path, plate_id=plate_id)
+    build_volume_warnings = validation.get("build_volume_warnings", [])
+    if build_volume_warnings:
+        detail = "; ".join(build_volume_warnings)
+        if plate_id:
+            raise SlicingError(f"Object transforms place plate {plate_id} outside build volume: {detail}")
+        raise SlicingError(f"Object transforms place model outside build volume: {detail}")
+    if validation.get("warnings"):
+        job_logger.info(f"Post-transform layout warnings: {validation.get('warnings')}")
+
+    # Orca can also fail when the transformed plate bounds still "fit" overall, but
+    # no printable object remains fully inside the print volume (e.g. moved mostly off-bed).
+    try:
+        items = list_build_items_3mf(file_path, plate_id=plate_id)
+    except Exception as e:
+        job_logger.warning(f"Skipping transformed item-inside-volume validation: {e}")
+        return
+
+    printable_items = [it for it in items if bool(it.get("printable", True))]
+    items_with_bounds = [it for it in printable_items if isinstance(it.get("world_bounds"), dict)]
+    if not items_with_bounds:
+        return
+
+    # Bambu/Snapmaker paths can effectively use Metadata/model_settings.config
+    # assemble_item transforms. Prefer those as the authoritative pose when present.
+    assemble_transforms = _read_bambu_assemble_item_transforms(file_path)
+    assemble_transforms_by_object = _read_bambu_assemble_item_transforms_by_object_id(file_path)
+    assemble_object_ids_by_index = _read_bambu_assemble_item_object_ids_by_index(file_path)
+    baseline_assemble_transforms = _read_bambu_assemble_item_transforms(baseline_file_path) if baseline_file_path else {}
+    baseline_assemble_transforms_by_object = (
+        _read_bambu_assemble_item_transforms_by_object_id(baseline_file_path) if baseline_file_path else {}
+    )
+
+    if plate_id:
+        selected = next((it for it in items_with_bounds if int(it.get("build_item_index") or 0) == int(plate_id)), None)
+        selected_oid = str(selected.get("object_id") or "") if selected else ""
+        indexed_oid = str(assemble_object_ids_by_index.get(int(plate_id)) or "")
+        has_object_keyed_assemble = bool(selected_oid and assemble_transforms_by_object.get(selected_oid))
+        if selected_oid and indexed_oid and selected_oid != indexed_oid and not has_object_keyed_assemble:
+            job_logger.warning(
+                f"Skipping strict transformed 'fully inside' precheck for plate {plate_id}: "
+                f"assemble_item[{plate_id}] object_id={indexed_oid} != build item object_id={selected_oid}"
+            )
+            return
+
+    tol = 1e-6
+    vol_x = float(printer_profile.build_volume_x)
+    vol_y = float(printer_profile.build_volume_y)
+    vol_z = float(printer_profile.build_volume_z)
+
+    def _bounds_center_xy(wb: Dict[str, object]) -> Optional[tuple[float, float]]:
+        mins = wb.get("min") if isinstance(wb, dict) else None
+        maxs = wb.get("max") if isinstance(wb, dict) else None
+        if not (isinstance(mins, list) and isinstance(maxs, list) and len(mins) >= 2 and len(maxs) >= 2):
+            return None
+        try:
+            return ((float(mins[0]) + float(maxs[0])) / 2.0, (float(mins[1]) + float(maxs[1])) / 2.0)
+        except Exception:
+            return None
+
+    def _bounds_from_local_and_transform(it: Dict[str, object], t3: Optional[List[float]]) -> Optional[Dict[str, List[float]]]:
+        if not t3:
+            return None
+        local_bounds = it.get("local_bounds") or {}
+        if not isinstance(local_bounds, dict):
+            return None
+        local_min = local_bounds.get("min")
+        local_max = local_bounds.get("max")
+        if not (isinstance(local_min, list) and isinstance(local_max, list) and len(local_min) >= 3 and len(local_max) >= 3):
+            return None
+        try:
+            tbmin, tbmax = _apply_affine_to_bounds_3x4(
+                [float(local_min[0]), float(local_min[1]), float(local_min[2])],
+                [float(local_max[0]), float(local_max[1]), float(local_max[2])],
+                t3,
+            )
+            return {"min": [float(tbmin[0]), float(tbmin[1]), float(tbmin[2])], "max": [float(tbmax[0]), float(tbmax[1]), float(tbmax[2])]}
+        except Exception:
+            return None
+
+    # Prefer the same packed-Bambu plate-translation adapter used by /layout, anchored
+    # to the baseline (pre-transform) plate translation so transformed deltas are kept.
+    assemble_preview_offset_xy: Optional[tuple[float, float]] = None
+    assemble_preview_offset_xy = _get_bambu_plate_translation_ui_offset(
+        baseline_file_path if baseline_file_path else file_path,
+        plate_id=plate_id,
+        bed_x=vol_x,
+        bed_y=vol_y,
+    )
+    if assemble_preview_offset_xy is not None and plate_id is not None:
+        job_logger.info(
+            f"Using Bambu packed plate translation offset for transformed precheck (plate {plate_id}): "
+            f"({assemble_preview_offset_xy[0]:.3f}, {assemble_preview_offset_xy[1]:.3f})"
+        )
+
+    # Fallback: derive a fixed display-like offset from the baseline selected plate
+    # so validation aligns better with the normalized Object Placement preview.
+    # Only apply this normalization for explicit plate selections (slice-plate path).
+    if assemble_preview_offset_xy is None and plate_id is not None and baseline_assemble_transforms and items_with_bounds:
+        baseline_wbs: List[Dict[str, List[float]]] = []
+        for it in items_with_bounds:
+            idx = int(it.get("build_item_index") or 0)
+            oid = str(it.get("object_id") or "")
+            t0 = baseline_assemble_transforms_by_object.get(oid) or baseline_assemble_transforms.get(idx)
+            wb0 = _bounds_from_local_and_transform(it, t0)
+            if wb0:
+                baseline_wbs.append(wb0)
+        if baseline_wbs:
+            bx_min = min(float(wb["min"][0]) for wb in baseline_wbs)
+            by_min = min(float(wb["min"][1]) for wb in baseline_wbs)
+            bx_max = max(float(wb["max"][0]) for wb in baseline_wbs)
+            by_max = max(float(wb["max"][1]) for wb in baseline_wbs)
+            bcx = (bx_min + bx_max) / 2.0
+            bcy = (by_min + by_max) / 2.0
+            assemble_preview_offset_xy = ((vol_x / 2.0) - bcx, (vol_y / 2.0) - bcy)
+
+    # Fallback for embed/rebuild paths that drop Bambu assemble metadata but keep the
+    # same packed build-item coordinates. Normalize using baseline core build-item bounds
+    # so tiny on-bed moves don't get falsely rejected in packed coordinate space.
+    if assemble_preview_offset_xy is None and plate_id is not None and baseline_file_path:
+        try:
+            baseline_items = list_build_items_3mf(baseline_file_path, plate_id=plate_id)
+        except Exception:
+            baseline_items = []
+        baseline_printable = [it for it in baseline_items if bool(it.get("printable", True))]
+        baseline_with_bounds = [it for it in baseline_printable if isinstance(it.get("world_bounds"), dict)]
+        if baseline_with_bounds:
+            bx_min = min(float(it["world_bounds"]["min"][0]) for it in baseline_with_bounds)
+            by_min = min(float(it["world_bounds"]["min"][1]) for it in baseline_with_bounds)
+            bx_max = max(float(it["world_bounds"]["max"][0]) for it in baseline_with_bounds)
+            by_max = max(float(it["world_bounds"]["max"][1]) for it in baseline_with_bounds)
+            bcx = (bx_min + bx_max) / 2.0
+            bcy = (by_min + by_max) / 2.0
+            assemble_preview_offset_xy = ((vol_x / 2.0) - bcx, (vol_y / 2.0) - bcy)
+
+    def _fully_inside(it: Dict[str, object]) -> bool:
+        wb = it.get("world_bounds") or {}
+        local_bounds = it.get("local_bounds") or {}
+        idx = int(it.get("build_item_index") or 0)
+        oid = str(it.get("object_id") or "")
+        t3 = assemble_transforms_by_object.get(oid) or assemble_transforms.get(idx)
+        if t3 and isinstance(local_bounds, dict):
+            wb_from_assemble = _bounds_from_local_and_transform(it, t3)
+            if wb_from_assemble:
+                wb = wb_from_assemble
+        if assemble_preview_offset_xy:
+            ox, oy = assemble_preview_offset_xy
+            try:
+                wb = {
+                    "min": [float(wb["min"][0]) + ox, float(wb["min"][1]) + oy, float(wb["min"][2])],
+                    "max": [float(wb["max"][0]) + ox, float(wb["max"][1]) + oy, float(wb["max"][2])],
+                }
+            except Exception:
+                pass
+        mins = (wb.get("min") or [None, None, None]) if isinstance(wb, dict) else [None, None, None]
+        maxs = (wb.get("max") or [None, None, None]) if isinstance(wb, dict) else [None, None, None]
+        try:
+            min_x, min_y, min_z = float(mins[0]), float(mins[1]), float(mins[2])
+            max_x, max_y, max_z = float(maxs[0]), float(maxs[1]), float(maxs[2])
+        except Exception:
+            return False
+        return (
+            min_x >= -tol and min_y >= -tol and min_z >= -tol and
+            max_x <= (vol_x + tol) and max_y <= (vol_y + tol) and max_z <= (vol_z + tol)
+        )
+
+    if any(_fully_inside(it) for it in items_with_bounds):
+        return
+
+    first = items_with_bounds[0]
+    wb = first.get("world_bounds") or {}
+    detail = ""
+    if isinstance(wb, dict):
+        mins = wb.get("min")
+        maxs = wb.get("max")
+        detail = f" first printable item bounds={mins}..{maxs}"
+    if plate_id:
+        raise SlicingError(
+            f"Object transforms place plate {plate_id} so no printable object is fully inside the print volume.{detail}"
+        )
+    raise SlicingError(
+        f"Object transforms place model so no printable object is fully inside the print volume.{detail}"
+    )
+
+
+def _read_bambu_assemble_item_transforms(file_path: Path) -> Dict[int, List[float]]:
+    """Return 1-based assemble_item transform map from model_settings.config (best effort)."""
+    result: Dict[int, List[float]] = {}
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/model_settings.config" not in zf.namelist():
+                return result
+            raw = zf.read("Metadata/model_settings.config").decode("utf-8", errors="ignore")
+    except Exception:
+        return result
+
+    idx = 0
+    for m in re.finditer(r"<assemble_item\b[^>]*\btransform=(['\"])(.*?)\1", raw, flags=re.IGNORECASE | re.DOTALL):
+        idx += 1
+        vals_raw = m.group(2).strip().split()
+        if len(vals_raw) != 12:
+            continue
+        try:
+            vals = [float(v) for v in vals_raw]
+        except ValueError:
+            continue
+        result[idx] = vals
+    return result
+
+
+def _read_bambu_assemble_item_object_ids_by_index(file_path: Path) -> Dict[int, str]:
+    """Return 1-based assemble_item object_id map from model_settings.config (best effort)."""
+    result: Dict[int, str] = {}
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/model_settings.config" not in zf.namelist():
+                return result
+            raw = zf.read("Metadata/model_settings.config").decode("utf-8", errors="ignore")
+    except Exception:
+        return result
+
+    idx = 0
+    tag_pat = re.compile(r"<assemble_item\b(?P<tag>[^>]*)/?>", flags=re.IGNORECASE | re.DOTALL)
+    oid_pat = re.compile(r"\bobject_id=(['\"])(.*?)\1", flags=re.IGNORECASE | re.DOTALL)
+    for m in tag_pat.finditer(raw):
+        idx += 1
+        tag = m.group("tag") or ""
+        moid = oid_pat.search(tag)
+        if moid:
+            result[idx] = str(moid.group(2))
+    return result
+
+
+def _read_bambu_assemble_item_transforms_by_object_id(file_path: Path) -> Dict[str, List[float]]:
+    """Return assemble_item transforms keyed by object_id when uniquely present."""
+    result: Dict[str, List[float]] = {}
+    duplicates: set[str] = set()
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/model_settings.config" not in zf.namelist():
+                return result
+            raw = zf.read("Metadata/model_settings.config").decode("utf-8", errors="ignore")
+    except Exception:
+        return result
+
+    tag_pat = re.compile(r"<assemble_item\b(?P<tag>[^>]*)/?>", flags=re.IGNORECASE | re.DOTALL)
+    oid_pat = re.compile(r"\bobject_id=(['\"])(.*?)\1", flags=re.IGNORECASE | re.DOTALL)
+    transform_pat = re.compile(r"\btransform=(['\"])(.*?)\1", flags=re.IGNORECASE | re.DOTALL)
+    for m in tag_pat.finditer(raw):
+        tag = m.group("tag") or ""
+        moid = oid_pat.search(tag)
+        mt = transform_pat.search(tag)
+        if not moid or not mt:
+            continue
+        oid = str(moid.group(2))
+        vals_raw = (mt.group(2) or "").strip().split()
+        if len(vals_raw) != 12:
+            continue
+        try:
+            vals = [float(v) for v in vals_raw]
+        except ValueError:
+            continue
+        if oid in result:
+            duplicates.add(oid)
+        else:
+            result[oid] = vals
+    for oid in duplicates:
+        result.pop(oid, None)
+    return result
+
+
+def _fold_packed_plate_coord(value: float, step: float, bed_size: float) -> float:
+    """Fold packed Bambu plate-grid coordinates back into an approximate bed-local range."""
+    v = float(value)
+    s = float(step)
+    b = max(1.0, float(bed_size))
+    if not (s > 0):
+        return v
+    for _ in range(8):
+        if v >= 0:
+            break
+        v += s
+    for _ in range(8):
+        if v <= b:
+            break
+        v -= s
+    return v
+
+
+def _layout_item_base_xyz(it: Dict[str, object], *, is_multi_plate: bool) -> tuple[float, float, float]:
+    """Return preview base pose source for a layout item before ui-frame normalization."""
+    core_t = it.get("translation") if isinstance(it.get("translation"), list) else [0, 0, 0]
+    asm_t = it.get("assemble_translation") if isinstance(it.get("assemble_translation"), list) else None
+    use_asm_xy = bool(is_multi_plate and asm_t and len(asm_t) >= 3)
+    t = asm_t if use_asm_xy else core_t
+    # Keep Z from core build-item transform; Bambu assemble Z can be packed/project-space.
+    return (float(t[0] or 0), float(t[1] or 0), float((core_t[2] if len(core_t) >= 3 else 0) or 0))
+
+
+def _infer_bambu_packed_grid_steps(source_3mf: Path, *, bed_x: float, bed_y: float) -> tuple[Optional[float], Optional[float]]:
+    """Infer packed Bambu plate-grid spacing from plate translations (e.g. ~307.2mm)."""
+    try:
+        plates, multi = parse_multi_plate_3mf(source_3mf)
+        if not (multi and len(plates) > 1):
+            return None, None
+
+        xs = sorted({float(p.get_translation()[0]) for p in plates})
+        ys = sorted({float(p.get_translation()[1]) for p in plates})
+
+        def _axis_step(vals: List[float], bed_dim: float) -> Optional[float]:
+            diffs = []
+            threshold = float(bed_dim) * 0.9
+            for i in range(1, len(vals)):
+                d = abs(vals[i] - vals[i - 1])
+                if d > threshold:
+                    diffs.append(d)
+            return min(diffs) if diffs else None
+
+        return _axis_step(xs, bed_x), _axis_step(ys, bed_y)
+    except Exception:
+        return None, None
+
+
+def _read_multi_plate_translations_by_id(source_3mf: Path) -> Dict[int, Tuple[float, float, float]]:
+    """Best-effort map of parser plate_id -> packed translation from multi-plate parser."""
+    try:
+        plates, multi = parse_multi_plate_3mf(source_3mf)
+        if not (multi and plates):
+            return {}
+        result: Dict[int, Tuple[float, float, float]] = {}
+        for p in plates:
+            t = p.get_translation()
+            if isinstance(t, (list, tuple)) and len(t) >= 3:
+                result[int(p.plate_id)] = (float(t[0]), float(t[1]), float(t[2]))
+        return result
+    except Exception:
+        return {}
+
+
+def _get_bambu_plate_translation_ui_offset(
+    reference_file_path: Optional[Path],
+    *,
+    plate_id: Optional[int],
+    bed_x: float,
+    bed_y: float,
+) -> Optional[Tuple[float, float]]:
+    """Return packed->bed translation-only offset using a baseline plate translation."""
+    if reference_file_path is None or plate_id is None:
+        return None
+    plate_translations = _read_multi_plate_translations_by_id(reference_file_path)
+    pt = plate_translations.get(int(plate_id))
+    if not pt:
+        return None
+    ptx, pty, _ = pt
+    return ((float(bed_x) / 2.0) - float(ptx), (float(bed_y) / 2.0) - float(pty))
+
+
+def _apply_layout_direct_mapping(
+    frame: Dict[str, object],
+    items: List[Dict[str, object]],
+    *,
+    is_multi_plate: bool,
+) -> Dict[str, object]:
+    """Exact/direct bed-local mapping (single-plate and any future exact multi-plate adapters)."""
+    frame.update({
+        "confidence": "exact",
+        "mapping": "direct",
+        "offset_xy": [0.0, 0.0],
+        "capabilities": {
+            "object_transform_edit": True,  # exact mapping allows editing
+            "prime_tower_edit": True,
+        },
+    })
+    for it in items:
+        x, y, z = _layout_item_base_xyz(it, is_multi_plate=is_multi_plate)
+        it["ui_base_pose"] = {"x": x, "y": y, "z": z, "rotate_z_deg": 0.0}
+    return frame
+
+
+def _apply_layout_bambu_plate_translation_offset_mapping(
+    frame: Dict[str, object],
+    items: List[Dict[str, object]],
+    *,
+    plate_translations: Dict[int, Tuple[float, float, float]],
+    bed_x: float,
+    bed_y: float,
+    allow_object_edit: bool,
+) -> Dict[str, object]:
+    """Map Bambu packed coordinates into plate-local bed coords using per-plate packed translation.
+
+    This is a more deterministic adapter than grid-fold heuristics:
+    ui_xy = effective_xy - packed_plate_xy + bed_center_xy
+    """
+    if not plate_translations:
+        return frame
+
+    bed_cx = float(bed_x) / 2.0
+    bed_cy = float(bed_y) / 2.0
+    for it in items:
+        idx = int(it.get("build_item_index") or 0)
+        if idx <= 0 or idx not in plate_translations:
+            return frame
+
+    frame.update({
+        "confidence": "exact" if allow_object_edit else "approximate",
+        "mapping": "bambu_plate_translation_offset",
+        "offset_xy": [0.0, 0.0],
+        "capabilities": {
+            "object_transform_edit": bool(allow_object_edit),
+            "prime_tower_edit": True,
+        },
+    })
+    if allow_object_edit:
+        frame["notes"] = [
+            "Packed multi-plate Bambu layout mapped via plate translation offset (exact for selected-plate object editing path)."
+        ]
+    else:
+        frame["notes"] = [
+            "Packed multi-plate Bambu layout normalized via plate translation offset; object move/rotate remains disabled until exact selected-plate mapping is available."
+        ]
+    if len(items) == 1:
+        idx = int(items[0].get("build_item_index") or 0)
+        pt = plate_translations.get(idx)
+        if pt:
+            frame["plate_translation_mm"] = [round(pt[0], 6), round(pt[1], 6), round(pt[2], 6)]
+
+    for it in items:
+        idx = int(it.get("build_item_index") or 0)
+        ptx, pty, _ = plate_translations[idx]
+        x, y, z = _layout_item_base_xyz(it, is_multi_plate=True)
+        ux = (float(x) - float(ptx)) + bed_cx
+        uy = (float(y) - float(pty)) + bed_cy
+        it["ui_base_pose"] = {"x": ux, "y": uy, "z": z, "rotate_z_deg": 0.0}
+    return frame
+
+
+def _apply_layout_bambu_packed_grid_fold_mapping(
+    frame: Dict[str, object],
+    items: List[Dict[str, object]],
+    *,
+    packed_grid_step_x: float,
+    packed_grid_step_y: float,
+    bed_x: float,
+    bed_y: float,
+    note: str,
+) -> Dict[str, object]:
+    """Approximate Bambu packed-grid -> bed-local normalization by per-axis folding."""
+    frame.update({
+        "confidence": "approximate",
+        "mapping": "bambu_packed_grid_fold",
+        "packed_grid_step_x_mm": round(float(packed_grid_step_x), 6),
+        "packed_grid_step_y_mm": round(float(packed_grid_step_y), 6),
+        "capabilities": {
+            "object_transform_edit": False,
+            "prime_tower_edit": True,
+        },
+        "notes": [note],
+    })
+    for it in items:
+        x, y, z = _layout_item_base_xyz(it, is_multi_plate=True)
+        ux = _fold_packed_plate_coord(x, packed_grid_step_x, bed_x)
+        uy = _fold_packed_plate_coord(y, packed_grid_step_y, bed_y)
+        it["ui_base_pose"] = {"x": ux, "y": uy, "z": z, "rotate_z_deg": 0.0}
+    return frame
+
+
+def _apply_layout_centered_preview_offset_mapping(
+    frame: Dict[str, object],
+    items: List[Dict[str, object]],
+    *,
+    is_multi_plate: bool,
+    bed_x: float,
+    bed_y: float,
+    validation_bounds: Optional[Dict[str, object]],
+) -> Dict[str, object]:
+    """Legacy explicit fallback: center current scene in preview (approximate for multi-plate)."""
+    center_x: Optional[float] = None
+    center_y: Optional[float] = None
+    assemble_bounds = [
+        b for b in [it.get("assemble_world_bounds") for it in items]
+        if isinstance(b, dict) and isinstance(b.get("min"), list) and isinstance(b.get("max"), list)
+    ]
+    if assemble_bounds:
+        min_x = min(float(b["min"][0]) for b in assemble_bounds)
+        min_y = min(float(b["min"][1]) for b in assemble_bounds)
+        max_x = max(float(b["max"][0]) for b in assemble_bounds)
+        max_y = max(float(b["max"][1]) for b in assemble_bounds)
+        center_x = (min_x + max_x) / 2.0
+        center_y = (min_y + max_y) / 2.0
+    elif isinstance(validation_bounds, dict):
+        mins = validation_bounds.get("min")
+        maxs = validation_bounds.get("max")
+        if isinstance(mins, list) and isinstance(maxs, list) and len(mins) >= 2 and len(maxs) >= 2:
+            center_x = (float(mins[0]) + float(maxs[0])) / 2.0
+            center_y = (float(mins[1]) + float(maxs[1])) / 2.0
+
+    if center_x is None or center_y is None:
+        pts = [_layout_item_base_xyz(it, is_multi_plate=is_multi_plate) for it in items]
+        center_x = sum(p[0] for p in pts) / max(1, len(pts))
+        center_y = sum(p[1] for p in pts) / max(1, len(pts))
+
+    off_x = (float(bed_x) / 2.0) - float(center_x)
+    off_y = (float(bed_y) / 2.0) - float(center_y)
+    frame.update({
+        "confidence": "approximate" if is_multi_plate else "exact",
+        "mapping": "centered_preview_offset",
+        "offset_xy": [off_x, off_y],
+        "capabilities": {
+            "object_transform_edit": (not is_multi_plate),
+            "prime_tower_edit": True,
+        },
+    })
+    if is_multi_plate:
+        frame["notes"] = [
+            "Multi-plate preview uses centered normalization; object move/rotate disabled until exact plate-local mapping is available."
+        ]
+
+    for it in items:
+        x, y, z = _layout_item_base_xyz(it, is_multi_plate=is_multi_plate)
+        it["ui_base_pose"] = {"x": x + off_x, "y": y + off_y, "z": z, "rotate_z_deg": 0.0}
+    return frame
+
+
+def _derive_layout_placement_frame(
+    items: List[Dict[str, object]],
+    *,
+    source_3mf: Path,
+    is_multi_plate: bool,
+    plate_id: Optional[int],
+    bed_x: float,
+    bed_y: float,
+    validation_bounds: Optional[Dict[str, object]],
+) -> Dict[str, object]:
+    """Return canonical (bed-local) placement frame metadata + per-item ui pose hints.
+
+    This centralizes the preview coordinate mapping logic so the frontend can consume a
+    single explicit contract instead of duplicating Bambu/packed/recentered heuristics.
+    """
+    frame: Dict[str, object] = {
+        "version": 2,
+        "canonical": "bed_local_xy_mm",
+        "viewer_frame": "bed_local_xy_mm",
+        "confidence": "exact" if not is_multi_plate else "approximate",
+        "mapping": "direct",
+        "offset_xy": [0.0, 0.0],
+        "capabilities": {
+            "object_transform_edit": (not is_multi_plate),
+            "prime_tower_edit": True,
+        },
+    }
+
+    if not items:
+        return frame
+
+    # Exact/direct path for non-multi-plate files. Do not apply preview-centering offsets here;
+    # it causes preview/slice mismatches for simple files (e.g. auxiliary fan cover).
+    if not is_multi_plate:
+        return _apply_layout_direct_mapping(frame, items, is_multi_plate=False)
+
+    packed_grid_step_x, packed_grid_step_y = _infer_bambu_packed_grid_steps(
+        source_3mf,
+        bed_x=bed_x,
+        bed_y=bed_y,
+    )
+    plate_translations = _read_multi_plate_translations_by_id(source_3mf)
+    if plate_translations:
+        can_exact_selected_plate = bool(plate_id is not None and len(items) == 1)
+        mapped = _apply_layout_bambu_plate_translation_offset_mapping(
+            frame,
+            items,
+            plate_translations=plate_translations,
+            bed_x=bed_x,
+            bed_y=bed_y,
+            allow_object_edit=can_exact_selected_plate,
+        )
+        if mapped.get("mapping") == "bambu_plate_translation_offset":
+            return mapped
+
+    if (
+        packed_grid_step_x and packed_grid_step_x > 0
+        and packed_grid_step_y and packed_grid_step_y > 0
+    ):
+        return _apply_layout_bambu_packed_grid_fold_mapping(
+            frame,
+            items,
+            packed_grid_step_x=float(packed_grid_step_x),
+            packed_grid_step_y=float(packed_grid_step_y),
+            bed_x=bed_x,
+            bed_y=bed_y,
+            note="Packed multi-plate Bambu layout normalized with inferred grid folding; object move/rotate disabled until exact mapping is available.",
+        )
+
+    return _apply_layout_centered_preview_offset_mapping(
+        frame,
+        items,
+        is_multi_plate=is_multi_plate,
+        bed_x=bed_x,
+        bed_y=bed_y,
+        validation_bounds=validation_bounds,
+    )
 
 
 def _index_preview_assets(source_3mf: Path) -> Dict[str, object]:
@@ -129,6 +780,24 @@ def _index_plate_previews(source_3mf: Path) -> Dict[int, str]:
     return {}
 
 
+def _index_bambu_plate_json_ids(source_3mf: Path) -> set[int]:
+    """Return Bambu/Orca plate IDs present as Metadata/plate_N.json in a 3MF."""
+    ids: set[int] = set()
+    try:
+        with zipfile.ZipFile(source_3mf, "r") as zf:
+            for name in zf.namelist():
+                m = re.search(r"(?:^|/)Metadata/plate_(\d+)\.json$", name, re.IGNORECASE)
+                if not m:
+                    continue
+                try:
+                    ids.add(int(m.group(1)))
+                except ValueError:
+                    continue
+    except Exception:
+        return set()
+    return ids
+
+
 def _guess_image_media_type(filename: str) -> str:
     media_type, _ = mimetypes.guess_type(filename)
     return media_type or "image/png"
@@ -174,12 +843,15 @@ class SliceRequest(BaseModel):
     prime_tower_brim_width: Optional[int] = Field(None, ge=0, le=20)
     prime_tower_brim_chamfer: Optional[bool] = True
     prime_tower_brim_chamfer_max_width: Optional[int] = Field(None, ge=0, le=50)
+    wipe_tower_x: Optional[float] = Field(None, ge=0, le=270)
+    wipe_tower_y: Optional[float] = Field(None, ge=0, le=270)
     nozzle_temp: Optional[int] = Field(None, ge=150, le=350)
     bed_temp: Optional[int] = Field(None, ge=0, le=150)
     bed_type: Optional[str] = None
     scale_percent: Optional[float] = Field(100.0, ge=10.0, le=500.0)
     enable_flow_calibrate: Optional[bool] = True
     extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
+    object_transforms: Optional[List[Dict[str, object]]] = None  # M33 foundation: per-build-item deltas
 
 
 class SlicePlateRequest(BaseModel):
@@ -206,12 +878,15 @@ class SlicePlateRequest(BaseModel):
     prime_tower_brim_width: Optional[int] = Field(None, ge=0, le=20)
     prime_tower_brim_chamfer: Optional[bool] = True
     prime_tower_brim_chamfer_max_width: Optional[int] = Field(None, ge=0, le=50)
+    wipe_tower_x: Optional[float] = Field(None, ge=0, le=270)
+    wipe_tower_y: Optional[float] = Field(None, ge=0, le=270)
     nozzle_temp: Optional[int] = Field(None, ge=150, le=350)
     bed_temp: Optional[int] = Field(None, ge=0, le=150)
     bed_type: Optional[str] = None
     scale_percent: Optional[float] = Field(100.0, ge=10.0, le=500.0)
     enable_flow_calibrate: Optional[bool] = True
     extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
+    object_transforms: Optional[List[Dict[str, object]]] = None  # M33 foundation: per-build-item deltas
 
 
 def setup_job_logging(job_id: str) -> logging.Logger:
@@ -305,7 +980,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         f"prime_tower_width={request.prime_tower_width}, "
         f"prime_tower_brim_width={request.prime_tower_brim_width}, "
         f"prime_tower_brim_chamfer={request.prime_tower_brim_chamfer}, "
-        f"prime_tower_brim_chamfer_max_width={request.prime_tower_brim_chamfer_max_width}"
+        f"prime_tower_brim_chamfer_max_width={request.prime_tower_brim_chamfer_max_width}, "
+        f"wipe_tower_x={request.wipe_tower_x}, wipe_tower_y={request.wipe_tower_y}"
     )
 
     async with pool.acquire() as conn:
@@ -565,6 +1241,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["prime_tower_brim_chamfer"] = "1" if request.prime_tower_brim_chamfer else "0"
             if request.prime_tower_brim_chamfer_max_width is not None:
                 overrides["prime_tower_brim_chamfer_max_width"] = str(max(0, int(request.prime_tower_brim_chamfer_max_width)))
+            if request.wipe_tower_x is not None:
+                overrides["wipe_tower_x"] = f"{float(request.wipe_tower_x):.3f}"
+            if request.wipe_tower_y is not None:
+                overrides["wipe_tower_y"] = f"{float(request.wipe_tower_y):.3f}"
         else:
             overrides["enable_prime_tower"] = "0"
 
@@ -594,9 +1274,23 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             job_logger.error(f"Failed to embed profiles: {str(e)}")
             raise SlicingError(f"Profile embedding failed: {str(e)}")
 
+        embedded_3mf = await _apply_object_transforms_if_needed(
+            embedded_3mf,
+            workspace,
+            request.object_transforms,
+            job_logger,
+        )
+        printer_profile = get_printer_profile("snapmaker_u1")
+        if request.object_transforms:
+            _enforce_transformed_bounds_or_raise(
+                embedded_3mf,
+                printer_profile,
+                job_logger,
+                baseline_file_path=(workspace / "embedded.3mf"),
+            )
+
         # Slice with Orca (async to avoid blocking other API requests)
         job_logger.info("Invoking Orca Slicer...")
-        printer_profile = get_printer_profile("snapmaker_u1")
         slicer = OrcaSlicer(printer_profile)
         scale_percent = float(request.scale_percent if request.scale_percent is not None else 100.0)
         scale_factor = scale_percent / 100.0
@@ -637,7 +1331,12 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         else:
             sliceable_3mf = source_for_slice
 
-        result = await slicer.slice_3mf_async(sliceable_3mf, workspace, scale_factor=scale_factor)
+        result = await slicer.slice_3mf_async(
+            sliceable_3mf,
+            workspace,
+            scale_factor=scale_factor,
+            disable_arrange=bool(request.object_transforms),
+        )
 
         if not result["success"] and scale_active:
             job_logger.warning("Native --scale failed; retrying with transform-based scaling")
@@ -662,7 +1361,12 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                     )
             else:
                 fallback_sliceable_3mf = scaled_3mf
-            result = await slicer.slice_3mf_async(fallback_sliceable_3mf, workspace, scale_factor=1.0)
+            result = await slicer.slice_3mf_async(
+                fallback_sliceable_3mf,
+                workspace,
+                scale_factor=1.0,
+                disable_arrange=bool(request.object_transforms),
+            )
 
         if (
             not result["success"]
@@ -672,7 +1376,12 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             job_logger.warning(
                 "Scaled downslice failed; retrying once at 100% scale"
             )
-            result = await slicer.slice_3mf_async(sliceable_3mf, workspace, scale_factor=1.0)
+            result = await slicer.slice_3mf_async(
+                sliceable_3mf,
+                workspace,
+                scale_factor=1.0,
+                disable_arrange=bool(request.object_transforms),
+            )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
             job_logger.warning(
@@ -695,6 +1404,20 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
                 enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
             )
+            embedded_retry = await _apply_object_transforms_if_needed(
+                embedded_retry,
+                workspace,
+                request.object_transforms,
+                job_logger,
+                suffix="no_prime",
+            )
+            if request.object_transforms:
+                _enforce_transformed_bounds_or_raise(
+                    embedded_retry,
+                    printer_profile,
+                    job_logger,
+                    baseline_file_path=(workspace / "embedded_no_prime.3mf"),
+                )
 
             retry_source = embedded_retry
             if layout_scale_active:
@@ -725,7 +1448,12 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             else:
                 retry_sliceable_3mf = retry_source
 
-            result = await slicer.slice_3mf_async(retry_sliceable_3mf, workspace, scale_factor=scale_factor)
+            result = await slicer.slice_3mf_async(
+                retry_sliceable_3mf,
+                workspace,
+                scale_factor=scale_factor,
+                disable_arrange=bool(request.object_transforms),
+            )
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
@@ -787,8 +1515,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             slicer.validate_bounds(gcode_workspace_path)
             job_logger.info("Bounds validation passed")
         except Exception as e:
-            job_logger.warning(f"Bounds validation warning: {str(e)}")
-            # Don't fail on bounds warning, just log it
+            job_logger.error(f"Bounds validation failed: {str(e)}")
+            raise
 
         # Move G-code to final location
         slices_dir = Path("/data/slices")
@@ -887,7 +1615,13 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             )
         low = err_text.lower()
         code = 500
-        if "unstable for this model" in low or "do not fit build plate" in low:
+        if (
+            "unstable for this model" in low
+            or "do not fit build plate" in low
+            or "invalid object transforms" in low
+            or "outside build volume" in low
+            or "fully inside the print volume" in low
+        ):
             code = 400
         raise HTTPException(status_code=code, detail=f"Slicing failed: {err_text}")
 
@@ -944,7 +1678,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         f"prime_tower_width={request.prime_tower_width}, "
         f"prime_tower_brim_width={request.prime_tower_brim_width}, "
         f"prime_tower_brim_chamfer={request.prime_tower_brim_chamfer}, "
-        f"prime_tower_brim_chamfer_max_width={request.prime_tower_brim_chamfer_max_width}"
+        f"prime_tower_brim_chamfer_max_width={request.prime_tower_brim_chamfer_max_width}, "
+        f"wipe_tower_x={request.wipe_tower_x}, wipe_tower_y={request.wipe_tower_y}"
     )
 
     async with pool.acquire() as conn:
@@ -1221,6 +1956,10 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["prime_tower_brim_chamfer"] = "1" if request.prime_tower_brim_chamfer else "0"
             if request.prime_tower_brim_chamfer_max_width is not None:
                 overrides["prime_tower_brim_chamfer_max_width"] = str(max(0, int(request.prime_tower_brim_chamfer_max_width)))
+            if request.wipe_tower_x is not None:
+                overrides["wipe_tower_x"] = f"{float(request.wipe_tower_x):.3f}"
+            if request.wipe_tower_y is not None:
+                overrides["wipe_tower_y"] = f"{float(request.wipe_tower_y):.3f}"
         else:
             overrides["enable_prime_tower"] = "0"
 
@@ -1247,23 +1986,51 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"Failed to embed profiles: {str(e)}")
             raise SlicingError(f"Profile embedding failed: {str(e)}")
 
+        embedded_3mf = await _apply_object_transforms_if_needed(
+            embedded_3mf,
+            workspace,
+            request.object_transforms,
+            job_logger,
+        )
+        if request.object_transforms:
+            _enforce_transformed_bounds_or_raise(
+                embedded_3mf,
+                printer_profile,
+                job_logger,
+                plate_id=request.plate_id,
+                baseline_file_path=(workspace / "sliceable.3mf"),
+            )
+
         # Slice with Orca (async to avoid blocking other API requests)
         job_logger.info("Invoking Orca Slicer...")
         slicer = OrcaSlicer(printer_profile)
         scale_percent = float(request.scale_percent if request.scale_percent is not None else 100.0)
 
-        # Bambu files define plates via Metadata/plate_*.json, not <item> indices.
-        # Our multi_plate_parser maps each <item> to a "plate" (1-indexed), but
-        # Orca's --slice uses the plate_*.json numbering.  Most Bambu exports
-        # have a single plate_1.json containing all objects, so we always target
-        # plate 1 for Orca regardless of which <item> the user selected.
+        # Bambu files define plates via Metadata/plate_*.json, not always <item> indices.
+        # Some exports have only plate_1.json even when our parser exposes multiple
+        # build items; others (e.g. Shashibo) have real plate_1..N.json files.
+        # Prefer the requested plate when that Bambu plate JSON exists, otherwise
+        # fall back to Orca plate 1 for compatibility with the legacy mismatch case.
         effective_plate_id = request.plate_id
         if file_meta["is_bambu"] and request.plate_id != 1:
-            job_logger.info(
-                f"Bambu file — using Orca plate 1 instead of requested "
-                f"plate {request.plate_id} (Bambu plate numbering differs from item index)"
-            )
-            effective_plate_id = 1
+            bambu_plate_ids = _index_bambu_plate_json_ids(source_3mf)
+            if request.plate_id in bambu_plate_ids:
+                job_logger.info(
+                    f"Bambu file — using requested Orca plate {request.plate_id} "
+                    f"(found Metadata/plate_{request.plate_id}.json)"
+                )
+            else:
+                if bambu_plate_ids:
+                    job_logger.info(
+                        f"Bambu file ??? using Orca plate 1 instead of requested plate "
+                        f"{request.plate_id} (available Bambu plates: {sorted(bambu_plate_ids)})"
+                    )
+                    effective_plate_id = 1
+                else:
+                    job_logger.info(
+                        f"Bambu file ??? using requested Orca plate {request.plate_id} "
+                        f"(no Metadata/plate_N.json found; keeping parser plate index)"
+                    )
 
         scale_factor = scale_percent / 100.0
         scale_active = abs(scale_percent - 100.0) > 0.001
@@ -1280,7 +2047,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.info("Applied pre-scale to assembly offsets for native --scale")
 
         result = await slicer.slice_3mf_async(
-            source_for_slice, workspace, plate_index=effective_plate_id, scale_factor=scale_factor
+            source_for_slice,
+            workspace,
+            plate_index=effective_plate_id,
+            scale_factor=scale_factor,
+            disable_arrange=bool(request.object_transforms),
         )
 
         if not result["success"] and scale_active:
@@ -1289,7 +2060,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             # layout offsets when source_for_slice already has pre-scaled spacing.
             scaled_3mf = await _apply_scale_if_needed(embedded_3mf, workspace, scale_percent, job_logger)
             result = await slicer.slice_3mf_async(
-                scaled_3mf, workspace, plate_index=effective_plate_id, scale_factor=1.0
+                scaled_3mf,
+                workspace,
+                plate_index=effective_plate_id,
+                scale_factor=1.0,
+                disable_arrange=bool(request.object_transforms),
             )
 
         if (
@@ -1301,7 +2076,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 "Scaled downslice failed; retrying once at 100% scale"
             )
             result = await slicer.slice_3mf_async(
-                source_for_slice, workspace, plate_index=effective_plate_id, scale_factor=1.0
+                source_for_slice,
+                workspace,
+                plate_index=effective_plate_id,
+                scale_factor=1.0,
+                disable_arrange=bool(request.object_transforms),
             )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
@@ -1325,6 +2104,21 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
                 enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
             )
+            embedded_retry = await _apply_object_transforms_if_needed(
+                embedded_retry,
+                workspace,
+                request.object_transforms,
+                job_logger,
+                suffix="no_prime",
+            )
+            if request.object_transforms:
+                _enforce_transformed_bounds_or_raise(
+                    embedded_retry,
+                    printer_profile,
+                    job_logger,
+                    plate_id=request.plate_id,
+                    baseline_file_path=(workspace / "embedded_no_prime.3mf"),
+                )
             retry_source = embedded_retry
             if layout_scale_active:
                 retry_source = workspace / "embedded_no_prime_layout_scaled.3mf"
@@ -1335,7 +2129,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                     scale_percent,
                 )
             result = await slicer.slice_3mf_async(
-                retry_source, workspace, plate_index=effective_plate_id, scale_factor=scale_factor
+                retry_source,
+                workspace,
+                plate_index=effective_plate_id,
+                scale_factor=scale_factor,
+                disable_arrange=bool(request.object_transforms),
             )
 
         if not result["success"]:
@@ -1398,7 +2196,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             slicer.validate_bounds(gcode_workspace_path)
             job_logger.info("Bounds validation passed")
         except Exception as e:
-            job_logger.warning(f"Bounds validation warning: {str(e)}")
+            job_logger.error(f"Bounds validation failed: {str(e)}")
+            raise
 
         # Move G-code to final location
         slices_dir = Path("/data/slices")
@@ -1497,7 +2296,15 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 datetime.utcnow(),
                 err_text
             )
-        code = 400 if "unstable for this model" in err_text else 500
+        low = err_text.lower()
+        code = 500
+        if (
+            "unstable for this model" in low
+            or "invalid object transforms" in low
+            or "outside build volume" in low
+            or "fully inside the print volume" in low
+        ):
+            code = 400
         raise HTTPException(status_code=code, detail=f"Plate slicing failed: {err_text}")
 
     except Exception as e:
@@ -1658,6 +2465,135 @@ async def get_upload_plates(upload_id: int):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse plates: {str(e)}")
+
+
+@router.get("/uploads/{upload_id}/layout")
+async def get_upload_layout(upload_id: int, plate_id: Optional[int] = Query(None, ge=1)):
+    """Return editable top-level build-item layout metadata for M33 (move/rotate)."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            """
+            SELECT id, filename, file_path, is_multi_plate
+            FROM uploads
+            WHERE id = $1
+            """,
+            upload_id,
+        )
+        if not upload:
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+    source_3mf = Path(upload["file_path"])
+    if not source_3mf.exists():
+        raise HTTPException(status_code=404, detail="Source 3MF file not found")
+
+    started = time.perf_counter()
+    try:
+        items = list_build_items_3mf(source_3mf, plate_id=plate_id)
+        printer_profile = get_printer_profile("snapmaker_u1")
+        validator = PlateValidator(printer_profile)
+
+        validation = validator.validate_3mf_bounds(source_3mf, plate_id=plate_id)
+        bounds = validation.get("bounds")
+        placement_frame = _derive_layout_placement_frame(
+            items,
+            source_3mf=source_3mf,
+            is_multi_plate=bool(upload["is_multi_plate"]),
+            plate_id=plate_id,
+            bed_x=float(printer_profile.build_volume_x),
+            bed_y=float(printer_profile.build_volume_y),
+            validation_bounds=bounds if isinstance(bounds, dict) else None,
+        )
+
+        return {
+            "upload_id": upload_id,
+            "filename": upload["filename"],
+            "is_multi_plate": bool(upload["is_multi_plate"]),
+            "selected_plate_id": plate_id,
+            "build_volume": {
+                "x": printer_profile.build_volume_x,
+                "y": printer_profile.build_volume_y,
+                "z": printer_profile.build_volume_z,
+            },
+            "validation": {
+                "fits": validation.get("fits", False),
+                "warnings": validation.get("warnings", []),
+                "bounds": bounds,
+            },
+            "timing_ms": {
+                "total": round((time.perf_counter() - started) * 1000, 1),
+            },
+            "placement_frame": placement_frame,
+            "objects": items,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load layout metadata: {str(e)}")
+
+
+@router.get("/uploads/{upload_id}/geometry")
+async def get_upload_geometry(
+    upload_id: int,
+    plate_id: Optional[int] = Query(None, ge=1),
+    build_item_index: Optional[int] = Query(None, ge=1),
+    include_modifiers: bool = Query(False),
+    lod: str = Query("placement_low"),
+):
+    """Return per-build-item local mesh geometry for the placement viewer (M33/M36 shared)."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            """
+            SELECT id, filename, file_path, is_multi_plate
+            FROM uploads
+            WHERE id = $1
+            """,
+            upload_id,
+        )
+        if not upload:
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+    source_3mf = Path(upload["file_path"])
+    if not source_3mf.exists():
+        raise HTTPException(status_code=404, detail="Source 3MF file not found")
+
+    started = time.perf_counter()
+    max_triangles = 10000
+    lod_key = str(lod or "placement_low").strip().lower()
+    if lod_key in ("low", "placement_low", "preview"):
+        max_triangles = 5000
+    elif lod_key in ("high", "placement_high", "detail"):
+        max_triangles = 15000
+    elif lod_key in ("full",):
+        max_triangles = 50000
+
+    try:
+        geom = list_build_item_geometry_3mf(
+            source_3mf,
+            plate_id=plate_id,
+            build_item_index=build_item_index,
+            max_triangles_per_object=max_triangles,
+            include_modifiers=include_modifiers,
+        )
+        return {
+            "upload_id": upload_id,
+            "filename": upload["filename"],
+            "is_multi_plate": bool(upload["is_multi_plate"]),
+            "selected_plate_id": plate_id,
+            "selected_build_item_index": build_item_index,
+            "include_modifiers": bool(include_modifiers),
+            "lod": lod_key,
+            "max_triangles_per_object": max_triangles,
+            "timing_ms": {
+                "total": round((time.perf_counter() - started) * 1000, 1),
+            },
+            **geom,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load geometry: {str(e)}")
 
 
 @router.get("/uploads/{upload_id}/plates/{plate_id}/preview")
@@ -1997,6 +2933,9 @@ def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
     current_layer = -1
     current_z = 0.0
     last_x, last_y = 0.0, 0.0
+    last_e = 0.0
+    has_last_e = False
+    relative_extrusion = False
     layer_moves = []
 
     pattern = re.compile(r'([GXYZEF])([\d.-]+)')
@@ -2045,8 +2984,28 @@ def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
                 if len(layers) >= count:
                     break
 
-                # Parse G1 move commands
-                if line.startswith("G1 "):
+                # Extrusion mode
+                if line.startswith("M82"):
+                    relative_extrusion = False
+                    continue
+                if line.startswith("M83"):
+                    relative_extrusion = True
+                    continue
+
+                # Extruder position reset
+                if line.startswith("G92 "):
+                    parts = dict(pattern.findall(line))
+                    if 'E' in parts:
+                        try:
+                            last_e = float(parts['E'])
+                            has_last_e = True
+                        except ValueError:
+                            pass
+                    continue
+
+                # Parse motion commands (must track G0/G2/G3 too to avoid stale XY
+                # causing fake long extrusion bridges in the viewer layer parser).
+                if line.startswith("G0 ") or line.startswith("G1 ") or line.startswith("G2 ") or line.startswith("G3 "):
                     parts = dict(pattern.findall(line))
 
                     # Get coordinates, use last known if not specified
@@ -2058,18 +3017,44 @@ def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
                     if z != current_z:
                         current_z = z
 
+                    is_arc = line.startswith("G2 ") or line.startswith("G3 ")
                     # Only record XY moves (ignore Z-only moves)
                     if x != last_x or y != last_y:
-                        # Extrude if E is present and not negative (retraction)
-                        is_extrude = e is not None and float(e) >= 0
-                        layer_moves.append({
-                            "type": "extrude" if is_extrude else "travel",
-                            "x1": last_x,
-                            "y1": last_y,
-                            "x2": x,
-                            "y2": y
-                        })
+                        is_extrude = False
+                        if (line.startswith("G1 ") or is_arc) and e is not None:
+                            try:
+                                e_value = float(e)
+                                if relative_extrusion:
+                                    # In relative mode, only positive E deposits material.
+                                    is_extrude = e_value > 1e-6
+                                else:
+                                    # In absolute mode, compare against last known E.
+                                    if has_last_e:
+                                        is_extrude = e_value > (last_e + 1e-6)
+                                    else:
+                                        is_extrude = False
+                            except ValueError:
+                                is_extrude = False
+                        # The lightweight layer API currently returns straight line segments.
+                        # Rendering G2/G3 arcs as one straight endpoint chord creates very
+                        # misleading long lines (especially in wipe/travel paths). Track arc
+                        # endpoints for parser state, but skip emitting them until we add
+                        # proper arc tessellation in this endpoint.
+                        if not is_arc:
+                            layer_moves.append({
+                                "type": "extrude" if is_extrude else "travel",
+                                "x1": last_x,
+                                "y1": last_y,
+                                "x2": x,
+                                "y2": y
+                            })
 
+                    if e is not None:
+                        try:
+                            last_e = float(e)
+                            has_last_e = True
+                        except ValueError:
+                            pass
                     last_x, last_y = x, y
 
             # Add final layer if in range

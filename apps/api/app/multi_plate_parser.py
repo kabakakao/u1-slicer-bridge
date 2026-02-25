@@ -10,8 +10,132 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import logging
+import math
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def _read_bambu_assemble_transforms_by_object_id_from_zip(zf: zipfile.ZipFile) -> Dict[str, List[float]]:
+    """Best-effort parse of Metadata/model_settings.config assemble_item transforms keyed by object_id."""
+    try:
+        if "Metadata/model_settings.config" not in zf.namelist():
+            return {}
+        raw = zf.read("Metadata/model_settings.config").decode("utf-8", errors="ignore")
+    except Exception:
+        return {}
+
+    by_object: Dict[str, List[float]] = {}
+    duplicates: set[str] = set()
+    tag_re = re.compile(r"<assemble_item\b(?P<tag>[^>]*)/?>", re.IGNORECASE | re.DOTALL)
+    transform_re = re.compile(r"\btransform=(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
+    object_re = re.compile(r"\bobject_id=(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
+    for m in tag_re.finditer(raw):
+        tag = m.group("tag") or ""
+        mo = object_re.search(tag)
+        mt = transform_re.search(tag)
+        if not mo or not mt:
+            continue
+        object_id = str(mo.group(2))
+        parts = (mt.group(2) or "").strip().split()
+        if len(parts) != 12:
+            continue
+        try:
+            vals = [float(v) for v in parts]
+        except ValueError:
+            continue
+        if object_id in by_object:
+            duplicates.add(object_id)
+        else:
+            by_object[object_id] = vals
+    for oid in duplicates:
+        by_object.pop(oid, None)
+    return by_object
+
+
+def _parse_3mf_transform_values(transform_str: str, default_identity: bool = True) -> List[float]:
+    """Parse a 3MF transform into 3x4 row-major [3x3 | tx ty tz]."""
+    try:
+        values = [float(x) for x in (transform_str or "").split()]
+    except ValueError:
+        values = []
+
+    if len(values) == 12:
+        return values
+
+    if len(values) == 16:
+        return [
+            values[0], values[1], values[2],
+            values[4], values[5], values[6],
+            values[8], values[9], values[10],
+            values[12], values[13], values[14],
+        ]
+
+    if default_identity:
+        # 3MF 3x4 row-major affine: [m00 m01 m02 m10 m11 m12 m20 m21 m22 tx ty tz]
+        return [1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0,
+                0.0, 0.0, 0.0]
+    return []
+
+
+def _transform_point_3x4(point: List[float], t: List[float]) -> List[float]:
+    x, y, z = point
+    return [
+        t[0] * x + t[1] * y + t[2] * z + t[9],
+        t[3] * x + t[4] * y + t[5] * z + t[10],
+        t[6] * x + t[7] * y + t[8] * z + t[11],
+    ]
+
+
+def _compose_affine_3x4(a: List[float], b: List[float]) -> List[float]:
+    """Return a∘b (apply b, then a) for 3MF 3x4 affine matrices."""
+    return [
+        a[0] * b[0] + a[1] * b[3] + a[2] * b[6],
+        a[0] * b[1] + a[1] * b[4] + a[2] * b[7],
+        a[0] * b[2] + a[1] * b[5] + a[2] * b[8],
+        a[3] * b[0] + a[4] * b[3] + a[5] * b[6],
+        a[3] * b[1] + a[4] * b[4] + a[5] * b[7],
+        a[3] * b[2] + a[4] * b[5] + a[5] * b[8],
+        a[6] * b[0] + a[7] * b[3] + a[8] * b[6],
+        a[6] * b[1] + a[7] * b[4] + a[8] * b[7],
+        a[6] * b[2] + a[7] * b[5] + a[8] * b[8],
+        a[0] * b[9] + a[1] * b[10] + a[2] * b[11] + a[9],
+        a[3] * b[9] + a[4] * b[10] + a[5] * b[11] + a[10],
+        a[6] * b[9] + a[7] * b[10] + a[8] * b[11] + a[11],
+    ]
+
+
+def _apply_affine_to_bounds_3x4(bmin: List[float], bmax: List[float], t: List[float]) -> Tuple[List[float], List[float]]:
+    """Transform an AABB by a 3x4 affine transform and return enclosing AABB."""
+    corners = []
+    for x in (bmin[0], bmax[0]):
+        for y in (bmin[1], bmax[1]):
+            for z in (bmin[2], bmax[2]):
+                corners.append(_transform_point_3x4([x, y, z], t))
+
+    out_min = [min(p[i] for p in corners) for i in range(3)]
+    out_max = [max(p[i] for p in corners) for i in range(3)]
+    return out_min, out_max
+
+
+def _transform_3x4_to_4x4(transform_values: List[float]) -> List[float]:
+    if len(transform_values) != 12:
+        return [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0]
+    # Existing repo convention appends identity bottom row after 12 values.
+    return transform_values + [0.0, 0.0, 0.0, 1.0]
+
+
+def _estimate_rotation_z_deg_from_3x4(t: List[float]) -> float:
+    """Estimate planar Z rotation from affine matrix (best-effort)."""
+    try:
+        angle = math.degrees(math.atan2(t[3], t[0]))
+        if abs(angle) < 1e-9:
+            return 0.0
+        return angle
+    except Exception:
+        return 0.0
 
 
 class PlateInfo:
@@ -160,18 +284,8 @@ def parse_multi_plate_3mf(file_path: Path) -> Tuple[List[PlateInfo], bool]:
                 printable = printable_str != "0"
                 
                 # Parse transform matrix (default to identity if not present)
-                transform_str = item.get("transform", "1 0 0 0 1 0 0 0 1 0 0 0 1")
-                transform_values = [float(x) for x in transform_str.split()]
-                
-                # Convert 3x4 matrix (12 values) to 4x4 matrix (16 values)
-                if len(transform_values) == 12:
-                    # 3x4 matrix in row-major: [m00,m01,m02,m03, m10,m11,m12,m13, m20,m21,m22,m23]
-                    # e.g., [1,0,0,135, 0,1,0,135, 0,0,1,10]
-                    # This should become a 4x4 with identity bottom row
-                    transform_values = transform_values + [0.0, 0.0, 0.0, 1.0]
-                elif len(transform_values) != 16:
-                    logger.warning(f"Invalid transform matrix for plate {i+1} (got {len(transform_values)} values), using identity")
-                    transform_values = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0]
+                parsed_3x4 = _parse_3mf_transform_values(item.get("transform", ""))
+                transform_values = _transform_3x4_to_4x4(parsed_3x4)
                 
                 # Name priority: Bambu plate name > Bambu object name > 3MF object name > "Plate N"
                 plate_num = i + 1
@@ -201,6 +315,352 @@ def parse_multi_plate_3mf(file_path: Path) -> Tuple[List[PlateInfo], bool]:
         raise ValueError("Invalid .3mf file: missing 3D/3dmodel.model")
         
     return plates, len(plates) > 1
+
+
+def list_build_items_3mf(file_path: Path, plate_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Return editable top-level build items for a 3MF file.
+
+    M33 foundation uses top-level build items as transform targets.
+    """
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            model_xml = zf.read("3D/3dmodel.model")
+            root = ET.fromstring(model_xml)
+            ns = {
+                "m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
+                "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06",
+            }
+
+            # Best-effort object names from model resources
+            object_names: Dict[str, str] = {}
+            object_elems: Dict[str, Any] = {}
+            object_bounds_cache: Dict[str, Optional[Tuple[List[float], List[float]]]] = {}
+            resources = root.find("m:resources", ns)
+            if resources is not None:
+                for obj in resources.findall("m:object", ns):
+                    oid = obj.get("id")
+                    if not oid:
+                        continue
+                    object_elems[oid] = obj
+                    object_names[oid] = (obj.get("name") or f"Object {oid}").strip() or f"Object {oid}"
+
+            bambu_assemble_by_object = _read_bambu_assemble_transforms_by_object_id_from_zip(zf)
+
+            build = root.find("m:build", ns)
+            if build is None:
+                return []
+
+            items = build.findall("m:item", ns)
+            if plate_id is not None and (plate_id < 1 or plate_id > len(items)):
+                raise ValueError(f"Plate {plate_id} not found (file has {len(items)} items)")
+
+            target_indices = [plate_id] if plate_id is not None else list(range(1, len(items) + 1))
+            results: List[Dict[str, Any]] = []
+
+            for idx in target_indices:
+                item = items[idx - 1]
+                object_id = item.get("objectid") or str(idx)
+                printable = (item.get("printable", "1") != "0")
+                t3 = _parse_3mf_transform_values(item.get("transform", ""))
+                tx, ty, tz = t3[9], t3[10], t3[11]
+                local_bounds_dict = None
+                world_bounds_dict = None
+                assemble_translation = None
+                assemble_world_bounds_dict = None
+                if object_id in object_elems:
+                    if object_id not in object_bounds_cache:
+                        object_bounds_cache[object_id] = _scan_object_bounds(zf, object_elems[object_id], ns)
+                    cached_bounds = object_bounds_cache.get(object_id)
+                    if cached_bounds is not None:
+                        bmin, bmax = cached_bounds
+                        tbmin, tbmax = _apply_affine_to_bounds_3x4(bmin, bmax, t3)
+                        local_bounds_dict = {
+                            "min": [float(bmin[0]), float(bmin[1]), float(bmin[2])],
+                            "max": [float(bmax[0]), float(bmax[1]), float(bmax[2])],
+                            "size": [
+                                float(bmax[0] - bmin[0]),
+                                float(bmax[1] - bmin[1]),
+                                float(bmax[2] - bmin[2]),
+                            ],
+                        }
+                        world_bounds_dict = {
+                            "min": [float(tbmin[0]), float(tbmin[1]), float(tbmin[2])],
+                            "max": [float(tbmax[0]), float(tbmax[1]), float(tbmax[2])],
+                            "size": [
+                                float(tbmax[0] - tbmin[0]),
+                                float(tbmax[1] - tbmin[1]),
+                                float(tbmax[2] - tbmin[2]),
+                            ],
+                        }
+                        at3 = bambu_assemble_by_object.get(str(object_id))
+                        if at3 is not None:
+                            assemble_translation = [float(at3[9]), float(at3[10]), float(at3[11])]
+                            abmin, abmax = _apply_affine_to_bounds_3x4(bmin, bmax, at3)
+                            assemble_world_bounds_dict = {
+                                "min": [float(abmin[0]), float(abmin[1]), float(abmin[2])],
+                                "max": [float(abmax[0]), float(abmax[1]), float(abmax[2])],
+                                "size": [
+                                    float(abmax[0] - abmin[0]),
+                                    float(abmax[1] - abmin[1]),
+                                    float(abmax[2] - abmin[2]),
+                                ],
+                            }
+                results.append({
+                    "build_item_index": idx,
+                    "plate_id": idx,  # build-item index is the "plate" index in the current parser model
+                    "object_id": object_id,
+                    "name": object_names.get(object_id, f"Object {object_id}"),
+                    "printable": printable,
+                    "transform_3x4": t3,
+                    "transform": _transform_3x4_to_4x4(t3),
+                    "translation": [tx, ty, tz],
+                    "assemble_translation": assemble_translation,
+                    "rotation_z_deg": _estimate_rotation_z_deg_from_3x4(t3),
+                    "local_bounds": local_bounds_dict,
+                    "world_bounds": world_bounds_dict,
+                    "assemble_world_bounds": assemble_world_bounds_dict,
+                })
+
+            return results
+    except zipfile.BadZipFile:
+        raise ValueError("Invalid .3mf file: not a valid ZIP archive")
+    except ET.ParseError:
+        raise ValueError("Invalid .3mf file: malformed XML")
+    except KeyError:
+        raise ValueError("Invalid .3mf file: missing 3D/3dmodel.model")
+
+
+def _collect_object_mesh_geometry(
+    zf: zipfile.ZipFile,
+    resources_by_model: Dict[str, Dict[str, Any]],
+    model_path: str,
+    object_id: str,
+    ns: Dict[str, str],
+    transform_3x4: Optional[List[float]] = None,
+    depth: int = 0,
+    include_modifiers: bool = True,
+) -> Tuple[List[List[float]], List[List[int]]]:
+    """Recursively collect object mesh triangles in local object space."""
+    if depth > 12:
+        raise ValueError("3MF component nesting too deep")
+
+    obj_map = resources_by_model.get(model_path) or {}
+    obj_elem = obj_map.get(str(object_id))
+    if obj_elem is None:
+        return [], []
+
+    obj_type = (obj_elem.get("type") or "model").strip().lower()
+    if not include_modifiers and obj_type != "model":
+        # Hide modifier/support/other helper meshes from placement viewer by default.
+        return [], []
+
+    t = transform_3x4 or _parse_3mf_transform_values("", default_identity=True)
+    vertices_out: List[List[float]] = []
+    triangles_out: List[List[int]] = []
+
+    mesh = obj_elem.find("m:mesh", ns)
+    if mesh is not None:
+        vertices_elem = mesh.find("m:vertices", ns)
+        triangles_elem = mesh.find("m:triangles", ns)
+        local_vertices: List[List[float]] = []
+        if vertices_elem is not None:
+            for v in vertices_elem.findall("m:vertex", ns):
+                pt = [float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))]
+                local_vertices.append(_transform_point_3x4(pt, t))
+        if triangles_elem is None or not local_vertices:
+            return local_vertices, []
+
+        base_index = 0
+        vertices_out.extend(local_vertices)
+        for tri in triangles_elem.findall("m:triangle", ns):
+            try:
+                v1 = int(tri.get("v1", "0"))
+                v2 = int(tri.get("v2", "0"))
+                v3 = int(tri.get("v3", "0"))
+            except ValueError:
+                continue
+            if v1 < 0 or v2 < 0 or v3 < 0:
+                continue
+            if v1 >= len(local_vertices) or v2 >= len(local_vertices) or v3 >= len(local_vertices):
+                continue
+            triangles_out.append([base_index + v1, base_index + v2, base_index + v3])
+        return vertices_out, triangles_out
+
+    components = obj_elem.find("m:components", ns)
+    if components is None:
+        return [], []
+
+    p_ns = ns.get("p")
+    for comp in components.findall("m:component", ns):
+        ref_object_id = comp.get("objectid")
+        if not ref_object_id:
+            continue
+        ref_path_attr = comp.get(f"{{{p_ns}}}path") if p_ns else None
+        ref_model_path = model_path
+        if ref_path_attr:
+            ref_model_path = ref_path_attr.lstrip("/")
+        comp_t = _parse_3mf_transform_values(comp.get("transform", ""))
+        child_t = _compose_affine_3x4(t, comp_t)
+
+        child_vertices, child_triangles = _collect_object_mesh_geometry(
+            zf,
+            resources_by_model,
+            ref_model_path,
+            ref_object_id,
+            ns,
+            transform_3x4=child_t,
+            depth=depth + 1,
+            include_modifiers=include_modifiers,
+        )
+        if not child_vertices:
+            continue
+        base_index = len(vertices_out)
+        vertices_out.extend(child_vertices)
+        for tri in child_triangles:
+            triangles_out.append([base_index + tri[0], base_index + tri[1], base_index + tri[2]])
+
+    return vertices_out, triangles_out
+
+
+def list_build_item_geometry_3mf(
+    file_path: Path,
+    plate_id: Optional[int] = None,
+    build_item_index: Optional[int] = None,
+    max_triangles_per_object: int = 20000,
+    include_modifiers: bool = True,
+) -> Dict[str, Any]:
+    """Return per-build-item local mesh geometry for the placement viewer."""
+    try:
+        def decimate_mesh(
+            vertices_in: List[List[float]],
+            triangles_in: List[List[int]],
+            max_triangles: int,
+        ) -> Tuple[List[List[float]], List[List[int]], bool]:
+            if max_triangles <= 0 or len(triangles_in) <= max_triangles:
+                return vertices_in, triangles_in, False
+
+            step = max(1, int(math.ceil(len(triangles_in) / float(max_triangles))))
+            sampled = triangles_in[::step]
+            if len(sampled) > max_triangles:
+                sampled = sampled[:max_triangles]
+
+            used: Dict[int, int] = {}
+            vertices_out: List[List[float]] = []
+            triangles_out: List[List[int]] = []
+            for tri in sampled:
+                remapped: List[int] = []
+                for old_idx in tri:
+                    if old_idx not in used:
+                        used[old_idx] = len(vertices_out)
+                        vertices_out.append(vertices_in[old_idx])
+                    remapped.append(used[old_idx])
+                triangles_out.append(remapped)
+            return vertices_out, triangles_out, True
+
+        with zipfile.ZipFile(file_path, "r") as zf:
+            ns = {
+                "m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
+                "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06",
+            }
+
+            resources_by_model: Dict[str, Dict[str, Any]] = {}
+
+            def ensure_resources(model_path: str) -> Dict[str, Any]:
+                if model_path in resources_by_model:
+                    return resources_by_model[model_path]
+                xml_bytes = zf.read(model_path)
+                root = ET.fromstring(xml_bytes)
+                resources = root.find("m:resources", ns)
+                obj_map: Dict[str, Any] = {}
+                if resources is not None:
+                    for obj in resources.findall("m:object", ns):
+                        oid = obj.get("id")
+                        if oid:
+                            obj_map[oid] = obj
+                resources_by_model[model_path] = obj_map
+                return obj_map
+
+            main_model_path = "3D/3dmodel.model"
+            main_xml = zf.read(main_model_path)
+            root = ET.fromstring(main_xml)
+            ensure_resources(main_model_path)
+            for name in zf.namelist():
+                if not name.lower().endswith(".model") or name == main_model_path:
+                    continue
+                try:
+                    ensure_resources(name)
+                except Exception:
+                    continue
+
+            build = root.find("m:build", ns)
+            if build is None:
+                return {"objects": [], "max_triangles_per_object": max_triangles_per_object}
+            items = build.findall("m:item", ns)
+            if plate_id is not None and (plate_id < 1 or plate_id > len(items)):
+                raise ValueError(f"Plate {plate_id} not found (file has {len(items)} items)")
+            if build_item_index is not None and (build_item_index < 1 or build_item_index > len(items)):
+                raise ValueError(f"Build item {build_item_index} not found (file has {len(items)} items)")
+
+            target_indices = [plate_id] if plate_id is not None else list(range(1, len(items) + 1))
+            if build_item_index is not None:
+                if build_item_index not in target_indices:
+                    raise ValueError(
+                        f"Build item {build_item_index} is not available in selected scope"
+                    )
+                target_indices = [build_item_index]
+            out_objects: List[Dict[str, Any]] = []
+
+            # Preload any externally referenced model files from top-level objects on demand.
+            for idx in target_indices:
+                item = items[idx - 1]
+                object_id = item.get("objectid")
+                if not object_id:
+                    continue
+
+                try:
+                    vertices, triangles = _collect_object_mesh_geometry(
+                        zf,
+                        resources_by_model,
+                        main_model_path,
+                        object_id,
+                        ns,
+                        include_modifiers=include_modifiers,
+                    )
+                except KeyError:
+                    vertices, triangles = [], []
+                except ET.ParseError:
+                    vertices, triangles = [], []
+
+                original_vertex_count = len(vertices)
+                original_triangle_count = len(triangles)
+                vertices, triangles, decimated = decimate_mesh(vertices, triangles, max_triangles_per_object)
+                too_large = original_triangle_count > max_triangles_per_object
+
+                out_objects.append({
+                    "build_item_index": idx,
+                    "object_id": object_id,
+                    "has_mesh": bool(vertices and triangles),
+                    "mesh_too_large": too_large,
+                    "mesh_decimated": bool(decimated),
+                    "vertex_count": len(vertices),
+                    "triangle_count": len(triangles),
+                    "original_vertex_count": original_vertex_count,
+                    "original_triangle_count": original_triangle_count,
+                    "vertices": vertices,
+                    "triangles": triangles,
+                    "include_modifiers": bool(include_modifiers),
+                })
+
+            return {
+                "objects": out_objects,
+                "max_triangles_per_object": max_triangles_per_object,
+            }
+    except zipfile.BadZipFile:
+        raise ValueError("Invalid .3mf file: not a valid ZIP archive")
+    except ET.ParseError:
+        raise ValueError("Invalid .3mf file: malformed XML")
+    except KeyError:
+        raise ValueError("Invalid .3mf file: missing 3D/3dmodel.model")
 
 
 def extract_plate_objects(file_path: Path, target_plate_id: int) -> List[Dict[str, Any]]:
@@ -380,12 +840,7 @@ def _scan_object_bounds(zf: zipfile.ZipFile, obj_elem, ns: Dict[str, str]) -> Op
             continue
 
         # Parse component transform (offset applied to this component's geometry)
-        comp_transform = component.get("transform", "")
-        tx, ty, tz = 0.0, 0.0, 0.0
-        if comp_transform:
-            vals = comp_transform.split()
-            if len(vals) >= 12:
-                tx, ty, tz = float(vals[9]), float(vals[10]), float(vals[11])
+        comp_t = _parse_3mf_transform_values(component.get("transform", ""))
 
         ref_mesh_elem = None
         if ref_path:
@@ -416,10 +871,10 @@ def _scan_object_bounds(zf: zipfile.ZipFile, obj_elem, ns: Dict[str, str]) -> Op
             result = _scan_vertex_bounds_from_element(ref_mesh_elem, ns)
             if result:
                 bmin, bmax = result
-                # Apply component transform offset to bounds
-                for i, offset in enumerate([tx, ty, tz]):
-                    if bmin[i] + offset < combined_min[i]: combined_min[i] = bmin[i] + offset
-                    if bmax[i] + offset > combined_max[i]: combined_max[i] = bmax[i] + offset
+                tbmin, tbmax = _apply_affine_to_bounds_3x4(bmin, bmax, comp_t)
+                for i in range(3):
+                    if tbmin[i] < combined_min[i]: combined_min[i] = tbmin[i]
+                    if tbmax[i] > combined_max[i]: combined_max[i] = tbmax[i]
                 found = True
 
     return (combined_min, combined_max) if found else None
@@ -486,19 +941,12 @@ def _calculate_xml_bounds(file_path: Path,
 
             bmin, bmax = bounds
 
-            # Apply item transform (translation component)
-            transform_str = item.get("transform", "1 0 0 0 1 0 0 0 1 0 0 0")
-            transform_values = [float(x) for x in transform_str.split()]
-            if len(transform_values) >= 12:
-                tx, ty, tz = transform_values[9], transform_values[10], transform_values[11]
-            else:
-                tx = ty = tz = 0.0
+            item_t = _parse_3mf_transform_values(item.get("transform", ""))
+            tbmin, tbmax = _apply_affine_to_bounds_3x4(bmin, bmax, item_t)
 
-            for i, (lo, hi, t) in enumerate(zip(bmin, bmax, [tx, ty, tz])):
-                val_min = lo + t
-                val_max = hi + t
-                if val_min < global_min[i]: global_min[i] = val_min
-                if val_max > global_max[i]: global_max[i] = val_max
+            for i in range(3):
+                if tbmin[i] < global_min[i]: global_min[i] = tbmin[i]
+                if tbmax[i] > global_max[i]: global_max[i] = tbmax[i]
             found = True
 
     if not found:

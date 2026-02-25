@@ -447,6 +447,240 @@
                         </div>
                     </template>
 
+                    <!-- Object Placement (M33/M36 shared 3D viewer foundation) -->
+                    <div x-ref="placementPanel"
+                         x-init="initPlacementPanelObserver()"
+                         class="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                        <div class="flex items-center justify-between gap-3 mb-2">
+                            <div>
+                                <h3 class="text-sm font-semibold text-gray-800">Object Placement</h3>
+                                <p class="text-xs text-gray-500">Move and rotate objects before slicing (X/Y + Z rotation).</p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <label class="inline-flex items-center gap-1.5 text-xs text-gray-600 bg-white border border-gray-300 rounded px-2 py-1">
+                                    <input type="checkbox"
+                                           x-model="showPlacementModifiers"
+                                           @change="togglePlacementModifiers()"
+                                           class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                                    <span>Show modifiers</span>
+                                </label>
+                                <div class="inline-flex rounded border border-gray-300 overflow-hidden bg-white">
+                                    <button @click="setPlacementInteractionMode('move')"
+                                            :disabled="isObjectPlacementTransformApproximate()"
+                                            :class="placementInteractionMode === 'move' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100'"
+                                            class="px-2.5 py-1.5 text-xs border-r border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                                        Move
+                                    </button>
+                                    <button @click="setPlacementInteractionMode('rotate')"
+                                            :disabled="isObjectPlacementTransformApproximate()"
+                                            :class="placementInteractionMode === 'rotate' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100'"
+                                            class="px-2.5 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed">
+                                        Rotate
+                                    </button>
+                                </div>
+                                <button @click="resetAllObjectTransforms()"
+                                        :disabled="!objectTransformEdits || Object.keys(objectTransformEdits).length === 0"
+                                        class="px-2.5 py-1.5 text-xs rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-50">
+                                    Reset All
+                                </button>
+                            </div>
+                        </div>
+
+                        <template x-if="objectLayoutLoading">
+                            <div class="text-xs text-blue-600 flex items-center gap-2 py-1">
+                                <svg class="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                                </svg>
+                                Loading object layout...
+                            </div>
+                        </template>
+
+                        <template x-if="!objectLayoutLoading && objectLayoutError">
+                            <div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1"
+                                 x-text="objectLayoutError"></div>
+                        </template>
+
+                        <template x-if="!objectLayoutLoading && objectLayout && objectLayout.validation">
+                            <div class="mb-2 text-xs"
+                                 :class="objectLayout.validation.fits ? 'text-green-700' : 'text-red-700'">
+                                <span x-text="objectLayout.validation.fits ? 'Layout fits build volume' : 'Layout warnings present (backend validates again at slice time)'"></span>
+                            </div>
+                        </template>
+
+                        <template x-if="!objectLayoutLoading && getObjectPlacementTransformWarning()">
+                            <div class="mb-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1"
+                                 x-text="getObjectPlacementTransformWarning()"></div>
+                        </template>
+
+                        <template x-if="!objectLayoutLoading && objectLayout && objectLayout.objects && objectLayout.objects.length > 0">
+                            <div class="mb-3"
+                                 x-init="initPlacementViewer()"
+                                 x-effect="sliceSettings.enable_prime_tower, sliceSettings.prime_tower_width, sliceSettings.prime_tower_brim_width, sliceSettings.wipe_tower_x, sliceSettings.wipe_tower_y; schedulePlacementViewerRefresh()">
+                                <div class="relative w-full h-64 md:h-80 rounded-lg border border-gray-300 bg-slate-100 overflow-hidden">
+                                    <canvas x-ref="placementViewerCanvas" class="w-full h-full block touch-none"></canvas>
+                                    <div class="absolute top-2 left-2 px-2 py-1 rounded bg-white/90 border border-gray-200 text-[11px] text-gray-600 max-w-[95%]">
+                                        <span x-show="placementInteractionMode === 'move'">Move mode: left-drag object to move; left-drag empty space to orbit.</span>
+                                        <span x-show="placementInteractionMode === 'rotate'">Rotate mode: left-drag object to rotate; hold Shift for 15 degree snap.</span>
+                                        <span> Wheel zoom; right-drag pan; click object to select.</span>
+                                        <span x-show="isObjectPlacementTransformApproximate()"> Object move/rotate is disabled for this plate (approximate mapping).</span>
+                                    </div>
+                                </div>
+                                <div class="mt-1 text-[11px] text-gray-500">
+                                    3D pre-slice placement view. Modifier/helper meshes are hidden by default (toggle Show modifiers). Falls back to proxies for large or unsupported models.
+                                </div>
+                                <div class="mt-1 text-[11px] text-gray-500" x-show="objectGeometryLoading" x-cloak>
+                                    Loading preview mesh <span x-text="objectGeometryLod === 'placement_low' ? '(refining detail...)' : '...'"></span>
+                                </div>
+                                <div class="mt-1 text-[11px] text-gray-400" x-show="placementLoadMetrics && !objectLayoutLoading" x-cloak>
+                                    <span>
+                                        Perf:
+                                        layout <span x-text="placementLoadMetrics.layout_fetch_ms ?? '-'"></span>ms
+                                        <template x-if="placementLoadMetrics.geometry_low_fetch_ms != null">
+                                            <span> · mesh(low) <span x-text="placementLoadMetrics.geometry_low_fetch_ms"></span>ms</span>
+                                        </template>
+                                        <template x-if="placementLoadMetrics.geometry_high_fetch_ms != null">
+                                            <span> · mesh(high) <span x-text="placementLoadMetrics.geometry_high_fetch_ms"></span>ms</span>
+                                        </template>
+                                        <template x-if="placementLoadMetrics.viewer_scene && placementLoadMetrics.viewer_scene.rebuild_ms != null">
+                                            <span> · scene <span x-text="placementLoadMetrics.viewer_scene.rebuild_ms"></span>ms</span>
+                                        </template>
+                                    </span>
+                                </div>
+                                <div class="mt-2 p-2 bg-white border border-gray-200 rounded-lg" x-show="sliceSettings.enable_prime_tower" x-cloak>
+                                    <div class="flex items-center justify-between gap-2 mb-2">
+                                        <div>
+                                            <div class="text-xs font-medium text-gray-800">Prime Tower Preview</div>
+                                            <div class="text-[11px] text-gray-500">
+                                                Drag the orange tower in Move mode to set explicit tower position.
+                                                <span x-show="!(Number.isFinite(Number(sliceSettings.wipe_tower_x)) && Number.isFinite(Number(sliceSettings.wipe_tower_y)))">Currently showing an estimated auto position.</span>
+                                            </div>
+                                            <div class="text-[11px] text-amber-700 mt-1"
+                                                 x-show="selectedUpload?.is_multi_plate && (detectedColors?.length || 0) > 1"
+                                                 x-cloak>
+                                                Snapmaker Orca may ignore manual prime tower position for some multicolour Bambu plate slices (best-effort preview).
+                                            </div>
+                                        </div>
+                                        <button @click="resetPrimeTowerPosition()"
+                                                class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100">
+                                            Reset Tower Pos
+                                        </button>
+                                    </div>
+                                    <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                        <div>
+                                            <label class="text-[11px] text-gray-600 block mb-1">Tower Width (mm)</label>
+                                            <input type="number" min="10" max="100"
+                                                   x-model.number="sliceSettings.prime_tower_width"
+                                                   @input="onPrimeTowerPreviewSettingChanged()"
+                                                   class="w-full px-2 py-1.5 border border-gray-300 rounded text-xs">
+                                        </div>
+                                        <div>
+                                            <label class="text-[11px] text-gray-600 block mb-1">Tower Brim (mm)</label>
+                                            <input type="number" min="0" max="20"
+                                                   x-model.number="sliceSettings.prime_tower_brim_width"
+                                                   @input="onPrimeTowerPreviewSettingChanged()"
+                                                   class="w-full px-2 py-1.5 border border-gray-300 rounded text-xs">
+                                        </div>
+                                        <div>
+                                            <label class="text-[11px] text-gray-600 block mb-1">Tower X (mm)</label>
+                                            <input type="number" min="0" max="270" step="0.1"
+                                                   x-model.number="sliceSettings.wipe_tower_x"
+                                                   @input="onPrimeTowerPreviewSettingChanged()"
+                                                   placeholder="Auto"
+                                                   class="w-full px-2 py-1.5 border border-gray-300 rounded text-xs">
+                                        </div>
+                                        <div>
+                                            <label class="text-[11px] text-gray-600 block mb-1">Tower Y (mm)</label>
+                                            <input type="number" min="0" max="270" step="0.1"
+                                                   x-model.number="sliceSettings.wipe_tower_y"
+                                                   @input="onPrimeTowerPreviewSettingChanged()"
+                                                   placeholder="Auto"
+                                                   class="w-full px-2 py-1.5 border border-gray-300 rounded text-xs">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+
+                        <template x-if="!objectLayoutLoading && objectLayout && objectLayout.objects && objectLayout.objects.length > 0">
+                            <div class="space-y-2">
+                                <template x-for="obj in objectLayout.objects" :key="`layout-${obj.build_item_index}`">
+                                    <div class="p-2 bg-white border rounded-lg cursor-pointer"
+                                         :class="Number(selectedLayoutObject) === Number(obj.build_item_index) ? 'border-blue-300 ring-1 ring-blue-200' : 'border-gray-200'"
+                                         @click="selectLayoutObject(obj.build_item_index)">
+                                        <div class="flex items-center justify-between gap-2 mb-2">
+                                            <div class="min-w-0">
+                                                <div class="text-xs font-medium text-gray-800 truncate" x-text="obj.name || `Object ${obj.object_id}`"></div>
+                                                <div class="text-[11px] text-gray-500">
+                                                    Item <span x-text="obj.build_item_index"></span>
+                                                    <template x-if="selectedUpload?.is_multi_plate">
+                                                        <span> • Plate <span x-text="obj.plate_id"></span></span>
+                                                    </template>
+                                                </div>
+                                                <div class="text-[11px] text-gray-400"
+                                                     x-show="obj.local_bounds && obj.local_bounds.size"
+                                                     x-text="obj.local_bounds ? `${Math.round(obj.local_bounds.size[0] || 0)}×${Math.round(obj.local_bounds.size[1] || 0)}×${Math.round(obj.local_bounds.size[2] || 0)} mm` : ''"></div>
+                                            </div>
+                                            <div class="flex items-center gap-1">
+                                                <button @click.stop="selectLayoutObject(obj.build_item_index)"
+                                                        class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100">
+                                                    Select
+                                                </button>
+                                                <button @click.stop="resetObjectTransform(obj.build_item_index)"
+                                                        class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100">
+                                                    Reset
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div class="mb-2 flex flex-wrap gap-1">
+                                            <button @click.stop="nudgeObject(obj.build_item_index, 'x', -1)" :disabled="isObjectPlacementTransformApproximate()" class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed">X-1</button>
+                                            <button @click.stop="nudgeObject(obj.build_item_index, 'x', 1)" :disabled="isObjectPlacementTransformApproximate()" class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed">X+1</button>
+                                            <button @click.stop="nudgeObject(obj.build_item_index, 'y', -1)" :disabled="isObjectPlacementTransformApproximate()" class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed">Y-1</button>
+                                            <button @click.stop="nudgeObject(obj.build_item_index, 'y', 1)" :disabled="isObjectPlacementTransformApproximate()" class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed">Y+1</button>
+                                            <button @click.stop="rotateObjectBy(obj.build_item_index, -15)" :disabled="isObjectPlacementTransformApproximate()" class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed">-15°</button>
+                                            <button @click.stop="rotateObjectBy(obj.build_item_index, 15)" :disabled="isObjectPlacementTransformApproximate()" class="px-2 py-1 text-[11px] rounded border border-gray-300 bg-white hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed">+15°</button>
+                                        </div>
+
+                                        <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+                                            <label class="text-xs text-gray-600">
+                                                X Offset (mm)
+                                                <input type="number" step="1"
+                                                       :disabled="isObjectPlacementTransformApproximate()"
+                                                       :value="getObjectTransformValue(obj.build_item_index, 'translate_x_mm')"
+                                                       @input="setObjectTransformField(obj.build_item_index, 'translate_x_mm', $event.target.value)"
+                                                       @click.stop
+                                                       class="mt-1 w-full px-2 py-1.5 border border-gray-300 rounded text-sm disabled:bg-gray-100 disabled:text-gray-400">
+                                            </label>
+                                            <label class="text-xs text-gray-600">
+                                                Y Offset (mm)
+                                                <input type="number" step="1"
+                                                       :disabled="isObjectPlacementTransformApproximate()"
+                                                       :value="getObjectTransformValue(obj.build_item_index, 'translate_y_mm')"
+                                                       @input="setObjectTransformField(obj.build_item_index, 'translate_y_mm', $event.target.value)"
+                                                       @click.stop
+                                                       class="mt-1 w-full px-2 py-1.5 border border-gray-300 rounded text-sm disabled:bg-gray-100 disabled:text-gray-400">
+                                            </label>
+                                            <label class="text-xs text-gray-600">
+                                                Rotate Z (deg)
+                                                <input type="number" step="1"
+                                                       :disabled="isObjectPlacementTransformApproximate()"
+                                                       :value="getObjectTransformValue(obj.build_item_index, 'rotate_z_deg')"
+                                                       @input="setObjectTransformField(obj.build_item_index, 'rotate_z_deg', $event.target.value)"
+                                                       @click.stop
+                                                       class="mt-1 w-full px-2 py-1.5 border border-gray-300 rounded text-sm disabled:bg-gray-100 disabled:text-gray-400">
+                                            </label>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+
+                        <template x-if="!objectLayoutLoading && objectLayout && (!objectLayout.objects || objectLayout.objects.length === 0)">
+                            <div class="text-xs text-gray-500 py-1">No editable objects found for this layout.</div>
+                        </template>
+                    </div>
+
                     <!-- ▼ Accordion: Colours & Filaments -->
                     <div class="mb-4 border border-gray-200 rounded-lg overflow-hidden">
                         <button @click="accordionColours = !accordionColours"
@@ -2087,6 +2321,8 @@
 
     <script src="api.js?v=20260216n"></script>
     <script src="viewer.js?v=20260216n"></script>
+    <script src="mesh-viewer.js?v=20260222m33a"></script>
     <script src="app.js?v=20260216n"></script>
 </body>
 </html>
+
