@@ -24,6 +24,184 @@ test.describe('Settings Modal', () => {
     await expect(page.locator('span').filter({ hasText: /^E4$/ }).first()).toBeVisible();
   });
 
+  test('Load AFC Colors maps color and matches filament by material + manufacturer', async ({ page, request }) => {
+    const API = 'http://localhost:8000';
+    let createdFilamentId: number | undefined;
+    let originalPresets: any;
+
+    try {
+      const presetsRes = await request.get(`${API}/presets/extruders`);
+      expect(presetsRes.ok()).toBe(true);
+      originalPresets = await presetsRes.json();
+
+      const manufacturerHint = `ZetaBrand${Date.now()}`;
+      const createRes = await request.post(`${API}/filaments`, {
+        data: {
+          name: `${manufacturerHint} PLA Profile`,
+          material: 'PLA',
+          nozzle_temp: 210,
+          bed_temp: 60,
+          print_speed: 60,
+          bed_type: 'PEI',
+          color_hex: '#ABCDEF',
+          source_type: 'manual',
+        },
+      });
+      expect(createRes.ok()).toBe(true);
+      const created = await createRes.json();
+      createdFilamentId = created.id;
+
+      await page.evaluate(async () => {
+        const body = document.querySelector('body') as any;
+        const scopes = body?._x_dataStack || [];
+        for (const scope of scopes) {
+          if ('loadFilaments' in scope && typeof scope.loadFilaments === 'function') {
+            await scope.loadFilaments();
+            break;
+          }
+        }
+      });
+
+      await page.waitForFunction((hint) => {
+        const body = document.querySelector('body') as any;
+        const scopes = body?._x_dataStack || [];
+        for (const scope of scopes) {
+          if ('filaments' in scope && Array.isArray(scope.filaments)) {
+            return scope.filaments.some((f: any) => String(f?.name || '').includes(String(hint)));
+          }
+        }
+        return false;
+      }, manufacturerHint, { timeout: 10_000 });
+
+      await page.evaluate((hint) => {
+        const body = document.querySelector('body') as any;
+        const scopes = body?._x_dataStack || [];
+        for (const scope of scopes) {
+          if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
+            scope.checkPrinterStatus = async function () {
+              this.printerConnected = true;
+              this.printerStatus = 'Connected';
+              this.printerAfcSlots = [{
+                label: 'Slot 2',
+                color: '#112233',
+                loaded: true,
+                material_type: 'PLA',
+                manufacturer: hint,
+              }];
+            };
+            break;
+          }
+        }
+      }, manufacturerHint);
+
+      await page.getByRole('button', { name: 'Load AFC Colors' }).click();
+
+      await page.waitForFunction(() => {
+        const body = document.querySelector('body') as any;
+        if (body?._x_dataStack) {
+          for (const scope of body._x_dataStack) {
+            if ('presetMessage' in scope) {
+              return String(scope.presetMessage || '').includes('Loaded AFC colors into extruder presets.');
+            }
+          }
+        }
+        return false;
+      }, undefined, { timeout: 10_000 });
+
+      const presets = await getAppState(page, 'extruderPresets') as any[];
+      expect(presets[0].color_hex).toBe('#112233');
+      expect(Number(presets[0].filament_id)).toBe(createdFilamentId);
+    } finally {
+      if (originalPresets) {
+        await request.put(`${API}/presets/extruders`, {
+          data: {
+            extruders: originalPresets.extruders,
+            slicing_defaults: originalPresets.slicing_defaults,
+          },
+        });
+      }
+      if (createdFilamentId) {
+        await request.delete(`${API}/filaments/${createdFilamentId}`);
+      }
+    }
+  });
+
+  test('Load AFC Colors shows offline message when printer not connected', async ({ page }) => {
+    await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      const scopes = body?._x_dataStack || [];
+      for (const scope of scopes) {
+        if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
+          scope.checkPrinterStatus = async function () {
+            this.printerConnected = false;
+            this.printerStatus = 'Disconnected';
+            this.printerAfcSlots = [];
+          };
+          break;
+        }
+      }
+    });
+
+    await page.getByRole('button', { name: 'Load AFC Colors' }).click();
+
+    await page.waitForFunction(() => {
+      const body = document.querySelector('body') as any;
+      for (const scope of (body?._x_dataStack || [])) {
+        if ('presetMessage' in scope) {
+          return String(scope.presetMessage || '').includes('Printer offline');
+        }
+      }
+      return false;
+    }, undefined, { timeout: 10_000 });
+
+    const msg = await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      for (const scope of (body?._x_dataStack || [])) {
+        if ('presetMessage' in scope) return scope.presetMessage;
+      }
+      return null;
+    });
+    expect(msg).toContain('Printer offline');
+  });
+
+  test('Load AFC Colors shows no-slots message when printer has no AFC', async ({ page }) => {
+    await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      const scopes = body?._x_dataStack || [];
+      for (const scope of scopes) {
+        if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
+          scope.checkPrinterStatus = async function () {
+            this.printerConnected = true;
+            this.printerStatus = 'Connected';
+            this.printerAfcSlots = [];
+          };
+          break;
+        }
+      }
+    });
+
+    await page.getByRole('button', { name: 'Load AFC Colors' }).click();
+
+    await page.waitForFunction(() => {
+      const body = document.querySelector('body') as any;
+      for (const scope of (body?._x_dataStack || [])) {
+        if ('presetMessage' in scope) {
+          return String(scope.presetMessage || '').includes('No loaded AFC colors found');
+        }
+      }
+      return false;
+    }, undefined, { timeout: 10_000 });
+
+    const msg = await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      for (const scope of (body?._x_dataStack || [])) {
+        if ('presetMessage' in scope) return scope.presetMessage;
+      }
+      return null;
+    });
+    expect(msg).toContain('No loaded AFC colors found');
+  });
+
   test('settings auto-save on modal close (no Save button)', async ({ page }) => {
     // "Save as Defaults" was removed — settings auto-save when modal closes.
     await expect(page.getByRole('button', { name: /Save as Defaults/i })).not.toBeVisible();
