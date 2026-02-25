@@ -24,7 +24,7 @@ test.describe('Settings Modal', () => {
     await expect(page.locator('span').filter({ hasText: /^E4$/ }).first()).toBeVisible();
   });
 
-  test('Load AFC Colors maps color and matches filament by material + manufacturer', async ({ page, request }) => {
+  test('Sync from Printer maps color and matches filament by material + manufacturer', async ({ page, request }) => {
     const API = 'http://localhost:8000';
     let createdFilamentId: number | undefined;
     let originalPresets: any;
@@ -77,16 +77,16 @@ test.describe('Settings Modal', () => {
         const body = document.querySelector('body') as any;
         const scopes = body?._x_dataStack || [];
         for (const scope of scopes) {
-          if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
-            scope.printerHasAfc = true;
+          if ('checkPrinterStatus' in scope && 'printerFilamentSlots' in scope) {
+            scope.printerHasFilamentConfig = true;
             const highestId = window.setInterval(() => {}, 99999);
             for (let i = 1; i <= highestId; i++) window.clearInterval(i);
             scope.checkPrinterStatus = async function () {
               this.printerConnected = true;
               this.printerStatus = 'Connected';
-              this.printerHasAfc = true;
-              this.printerAfcSlots = [{
-                label: 'Slot 2',
+              this.printerHasFilamentConfig = true;
+              this.printerFilamentSlots = [{
+                label: 'E1',
                 color: '#112233',
                 loaded: true,
                 material_type: 'PLA',
@@ -98,16 +98,16 @@ test.describe('Settings Modal', () => {
         }
       }, manufacturerHint);
 
-      // Wait for Alpine reactivity to show the button after setting printerHasAfc
-      await page.getByRole('button', { name: 'Load AFC Colors' }).waitFor({ state: 'visible', timeout: 5_000 });
-      await page.getByRole('button', { name: 'Load AFC Colors' }).click();
+      // Wait for Alpine reactivity to show the button after setting printerHasFilamentConfig
+      await page.getByRole('button', { name: 'Sync from Printer' }).waitFor({ state: 'visible', timeout: 5_000 });
+      await page.getByRole('button', { name: 'Sync from Printer' }).click();
 
       await page.waitForFunction(() => {
         const body = document.querySelector('body') as any;
         if (body?._x_dataStack) {
           for (const scope of body._x_dataStack) {
             if ('presetMessage' in scope) {
-              return String(scope.presetMessage || '').includes('Loaded AFC colors into extruder presets.');
+              return String(scope.presetMessage || '').includes('Synced filament colors from printer.');
             }
           }
         }
@@ -132,28 +132,28 @@ test.describe('Settings Modal', () => {
     }
   });
 
-  test('Load AFC Colors shows offline message when printer not connected', async ({ page }) => {
+  test('Sync from Printer shows offline message when printer not connected', async ({ page }) => {
     await page.evaluate(() => {
       const body = document.querySelector('body') as any;
       const scopes = body?._x_dataStack || [];
       for (const scope of scopes) {
-        if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
-          scope.printerHasAfc = true;
+        if ('checkPrinterStatus' in scope && 'printerFilamentSlots' in scope) {
+          scope.printerHasFilamentConfig = true;
           const highestId = window.setInterval(() => {}, 99999);
           for (let i = 1; i <= highestId; i++) window.clearInterval(i);
           scope.checkPrinterStatus = async function () {
             this.printerConnected = false;
             this.printerStatus = 'Disconnected';
-            this.printerHasAfc = true;
-            this.printerAfcSlots = [];
+            this.printerHasFilamentConfig = true;
+            this.printerFilamentSlots = [];
           };
           break;
         }
       }
     });
 
-    await page.getByRole('button', { name: 'Load AFC Colors' }).waitFor({ state: 'visible', timeout: 5_000 });
-    await page.getByRole('button', { name: 'Load AFC Colors' }).click();
+    await page.getByRole('button', { name: 'Sync from Printer' }).waitFor({ state: 'visible', timeout: 5_000 });
+    await page.getByRole('button', { name: 'Sync from Printer' }).click();
 
     await page.waitForFunction(() => {
       const body = document.querySelector('body') as any;
@@ -175,36 +175,36 @@ test.describe('Settings Modal', () => {
     expect(msg).toContain('Printer offline');
   });
 
-  test('Load AFC Colors shows no-slots message when printer has no AFC', async ({ page }) => {
+  test('Sync from Printer shows no-filament message when no filament detected', async ({ page }) => {
     await page.evaluate(() => {
       const body = document.querySelector('body') as any;
       const scopes = body?._x_dataStack || [];
       for (const scope of scopes) {
-        if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
-          scope.printerHasAfc = true;
-          // Replace checkPrinterStatus with a mock that preserves printerHasAfc,
+        if ('checkPrinterStatus' in scope && 'printerFilamentSlots' in scope) {
+          scope.printerHasFilamentConfig = true;
+          // Replace checkPrinterStatus with a mock that preserves printerHasFilamentConfig,
           // and clear all intervals to prevent real status polling from overwriting it
           const highestId = window.setInterval(() => {}, 99999);
           for (let i = 1; i <= highestId; i++) window.clearInterval(i);
           scope.checkPrinterStatus = async function () {
             this.printerConnected = true;
             this.printerStatus = 'Connected';
-            this.printerHasAfc = true;
-            this.printerAfcSlots = [];
+            this.printerHasFilamentConfig = true;
+            this.printerFilamentSlots = [];
           };
           break;
         }
       }
     });
 
-    await page.getByRole('button', { name: 'Load AFC Colors' }).waitFor({ state: 'visible', timeout: 5_000 });
-    await page.getByRole('button', { name: 'Load AFC Colors' }).click();
+    await page.getByRole('button', { name: 'Sync from Printer' }).waitFor({ state: 'visible', timeout: 5_000 });
+    await page.getByRole('button', { name: 'Sync from Printer' }).click();
 
     await page.waitForFunction(() => {
       const body = document.querySelector('body') as any;
       for (const scope of (body?._x_dataStack || [])) {
         if ('presetMessage' in scope) {
-          return String(scope.presetMessage || '').includes('No loaded AFC colors found');
+          return String(scope.presetMessage || '').includes('No filament detected on printer');
         }
       }
       return false;
@@ -217,7 +217,7 @@ test.describe('Settings Modal', () => {
       }
       return null;
     });
-    expect(msg).toContain('No loaded AFC colors found');
+    expect(msg).toContain('No filament detected on printer');
   });
 
   test('settings auto-save on modal close (no Save button)', async ({ page }) => {
