@@ -74,6 +74,10 @@ function app() {
         presetMessageOk: true,
         _presetMessageTimer: null,
         filamentSyncing: false,
+        syncPreviewOpen: false,
+        syncPreviewSlots: [],
+        syncApplyColors: true,
+        syncApplyProfiles: true,
         maxExtruders: 4,
         multicolorNotice: null,
 
@@ -402,13 +406,13 @@ function app() {
             }
         },
 
-        async loadPrinterColorsIntoPresets() {
+        async prepareSyncPreview() {
             this.presetMessage = null;
             this.presetMessageOk = true;
+            this.syncPreviewOpen = false;
             this.filamentSyncing = true;
             try {
                 await this.checkPrinterStatus();
-                const slots = (this.printerFilamentSlots || []).filter((slot) => slot && slot.color && slot.loaded !== false);
 
                 if (!this.printerConnected) {
                     this.presetMessage = 'Printer offline — cannot sync filament colors.';
@@ -416,35 +420,85 @@ function app() {
                     return;
                 }
 
+                const slots = (this.printerFilamentSlots || []).filter((slot) => slot && slot.color && slot.loaded !== false);
                 if (slots.length === 0) {
                     this.presetMessage = 'No filament detected on printer.';
                     this.presetMessageOk = false;
                     return;
                 }
 
-                for (let i = 0; i < Math.min(slots.length, this.maxExtruders); i++) {
-                    const slot = slots[i];
-                    this.extruderPresets[i].color_hex = slot.color;
+                const preview = [];
+                for (let i = 0; i < this.maxExtruders; i++) {
+                    const printerSlot = i < slots.length ? slots[i] : null;
+                    const preset = this.extruderPresets[i];
+                    const currentFilament = preset.filament_id
+                        ? (this.filaments || []).find(f => f.id === Number(preset.filament_id))
+                        : null;
+                    const match = printerSlot && printerSlot.material_type
+                        ? this.findFilamentMatchForSlot(printerSlot)
+                        : null;
 
-                    if (slot.material_type && this.filaments && this.filaments.length > 0) {
-                        const match = this.findFilamentMatchForSlot(slot);
-                        if (match) {
-                            this.extruderPresets[i].filament_id = match.id;
-                        }
-                    }
+                    preview.push({
+                        slotIndex: i,
+                        label: `E${i + 1}`,
+                        hasFilament: !!printerSlot,
+                        currentColor: preset.color_hex || '#FFFFFF',
+                        newColor: printerSlot ? printerSlot.color : null,
+                        colorChanged: printerSlot ? (preset.color_hex || '#FFFFFF').toUpperCase() !== (printerSlot.color || '').toUpperCase() : false,
+                        currentFilamentId: preset.filament_id || null,
+                        currentFilamentName: currentFilament ? currentFilament.name : null,
+                        matchedFilament: match ? { id: match.id, name: match.name } : null,
+                        profileChanged: match ? match.id !== Number(preset.filament_id) : false,
+                        printerMaterial: printerSlot ? printerSlot.material_type : null,
+                        printerManufacturer: printerSlot ? printerSlot.manufacturer : null,
+                    });
                 }
 
-                await this.saveExtruderPresets();
-                if (this._presetMessageTimer) clearTimeout(this._presetMessageTimer);
-                this.presetMessage = 'Synced filament colors from printer.';
-                this.presetMessageOk = true;
-                this._presetMessageTimer = setTimeout(() => { this.presetMessage = null; }, 5000);
+                this.syncPreviewSlots = preview;
+                this.syncApplyColors = true;
+                this.syncApplyProfiles = true;
+                this.syncPreviewOpen = true;
             } catch (err) {
                 this.presetMessage = `Failed to sync filament colors: ${err.message}`;
                 this.presetMessageOk = false;
                 this.showError(this.presetMessage);
             } finally {
                 this.filamentSyncing = false;
+            }
+        },
+
+        cancelSyncPreview() {
+            this.syncPreviewOpen = false;
+            this.syncPreviewSlots = [];
+        },
+
+        async applySyncPreview() {
+            try {
+                for (const slot of this.syncPreviewSlots) {
+                    if (!slot.hasFilament) continue;
+                    if (this.syncApplyColors && slot.newColor) {
+                        this.extruderPresets[slot.slotIndex].color_hex = slot.newColor;
+                    }
+                    if (this.syncApplyProfiles && slot.matchedFilament) {
+                        this.extruderPresets[slot.slotIndex].filament_id = slot.matchedFilament.id;
+                    }
+                }
+
+                await this.saveExtruderPresets();
+                this.syncPreviewOpen = false;
+                this.syncPreviewSlots = [];
+
+                if (this._presetMessageTimer) clearTimeout(this._presetMessageTimer);
+                const parts = [];
+                if (this.syncApplyColors) parts.push('colors');
+                if (this.syncApplyProfiles) parts.push('filament profiles');
+                this.presetMessage = `Synced ${parts.join(' and ')} from printer.`;
+                this.presetMessageOk = true;
+                this._presetMessageTimer = setTimeout(() => { this.presetMessage = null; }, 5000);
+            } catch (err) {
+                this.presetMessage = `Failed to sync: ${err.message}`;
+                this.presetMessageOk = false;
+                this.showError(this.presetMessage);
             }
         },
 

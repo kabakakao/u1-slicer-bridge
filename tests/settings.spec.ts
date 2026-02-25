@@ -102,12 +102,24 @@ test.describe('Settings Modal', () => {
       await page.getByRole('button', { name: 'Sync from Printer' }).waitFor({ state: 'visible', timeout: 5_000 });
       await page.getByRole('button', { name: 'Sync from Printer' }).click();
 
+      // Wait for sync preview panel to appear
+      await page.waitForFunction(() => {
+        const body = document.querySelector('body') as any;
+        for (const scope of (body?._x_dataStack || [])) {
+          if ('syncPreviewOpen' in scope) return scope.syncPreviewOpen === true;
+        }
+        return false;
+      }, undefined, { timeout: 10_000 });
+
+      // Click Apply in the preview panel
+      await page.getByRole('button', { name: 'Apply' }).click();
+
       await page.waitForFunction(() => {
         const body = document.querySelector('body') as any;
         if (body?._x_dataStack) {
           for (const scope of body._x_dataStack) {
             if ('presetMessage' in scope) {
-              return String(scope.presetMessage || '').includes('Synced filament colors from printer.');
+              return String(scope.presetMessage || '').includes('Synced colors and filament profiles from printer.');
             }
           }
         }
