@@ -189,6 +189,7 @@ function app() {
         // Results
         sliceResult: null,
         sliceProgress: 0,         // Progress percentage (0-100)
+        sliceMessage: '',         // Current slicer phase message
 
         // Polling interval
         sliceInterval: null,
@@ -1509,15 +1510,12 @@ function app() {
             this.currentStep = 'slicing';
             this.activeTab = 'upload';
             this.sliceProgress = 0;
+            this.sliceMessage = '';
             this.accordionColours = false;
             this.accordionSettings = false;
 
-            // Animate progress during the blocking slice POST.
-            // Starts fast, slows down as it approaches 90%.
-            const progressTimer = setInterval(() => {
-                const remaining = 90 - this.sliceProgress;
-                this.sliceProgress += Math.max(1, Math.floor(remaining * 0.08));
-            }, 1000);
+            // Generate a job_id so we can poll progress immediately
+            const clientJobId = `slice_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
 
             try {
                 let result;
@@ -1575,31 +1573,37 @@ function app() {
                     sliceSettings.filament_id = this.selectedFilament;
                 }
                 
+                // Include client-generated job_id for immediate progress polling
+                sliceSettings.job_id = clientJobId;
+
+                // Start polling for real progress immediately (runs during the POST await)
+                this.pollSliceStatus(clientJobId);
+
                 if (isMultiPlate) {
                     // Slice specific plate
-                    console.log(`Slicing plate ${selectedPlateId} from upload ${uploadId}`);
+                    console.log(`Slicing plate ${selectedPlateId} from upload ${uploadId} (job: ${clientJobId})`);
                     result = await api.slicePlate(uploadId, selectedPlateId, sliceSettings);
                 } else {
                     // Slice regular upload
-                    console.log(`Slicing upload ${uploadId}`);
+                    console.log(`Slicing upload ${uploadId} (job: ${clientJobId})`);
                     result = await api.sliceUpload(uploadId, sliceSettings);
                 }
 
-                console.log('Slice started:', result);
-                clearInterval(progressTimer);
+                console.log('Slice completed:', result);
+                clearInterval(this.sliceInterval);
 
                 if (result.status === 'completed') {
-                    // Synchronous slicing (completed immediately)
                     this.sliceResult = result;
                     this.sliceProgress = 100;
+                    this.sliceMessage = 'Complete';
                     this.currentStep = 'complete';
-                    await this.loadJobs(); // Refresh sliced history immediately
+                    await this.loadJobs();
                 } else {
-                    // Async slicing - poll for completion
+                    // Shouldn't normally reach here, but handle as async fallback
                     this.pollSliceStatus(result.job_id);
                 }
             } catch (err) {
-                clearInterval(progressTimer);
+                clearInterval(this.sliceInterval);
                 this.showError(`Slicing failed: ${err.message}`);
                 this.currentStep = 'configure';
                 console.error(err);
@@ -1617,27 +1621,35 @@ function app() {
             this.sliceInterval = setInterval(async () => {
                 try {
                     const job = await api.getJobStatus(jobId);
-                    console.log('Slice status:', job.status);
 
-                    // Increment progress (fake progress since API doesn't provide real progress)
-                    this.sliceProgress = Math.min(90, this.sliceProgress + 5);
+                    // Use real progress from the API
+                    if (job.progress !== undefined) {
+                        this.sliceProgress = job.progress;
+                    }
+                    if (job.progress_message) {
+                        this.sliceMessage = job.progress_message;
+                    }
 
                     if (job.status === 'completed') {
                         clearInterval(this.sliceInterval);
                         this.sliceResult = job;
                         this.sliceProgress = 100;
+                        this.sliceMessage = 'Complete';
                         this.currentStep = 'complete';
                         console.log('Slicing completed');
-                        this.loadJobs(); // Refresh jobs list
+                        this.loadJobs();
                     } else if (job.status === 'failed') {
                         clearInterval(this.sliceInterval);
                         this.showError(`Slicing failed: ${job.error_message || 'Unknown error'}`);
                         this.currentStep = 'configure';
                     }
                 } catch (err) {
-                    console.error('Failed to check slice status:', err);
+                    // 404 is expected during early polls before DB record is created
+                    if (!err.message?.includes('404')) {
+                        console.error('Failed to check slice status:', err);
+                    }
                 }
-            }, 2000); // Poll every 2 seconds
+            }, 1000); // Poll every 1 second for real-time progress
         },
 
         /**
@@ -1683,6 +1695,7 @@ function app() {
             this.sliceResult = null;
             this.clearMakerWorld();
             this.sliceProgress = 0;
+            this.sliceMessage = '';
             this.uploadProgress = 0;
             this.uploadPhase = 'idle';
             this.resetJobOverrideSettings();
@@ -1708,6 +1721,7 @@ function app() {
         async goBackToConfigure() {
             this.sliceResult = null;
             this.sliceProgress = 0;
+            this.sliceMessage = '';
             this.currentStep = 'configure';
             this.activeTab = 'upload';
 

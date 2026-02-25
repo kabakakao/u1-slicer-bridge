@@ -29,6 +29,25 @@ router = APIRouter(tags=["slicing"])
 logger = logging.getLogger(__name__)
 INT32_MAX = 2_147_483_647
 
+# ---------------------------------------------------------------------------
+# In-memory progress store for active slicing jobs.
+# Keys are job_id strings.  Values: {"progress": 0-100, "message": str}
+# Thread-safe for simple dict assignments under CPython's GIL.
+# ---------------------------------------------------------------------------
+_job_progress: Dict[str, Dict] = {}
+
+
+def _update_progress(job_id: str, progress: int, message: str = ""):
+    _job_progress[job_id] = {"progress": min(max(progress, 0), 100), "message": message}
+
+
+def _get_progress(job_id: str) -> Dict:
+    return _job_progress.get(job_id, {"progress": 0, "message": ""})
+
+
+def _clear_progress(job_id: str):
+    _job_progress.pop(job_id, None)
+
 
 def _is_wipe_tower_conflict(result: Dict[str, object]) -> bool:
     """Detect Orca wipe-tower conflict failures from CLI output."""
@@ -152,6 +171,7 @@ def _clamp_int32(value: Optional[int]) -> Optional[int]:
 
 
 class SliceRequest(BaseModel):
+    job_id: Optional[str] = None  # Client-provided job ID for progress polling
     filament_ids: Optional[List[int]] = None  # Multi-filament support (list of filament IDs)
     filament_id: Optional[int] = None  # Single filament (for backward compatibility)
     filament_colors: Optional[List[str]] = None  # Override colors per extruder (e.g., ["#FF0000", "#00FF00"])
@@ -183,6 +203,7 @@ class SliceRequest(BaseModel):
 
 
 class SlicePlateRequest(BaseModel):
+    job_id: Optional[str] = None  # Client-provided job ID for progress polling
     plate_id: int
     filament_ids: Optional[List[int]] = None  # Multi-filament support
     filament_id: Optional[int] = None  # Single filament (backward compat)
@@ -291,8 +312,9 @@ async def slice_upload(upload_id: int, request: SliceRequest):
     8. Update database
     """
     pool = get_pg_pool()
-    job_id = f"slice_{uuid.uuid4().hex[:12]}"
+    job_id = request.job_id or f"slice_{uuid.uuid4().hex[:12]}"
     job_logger = setup_job_logging(job_id)
+    _update_progress(job_id, 1, "Validating request")
 
     job_logger.info(f"Starting slicing job for upload {upload_id}")
     job_logger.info(
@@ -435,12 +457,15 @@ async def slice_upload(upload_id: int, request: SliceRequest):
 
     # Execute slicing workflow
     try:
+        _update_progress(job_id, 3, "Preparing workspace")
+
         # Create workspace directory
         workspace = Path(f"/cache/slicing/{job_id}")
         workspace.mkdir(parents=True, exist_ok=True)
         job_logger.info(f"Created workspace: {workspace}")
 
         # Embed profiles into original 3MF
+        _update_progress(job_id, 5, "Embedding profiles")
         job_logger.info("Embedding Orca profiles into original 3MF...")
         embedder = ProfileEmbedder(Path("/app/orca_profiles"))
         embedded_3mf = workspace / "embedded.3mf"
@@ -595,6 +620,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             raise SlicingError(f"Profile embedding failed: {str(e)}")
 
         # Slice with Orca (async to avoid blocking other API requests)
+        _update_progress(job_id, 15, "Starting slicer")
         job_logger.info("Invoking Orca Slicer...")
         printer_profile = get_printer_profile("snapmaker_u1")
         slicer = OrcaSlicer(printer_profile)
@@ -602,6 +628,13 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         scale_factor = scale_percent / 100.0
         scale_active = abs(scale_percent - 100.0) > 0.001
         layout_scale_active = scale_percent > 100.001
+
+        # Progress callback maps slicer's 0-100% to our 20-85% range
+        def _slicer_progress(pct, msg):
+            if pct >= 100:
+                return  # Skip slicer's "All done" — we have post-processing phases
+            mapped = 20 + int(pct * 0.65)
+            _update_progress(job_id, mapped, msg)
 
         source_for_slice = embedded_3mf
         if layout_scale_active:
@@ -637,7 +670,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         else:
             sliceable_3mf = source_for_slice
 
-        result = await slicer.slice_3mf_async(sliceable_3mf, workspace, scale_factor=scale_factor)
+        result = await slicer.slice_3mf_async(sliceable_3mf, workspace, scale_factor=scale_factor, progress_callback=_slicer_progress)
 
         if not result["success"] and scale_active:
             job_logger.warning("Native --scale failed; retrying with transform-based scaling")
@@ -662,7 +695,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                     )
             else:
                 fallback_sliceable_3mf = scaled_3mf
-            result = await slicer.slice_3mf_async(fallback_sliceable_3mf, workspace, scale_factor=1.0)
+            result = await slicer.slice_3mf_async(fallback_sliceable_3mf, workspace, scale_factor=1.0, progress_callback=_slicer_progress)
 
         if (
             not result["success"]
@@ -672,7 +705,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             job_logger.warning(
                 "Scaled downslice failed; retrying once at 100% scale"
             )
-            result = await slicer.slice_3mf_async(sliceable_3mf, workspace, scale_factor=1.0)
+            result = await slicer.slice_3mf_async(sliceable_3mf, workspace, scale_factor=1.0, progress_callback=_slicer_progress)
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
             job_logger.warning(
@@ -725,7 +758,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             else:
                 retry_sliceable_3mf = retry_source
 
-            result = await slicer.slice_3mf_async(retry_sliceable_3mf, workspace, scale_factor=scale_factor)
+            result = await slicer.slice_3mf_async(retry_sliceable_3mf, workspace, scale_factor=scale_factor, progress_callback=_slicer_progress)
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
@@ -733,6 +766,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             job_logger.error(f"stderr: {result['stderr']}")
             raise SlicingError(f"Orca Slicer failed: {result['stderr'][:200]}")
 
+        _update_progress(job_id, 85, "Slicer finished")
         job_logger.info("Slicing completed successfully")
         job_logger.info(f"Orca stdout: {result['stdout'][:500]}")
 
@@ -761,6 +795,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 job_logger.info(f"Tool remap skipped: {remap_result}")
 
         # Parse G-code metadata (async to avoid blocking event loop)
+        _update_progress(job_id, 88, "Parsing G-code metadata")
         job_logger.info("Parsing G-code metadata...")
         metadata = await asyncio.to_thread(slicer.parse_gcode_metadata, gcode_workspace_path)
         metadata["estimated_time_seconds"] = _clamp_int32(metadata.get("estimated_time_seconds")) or 0
@@ -782,6 +817,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                        f"Z={metadata['bounds']['max_z']:.1f}")
 
         # Validate bounds
+        _update_progress(job_id, 92, "Validating bounds")
         job_logger.info("Validating bounds against printer build volume...")
         try:
             slicer.validate_bounds(gcode_workspace_path)
@@ -791,6 +827,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             # Don't fail on bounds warning, just log it
 
         # Move G-code to final location
+        _update_progress(job_id, 95, "Saving G-code")
         slices_dir = Path("/data/slices")
         slices_dir.mkdir(parents=True, exist_ok=True)
         final_gcode_path = slices_dir / f"{job_id}.gcode"
@@ -831,6 +868,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_used_g_json
             )
 
+        _update_progress(job_id, 100, "Complete")
         job_logger.info(f"Slicing job {job_id} completed successfully")
 
         # Determine display colors: override > detected > filament defaults
@@ -846,6 +884,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         else:
             display_colors = json.loads(filament_colors_json)
 
+        _clear_progress(job_id)
         return {
             "job_id": job_id,
             "status": "completed",
@@ -871,6 +910,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 "(slicer crash). Try single-filament slicing for now."
             )
         job_logger.error(f"Slicing failed: {err_text}")
+        _clear_progress(job_id)
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -893,6 +933,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
 
     except Exception as e:
         job_logger.error(f"Unexpected error: {str(e)}")
+        _clear_progress(job_id)
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -930,8 +971,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
     10. Update database
     """
     pool = get_pg_pool()
-    job_id = f"slice_plate_{uuid.uuid4().hex[:12]}"
+    job_id = request.job_id or f"slice_plate_{uuid.uuid4().hex[:12]}"
     job_logger = setup_job_logging(job_id)
+    _update_progress(job_id, 1, "Validating request")
 
     job_logger.info(f"Starting plate slicing job for upload {upload_id}, plate {request.plate_id}")
     job_logger.info(
@@ -1096,6 +1138,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
 
     # Execute plate-specific slicing workflow
     try:
+        _update_progress(job_id, 3, "Preparing workspace")
+
         # Create workspace directory
         workspace = Path(f"/cache/slicing/{job_id}")
         workspace.mkdir(parents=True, exist_ok=True)
@@ -1104,6 +1148,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         embedded_3mf = workspace / "sliceable.3mf"
 
         # Embed profiles into source 3MF and slice only selected plate via CLI
+        _update_progress(job_id, 5, "Embedding profiles")
         job_logger.info("Embedding Orca profiles into 3MF...")
         embedder = ProfileEmbedder(Path("/app/orca_profiles"))
 
@@ -1248,9 +1293,17 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             raise SlicingError(f"Profile embedding failed: {str(e)}")
 
         # Slice with Orca (async to avoid blocking other API requests)
+        _update_progress(job_id, 15, "Starting slicer")
         job_logger.info("Invoking Orca Slicer...")
         slicer = OrcaSlicer(printer_profile)
         scale_percent = float(request.scale_percent if request.scale_percent is not None else 100.0)
+
+        # Progress callback maps slicer's 0-100% to our 20-85% range
+        def _slicer_progress(pct, msg):
+            if pct >= 100:
+                return  # Skip slicer's "All done" — we have post-processing phases
+            mapped = 20 + int(pct * 0.65)
+            _update_progress(job_id, mapped, msg)
 
         # Bambu files define plates via Metadata/plate_*.json, not <item> indices.
         # Our multi_plate_parser maps each <item> to a "plate" (1-indexed), but
@@ -1280,7 +1333,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.info("Applied pre-scale to assembly offsets for native --scale")
 
         result = await slicer.slice_3mf_async(
-            source_for_slice, workspace, plate_index=effective_plate_id, scale_factor=scale_factor
+            source_for_slice, workspace, plate_index=effective_plate_id, scale_factor=scale_factor, progress_callback=_slicer_progress
         )
 
         if not result["success"] and scale_active:
@@ -1289,7 +1342,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             # layout offsets when source_for_slice already has pre-scaled spacing.
             scaled_3mf = await _apply_scale_if_needed(embedded_3mf, workspace, scale_percent, job_logger)
             result = await slicer.slice_3mf_async(
-                scaled_3mf, workspace, plate_index=effective_plate_id, scale_factor=1.0
+                scaled_3mf, workspace, plate_index=effective_plate_id, scale_factor=1.0, progress_callback=_slicer_progress
             )
 
         if (
@@ -1301,7 +1354,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 "Scaled downslice failed; retrying once at 100% scale"
             )
             result = await slicer.slice_3mf_async(
-                source_for_slice, workspace, plate_index=effective_plate_id, scale_factor=1.0
+                source_for_slice, workspace, plate_index=effective_plate_id, scale_factor=1.0, progress_callback=_slicer_progress
             )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
@@ -1335,7 +1388,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                     scale_percent,
                 )
             result = await slicer.slice_3mf_async(
-                retry_source, workspace, plate_index=effective_plate_id, scale_factor=scale_factor
+                retry_source, workspace, plate_index=effective_plate_id, scale_factor=scale_factor, progress_callback=_slicer_progress
             )
 
         if not result["success"]:
@@ -1344,6 +1397,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"stderr: {result['stderr']}")
             raise SlicingError(f"Orca Slicer failed: {result['stderr'][:200]}")
 
+        _update_progress(job_id, 85, "Slicer finished")
         job_logger.info("Slicing completed successfully")
         job_logger.info(f"Orca stdout: {result['stdout'][:500]}")
 
@@ -1372,6 +1426,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 job_logger.info(f"Tool remap skipped: {remap_result}")
 
         # Parse G-code metadata (async to avoid blocking event loop)
+        _update_progress(job_id, 88, "Parsing G-code metadata")
         job_logger.info("Parsing G-code metadata...")
         metadata = await asyncio.to_thread(slicer.parse_gcode_metadata, gcode_workspace_path)
         metadata["estimated_time_seconds"] = _clamp_int32(metadata.get("estimated_time_seconds")) or 0
@@ -1393,6 +1448,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                        f"layers={metadata.get('layer_count', 'N/A')}")
 
         # Validate bounds
+        _update_progress(job_id, 92, "Validating bounds")
         job_logger.info("Validating bounds against printer build volume...")
         try:
             slicer.validate_bounds(gcode_workspace_path)
@@ -1401,6 +1457,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.warning(f"Bounds validation warning: {str(e)}")
 
         # Move G-code to final location
+        _update_progress(job_id, 95, "Saving G-code")
         slices_dir = Path("/data/slices")
         slices_dir.mkdir(parents=True, exist_ok=True)
         final_gcode_path = slices_dir / f"{job_id}.gcode"
@@ -1441,6 +1498,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_used_g_json
             )
 
+        _update_progress(job_id, 100, "Complete")
         job_logger.info(f"Plate slicing job {job_id} completed successfully")
 
         # Determine display colors: override > detected > filament defaults
@@ -1456,6 +1514,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         else:
             display_colors = json.loads(filament_colors_json)
 
+        _clear_progress(job_id)
         return {
             "job_id": job_id,
             "status": "completed",
@@ -1483,6 +1542,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 "(slicer crash). Try single-filament slicing for now."
             )
         job_logger.error(f"Plate slicing failed: {err_text}")
+        _clear_progress(job_id)
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1502,6 +1562,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
 
     except Exception as e:
         job_logger.error(f"Unexpected error: {str(e)}")
+        _clear_progress(job_id)
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1791,6 +1852,18 @@ async def get_slicing_job(job_id: str):
         "detected_colors": detected_colors,
         "error_message": job["error_message"]
     }
+
+    # Add real-time progress for in-progress jobs
+    if job["status"] == "processing":
+        prog = _get_progress(job["job_id"])
+        result["progress"] = prog["progress"]
+        result["progress_message"] = prog["message"]
+    elif job["status"] == "completed":
+        result["progress"] = 100
+        result["progress_message"] = "Complete"
+    elif job["status"] == "failed":
+        result["progress"] = 0
+        result["progress_message"] = job["error_message"] or "Failed"
 
     # Add metadata if job is completed
     if job["status"] == "completed":

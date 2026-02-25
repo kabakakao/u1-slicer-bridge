@@ -126,6 +126,7 @@ class ApiClient {
      */
     async sliceUpload(uploadId, settings) {
         const payload = {
+            job_id: settings.job_id || null,
             layer_height: settings.layer_height,
             infill_density: settings.infill_density,
             wall_count: settings.wall_count,
@@ -185,6 +186,7 @@ class ApiClient {
      */
     async slicePlate(uploadId, plateId, settings) {
         const payload = {
+            job_id: settings.job_id || null,
             plate_id: plateId,
             layer_height: settings.layer_height,
             infill_density: settings.infill_density,
