@@ -11,7 +11,7 @@ import mimetypes
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 
@@ -1829,6 +1829,66 @@ async def download_gcode(job_id: str):
             media_type="text/plain",
             filename=f"{job_id}.gcode"
         )
+
+
+@router.get("/jobs/{job_id}/gcode/preview-image")
+async def preview_gcode_image(
+    job_id: str,
+    size: int = Query(800, ge=200, le=2000),
+):
+    """Render a server-side 2D top-down PNG preview of the G-code.
+
+    Used for large files (>50 MB) where client-side 3D rendering is too slow.
+    Returns a PNG image that can be displayed directly in an <img> tag.
+    """
+    from gcode_image_renderer import render_gcode_image
+    import io
+
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        job = await conn.fetchrow(
+            "SELECT gcode_path, gcode_size, status, filament_colors "
+            "FROM slicing_jobs WHERE job_id = $1",
+            job_id,
+        )
+
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job["status"] != "completed":
+            raise HTTPException(status_code=400, detail="Job not completed")
+
+        gcode_path = Path(job["gcode_path"])
+        if not gcode_path.exists():
+            raise HTTPException(status_code=404, detail="G-code file not found")
+
+    # Parse filament colors from DB
+    filament_colors = None
+    if job["filament_colors"]:
+        try:
+            filament_colors = json.loads(job["filament_colors"])
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Render image in thread pool (CPU-bound)
+    img = await asyncio.to_thread(
+        render_gcode_image,
+        gcode_path,
+        image_size=size,
+        filament_colors=filament_colors,
+    )
+
+    # Encode to PNG
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
 
 
 @router.get("/jobs/{job_id}/download-3mf")
