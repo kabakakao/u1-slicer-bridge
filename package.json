@@ -21,6 +21,7 @@
     "test:file-settings": "npx playwright test tests/file-settings.spec.ts",
     "test:backup": "npx playwright test tests/backup-restore.spec.ts",
     "test:copies": "npx playwright test tests/copies.spec.ts",
+    "test:webcams": "npx playwright test tests/webcams.spec.ts",
     "test:report": "npx playwright show-report"
   },
   "repository": {

@@ -113,7 +113,7 @@ def health():
 
 
 @app.get("/printer/status")
-async def printer_status():
+async def printer_status(include_webcams: bool = False):
     """Get printer connection status, info, and current print state."""
     client = get_moonraker()
 
@@ -136,16 +136,24 @@ async def printer_status():
 
         # Also query print status for header display
         print_status = None
+        webcams = []
         try:
             print_status = await client.query_print_status()
         except Exception:
             pass  # Non-critical
+
+        if include_webcams:
+            try:
+                webcams = await client.get_webcams()
+            except Exception:
+                webcams = []  # Non-critical
 
         return {
             "connected": True,
             "server": server_info.get("result", {}),
             "printer": printer_info.get("result", {}),
             "print_status": print_status,
+            "webcams": webcams,
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Printer error: {str(e)}")
