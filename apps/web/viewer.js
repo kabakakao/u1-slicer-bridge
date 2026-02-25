@@ -7,6 +7,12 @@
  * Three.js objects have non-configurable properties (modelViewMatrix, etc.)
  * that break under Proxy wrapping. All Three.js state lives in closure
  * variables instead.
+ *
+ * Performance strategy for large G-code files:
+ *   < 8 MB  — tube rendering (best quality, ~2-5s)
+ *   8–50 MB — line rendering (good quality, ~5-15s)
+ *   > 50 MB — server-side 2D image preview (instant display)
+ * A Web Worker handles download + text cleaning off the main thread.
  */
 
 function gcodeViewer(initialJobId, initialFilamentColors = null) {
@@ -16,10 +22,15 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
     let initialControlsTarget = null;
     let resizeHandler = null;
 
+    // Size thresholds (bytes)
+    const TUBE_THRESHOLD = 8 * 1024 * 1024;       // Below: tube rendering
+    const IMAGE_PREVIEW_THRESHOLD = 50 * 1024 * 1024; // Above: server-side PNG
+
     return {
         // Only plain JS values in Alpine reactive state
         jobId: initialJobId || null,
         filamentColors: initialFilamentColors || [],
+        gcodeSize: 0,
         currentLayer: 0,
         totalLayers: 0,
         serverLayerCount: 0,
@@ -27,6 +38,11 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
         loading: false,
         loadingMessage: 'Initializing...',
         error: null,
+        imageMode: false,       // true when showing server-rendered PNG
+        previewImageUrl: null,  // URL for the PNG image
+        imgZoom: 1,             // Current zoom level for image mode
+        imgPanX: 0,             // Pan offset X (px)
+        imgPanY: 0,             // Pan offset Y (px)
 
         /**
          * Alpine.js lifecycle hook — runs on mount
@@ -38,20 +54,58 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
                 return;
             }
 
-            // Fetch job metadata (filament colors + authoritative layer count)
+            // Fetch job metadata (filament colors, layer count, gcode_size)
             try {
                 const job = await api.getJobStatus(this.jobId);
                 if (!this.filamentColors || this.filamentColors.length === 0) {
                     this.filamentColors = job.filament_colors || [];
                 }
                 this.serverLayerCount = job.metadata?.layer_count || 0;
+                this.gcodeSize = job.gcode_size || 0;
             } catch (e) {
                 console.warn('Could not fetch job metadata:', e);
             }
 
             // Wait for next frame to ensure DOM has laid out
             await new Promise(resolve => requestAnimationFrame(resolve));
-            await this.loadViewer();
+
+            // Large files: server-side PNG image preview
+            if (this.gcodeSize > IMAGE_PREVIEW_THRESHOLD) {
+                await this.loadImagePreview();
+            } else {
+                await this.loadViewer();
+            }
+        },
+
+        /**
+         * Load a server-rendered 2D preview image for large files.
+         * Fast — the server renders the image, browser just displays it.
+         */
+        async loadImagePreview() {
+            this.imageMode = true;
+            this.loading = true;
+            this.loadingMessage = 'Generating preview image...';
+
+            try {
+                const url = `/api/jobs/${this.jobId}/gcode/preview-image?size=800`;
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`Server returned ${response.status}`);
+                }
+
+                const blob = await response.blob();
+                this.previewImageUrl = URL.createObjectURL(blob);
+                this.totalLayers = this.serverLayerCount || 0;
+                this.currentLayer = this.totalLayers > 0 ? this.totalLayers - 1 : 0;
+                this.loading = false;
+
+                const mb = (this.gcodeSize / 1024 / 1024).toFixed(0);
+                console.log(`Large G-code (${mb} MB) — using server-side image preview`);
+            } catch (err) {
+                console.error('Failed to load preview image:', err);
+                this.error = `Failed to generate preview: ${err.message}`;
+                this.loading = false;
+            }
         },
 
         /**
@@ -107,6 +161,14 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
                     ? [...this.filamentColors].map(c => String(c))
                     : ['#3b82f6']; // Default blue
 
+                // Pick rendering mode based on G-code size.
+                // Default to line rendering (safe) if size is unknown.
+                const useTubes = this.gcodeSize > 0 && this.gcodeSize <= TUBE_THRESHOLD;
+
+                if (!useTubes && this.gcodeSize > 0) {
+                    console.log(`Medium G-code (${(this.gcodeSize/1024/1024).toFixed(1)} MB) — using line rendering`);
+                }
+
                 // Initialize gcode-preview with tool colors array.
                 // disableGradient: the default gradient replaces lightness (0.1–0.8)
                 // which turns black filament into gray/white (S=0 means no hue preserved).
@@ -118,7 +180,7 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
                     backgroundColor: '#1a1a1a',
                     renderTravel: false,
                     disableGradient: true,
-                    renderTubes: true,
+                    renderTubes: useTubes,
                     extrusionWidth: 0.45,
                 });
 
@@ -153,26 +215,28 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
                     ? preview.controls.target.clone()
                     : new THREE.Vector3(135, 0, 135);
 
-                // Fetch full G-code via download endpoint
-                this.loadingMessage = 'Downloading G-code...';
+                // Stop the library's animation loop during loading.
+                // gcode-preview runs requestAnimationFrame continuously, re-rendering
+                // on every frame even while we're adding geometry chunks. This wastes
+                // CPU/GPU and shows ugly partial renders behind the loading overlay.
+                preview.cancelAnimation();
 
-                const response = await fetch(`/api/jobs/${this.jobId}/download`);
-                if (!response.ok) {
-                    throw new Error(`Failed to download G-code: HTTP ${response.status}`);
+                // Download G-code (full file for <50MB)
+                const downloadUrl = `/api/jobs/${this.jobId}/download`;
+
+                // Download and clean G-code via Web Worker (off main thread),
+                // then feed chunks to gcode-preview on the main thread.
+                const chunks = await this._downloadViaWorker(downloadUrl);
+
+                // Feed chunks to gcode-preview cooperatively.
+                // Use requestAnimationFrame between chunks so the browser can
+                // paint progress updates and stay responsive.
+                for (let i = 0; i < chunks.length; i++) {
+                    preview.processGCode(chunks[i]);
+                    const pct = Math.min(100, Math.round((i + 1) / chunks.length * 100));
+                    this.loadingMessage = `Building preview... ${pct}%`;
+                    await new Promise(r => requestAnimationFrame(r));
                 }
-
-                const gcodeText = await response.text();
-                const sizeMB = (gcodeText.length / 1024 / 1024).toFixed(1);
-                this.loadingMessage = `Processing G-code (${sizeMB} MB)...`;
-
-                // Comment out non-standard commands that start with T but aren't tool
-                // changes (e.g. TIMELAPSE_START, TIMELAPSE_TAKE_FRAME). gcode-preview's
-                // parser maps these to gcode="t" which renderLayer misidentifies as tool
-                // changes, setting state.t=undefined and breaking multi-color rendering.
-                const cleanGcode = gcodeText.replace(/^(T[A-Z_]{2,}\b.*)/gm, '; $1');
-
-                // Parse and render
-                preview.processGCode(cleanGcode);
 
                 // Slider uses preview.layers.length for 1:1 rendering control.
                 // Server layer count is only used for the display label.
@@ -182,13 +246,17 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
                     throw new Error('No layers found in G-code');
                 }
 
-                // Show all layers initially
+                // Show all layers, then do a single render and restart animation loop
                 this.currentLayer = this.totalLayers - 1;
                 preview.endLayer = this.totalLayers;
+                this.loadingMessage = 'Rendering...';
+                await new Promise(r => setTimeout(r, 0));
                 preview.render();
+                preview.animate(); // Restart animation loop for interactive controls
 
                 this.loading = false;
-                console.log(`3D viewer initialized: ${this.totalLayers} layers, ${sizeMB} MB, ${colors.length} tool color(s)`);
+                const renderMode = useTubes ? 'tubes' : 'lines';
+                console.log(`3D viewer initialized: ${this.totalLayers} layers, ${colors.length} tool color(s), ${renderMode}`);
 
                 // Handle window resize
                 resizeHandler = () => {
@@ -208,11 +276,106 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
         },
 
         /**
+         * Download and process G-code in a Web Worker.
+         * Returns an array of line-array chunks ready for processGCode().
+         * Falls back to synchronous fetch if Worker is unavailable.
+         */
+        async _downloadViaWorker(url) {
+            // Fallback for environments without Worker support
+            if (typeof Worker === 'undefined') {
+                return this._downloadSynchronous(url);
+            }
+
+            const chunks = [];
+            const self = this;
+
+            return new Promise((resolve, reject) => {
+                const worker = new Worker('viewer-worker.js');
+
+                worker.onmessage = (e) => {
+                    const msg = e.data;
+                    switch (msg.type) {
+                        case 'progress':
+                            if (msg.phase === 'download') {
+                                if (msg.percent >= 0) {
+                                    self.loadingMessage = `Downloading G-code... ${msg.percent}%`;
+                                } else {
+                                    self.loadingMessage = `Downloading G-code... ${msg.receivedMB} MB`;
+                                }
+                            } else {
+                                self.loadingMessage = 'Processing G-code...';
+                            }
+                            break;
+                        case 'chunk':
+                            chunks.push(msg.lines);
+                            break;
+                        case 'done': {
+                            worker.terminate();
+                            const info = msg.decimationFactor > 1
+                                ? ` (decimated 1/${msg.decimationFactor})`
+                                : '';
+                            console.log(`Worker delivered ${msg.totalLines} lines in ${chunks.length} chunks${info}`);
+                            resolve(chunks);
+                            break;
+                        }
+                        case 'error':
+                            worker.terminate();
+                            reject(new Error(msg.message));
+                            break;
+                    }
+                };
+
+                worker.onerror = (err) => {
+                    worker.terminate();
+                    // Worker failed to load — fall back to synchronous
+                    console.warn('Worker failed, falling back to synchronous:', err.message);
+                    self._downloadSynchronous(url).then(resolve, reject);
+                };
+
+                worker.postMessage({ type: 'start', url });
+            });
+        },
+
+        /**
+         * Synchronous fallback: download + clean on main thread.
+         * Used when Web Workers are unavailable.
+         */
+        async _downloadSynchronous(url) {
+            this.loadingMessage = 'Downloading G-code...';
+            await new Promise(r => setTimeout(r, 0));
+
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`Failed to download G-code: HTTP ${response.status}`);
+            }
+
+            let text = await response.text();
+            this.loadingMessage = 'Processing G-code...';
+            await new Promise(r => setTimeout(r, 0));
+
+            text = text.replace(/^(T[A-Z_]{2,}\b.*)/gm, '; $1');
+            const lines = text.split('\n');
+            text = null;
+
+            // Split into chunks of 10K lines
+            const CHUNK = 10000;
+            const chunks = [];
+            for (let i = 0; i < lines.length; i += CHUNK) {
+                chunks.push(lines.slice(i, i + CHUNK));
+            }
+            return chunks;
+        },
+
+        /**
          * Display text for layer counter.
          * Uses server layer count (from OrcaSlicer) when available for accurate display,
          * while slider internally uses preview layer count for correct rendering.
          */
         displayLayerText() {
+            if (this.imageMode) {
+                // Image mode: just show server layer count
+                return this.serverLayerCount > 0 ? `${this.serverLayerCount} layers` : '';
+            }
             const displayTotal = this.serverLayerCount > 0 ? this.serverLayerCount : this.totalLayers;
             if (this.serverLayerCount > 0 && this.totalLayers > 0 && this.serverLayerCount !== this.totalLayers) {
                 const displayLayer = Math.max(1, Math.round((this.currentLayer + 1) / this.totalLayers * this.serverLayerCount));
@@ -299,6 +462,76 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
         },
 
         /**
+         * Image mode: zoom in
+         */
+        imgZoomIn() {
+            this.imgZoom = Math.min(this.imgZoom * 1.3, 10);
+        },
+
+        /**
+         * Image mode: zoom out
+         */
+        imgZoomOut() {
+            this.imgZoom = Math.max(this.imgZoom / 1.3, 0.5);
+        },
+
+        /**
+         * Image mode: reset zoom and pan
+         */
+        imgResetView() {
+            this.imgZoom = 1;
+            this.imgPanX = 0;
+            this.imgPanY = 0;
+        },
+
+        /**
+         * Image mode: handle mouse wheel zoom (called from @wheel handler)
+         */
+        imgHandleWheel(event) {
+            event.preventDefault();
+            const delta = event.deltaY > 0 ? 1 / 1.15 : 1.15;
+            const newZoom = Math.min(Math.max(this.imgZoom * delta, 0.5), 10);
+
+            // Zoom toward cursor position
+            const rect = event.currentTarget.getBoundingClientRect();
+            const cx = event.clientX - rect.left - rect.width / 2;
+            const cy = event.clientY - rect.top - rect.height / 2;
+            const factor = newZoom / this.imgZoom;
+            this.imgPanX = cx - factor * (cx - this.imgPanX);
+            this.imgPanY = cy - factor * (cy - this.imgPanY);
+            this.imgZoom = newZoom;
+        },
+
+        /**
+         * Image mode: start drag pan (called from @mousedown / @touchstart)
+         */
+        imgStartPan(event) {
+            const container = event.currentTarget;
+            const startX = (event.touches ? event.touches[0].clientX : event.clientX) - this.imgPanX;
+            const startY = (event.touches ? event.touches[0].clientY : event.clientY) - this.imgPanY;
+            const self = this;
+
+            function onMove(e) {
+                const px = (e.touches ? e.touches[0].clientX : e.clientX) - startX;
+                const py = (e.touches ? e.touches[0].clientY : e.clientY) - startY;
+                self.imgPanX = px;
+                self.imgPanY = py;
+            }
+
+            function onUp() {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                document.removeEventListener('touchmove', onMove);
+                document.removeEventListener('touchend', onUp);
+            }
+
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+            document.addEventListener('touchmove', onMove, { passive: true });
+            document.addEventListener('touchend', onUp);
+        },
+
+        /**
          * Cleanup when component is destroyed
          */
         destroy() {
@@ -309,6 +542,10 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
             if (preview) {
                 preview.dispose();
                 preview = null;
+            }
+            if (this.previewImageUrl) {
+                URL.revokeObjectURL(this.previewImageUrl);
+                this.previewImageUrl = null;
             }
             initialCameraPos = null;
             initialControlsTarget = null;
