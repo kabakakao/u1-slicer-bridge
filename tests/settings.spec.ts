@@ -78,9 +78,13 @@ test.describe('Settings Modal', () => {
         const scopes = body?._x_dataStack || [];
         for (const scope of scopes) {
           if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
+            scope.printerHasAfc = true;
+            const highestId = window.setInterval(() => {}, 99999);
+            for (let i = 1; i <= highestId; i++) window.clearInterval(i);
             scope.checkPrinterStatus = async function () {
               this.printerConnected = true;
               this.printerStatus = 'Connected';
+              this.printerHasAfc = true;
               this.printerAfcSlots = [{
                 label: 'Slot 2',
                 color: '#112233',
@@ -94,6 +98,8 @@ test.describe('Settings Modal', () => {
         }
       }, manufacturerHint);
 
+      // Wait for Alpine reactivity to show the button after setting printerHasAfc
+      await page.getByRole('button', { name: 'Load AFC Colors' }).waitFor({ state: 'visible', timeout: 5_000 });
       await page.getByRole('button', { name: 'Load AFC Colors' }).click();
 
       await page.waitForFunction(() => {
@@ -132,9 +138,13 @@ test.describe('Settings Modal', () => {
       const scopes = body?._x_dataStack || [];
       for (const scope of scopes) {
         if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
+          scope.printerHasAfc = true;
+          const highestId = window.setInterval(() => {}, 99999);
+          for (let i = 1; i <= highestId; i++) window.clearInterval(i);
           scope.checkPrinterStatus = async function () {
             this.printerConnected = false;
             this.printerStatus = 'Disconnected';
+            this.printerHasAfc = true;
             this.printerAfcSlots = [];
           };
           break;
@@ -142,6 +152,7 @@ test.describe('Settings Modal', () => {
       }
     });
 
+    await page.getByRole('button', { name: 'Load AFC Colors' }).waitFor({ state: 'visible', timeout: 5_000 });
     await page.getByRole('button', { name: 'Load AFC Colors' }).click();
 
     await page.waitForFunction(() => {
@@ -170,9 +181,15 @@ test.describe('Settings Modal', () => {
       const scopes = body?._x_dataStack || [];
       for (const scope of scopes) {
         if ('checkPrinterStatus' in scope && 'printerAfcSlots' in scope) {
+          scope.printerHasAfc = true;
+          // Replace checkPrinterStatus with a mock that preserves printerHasAfc,
+          // and clear all intervals to prevent real status polling from overwriting it
+          const highestId = window.setInterval(() => {}, 99999);
+          for (let i = 1; i <= highestId; i++) window.clearInterval(i);
           scope.checkPrinterStatus = async function () {
             this.printerConnected = true;
             this.printerStatus = 'Connected';
+            this.printerHasAfc = true;
             this.printerAfcSlots = [];
           };
           break;
@@ -180,6 +197,7 @@ test.describe('Settings Modal', () => {
       }
     });
 
+    await page.getByRole('button', { name: 'Load AFC Colors' }).waitFor({ state: 'visible', timeout: 5_000 });
     await page.getByRole('button', { name: 'Load AFC Colors' }).click();
 
     await page.waitForFunction(() => {

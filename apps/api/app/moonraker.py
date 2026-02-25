@@ -163,12 +163,13 @@ class MoonrakerClient:
 
         active_extruder = data.get(active_extruder_name, data.get("extruder", {}))
 
+        has_afc = False
         afc_slots = []
         if include_afc:
             try:
-                afc_slots = await self.query_afc_slots()
+                has_afc, afc_slots = await self.query_afc_slots()
             except Exception:
-                afc_slots = []
+                has_afc, afc_slots = False, []
 
         return {
             "state": print_stats.get("state", "standby"),
@@ -181,11 +182,15 @@ class MoonrakerClient:
             "bed_temp": heater_bed.get("temperature", 0.0),
             "bed_target": heater_bed.get("target", 0.0),
             "extruders": extruders,
+            "has_afc": has_afc,
             "afc_slots": afc_slots,
         }
 
-    async def query_afc_slots(self) -> list[dict[str, Any]]:
-        """Discover AFC-related Moonraker objects and extract loaded color info."""
+    async def query_afc_slots(self) -> tuple[bool, list[dict[str, Any]]]:
+        """Discover AFC-related Moonraker objects and extract loaded color info.
+
+        Returns (has_afc, slots) — has_afc is True when AFC Klipper objects
+        exist on the printer, even if no slots are currently loaded."""
         if not self.client:
             raise RuntimeError("Client not connected. Call connect() first.")
 
@@ -195,7 +200,7 @@ class MoonrakerClient:
 
         afc_objects = [name for name in objects if "afc" in str(name).lower()]
         if not afc_objects:
-            return []
+            return False, []
 
         query_params = {name: "" for name in afc_objects}
         query_response = await self.client.get("/printer/objects/query", params=query_params)
@@ -242,7 +247,7 @@ class MoonrakerClient:
             _walk(object_name, status.get(object_name, {}))
 
         # Safety cap: AFC systems typically have 4-12 lanes max
-        return slots[:12]
+        return True, slots[:12]
 
     @staticmethod
     def _extract_hex_color(node: dict[str, Any]) -> Optional[str]:
