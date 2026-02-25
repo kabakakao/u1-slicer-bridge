@@ -138,7 +138,7 @@ async def printer_status(include_webcams: bool = False):
         print_status = None
         webcams = []
         try:
-            print_status = await client.query_print_status(include_afc=True)
+            print_status = await client.query_print_status(include_filament_config=True)
         except Exception:
             pass  # Non-critical
 

@@ -120,7 +120,7 @@ class MoonrakerClient:
         response.raise_for_status()
         return response.json()
 
-    async def query_print_status(self, include_afc: bool = False) -> Dict[str, Any]:
+    async def query_print_status(self, include_filament_config: bool = False) -> Dict[str, Any]:
         """Query printer objects for print status, progress, and temperatures."""
         if not self.client:
             raise RuntimeError("Client not connected. Call connect() first.")
@@ -163,13 +163,24 @@ class MoonrakerClient:
 
         active_extruder = data.get(active_extruder_name, data.get("extruder", {}))
 
-        has_afc = False
-        afc_slots = []
-        if include_afc:
+        has_filament_config = False
+        filament_slots = []
+        if include_filament_config:
+            # Try standard print_task_config first (works on all U1 printers)
             try:
-                has_afc, afc_slots = await self.query_afc_slots()
+                has_filament_config, filament_slots = await self.query_filament_config()
             except Exception:
-                has_afc, afc_slots = False, []
+                has_filament_config, filament_slots = False, []
+
+            # Fall back to AFC for custom firmware users
+            if not has_filament_config:
+                try:
+                    has_afc, afc_slots = await self.query_afc_slots()
+                    if has_afc:
+                        has_filament_config = True
+                        filament_slots = afc_slots
+                except Exception:
+                    pass
 
         return {
             "state": print_stats.get("state", "standby"),
@@ -182,8 +193,11 @@ class MoonrakerClient:
             "bed_temp": heater_bed.get("temperature", 0.0),
             "bed_target": heater_bed.get("target", 0.0),
             "extruders": extruders,
-            "has_afc": has_afc,
-            "afc_slots": afc_slots,
+            "has_filament_config": has_filament_config,
+            "filament_slots": filament_slots,
+            # Deprecated aliases (kept for one release cycle)
+            "has_afc": has_filament_config,
+            "afc_slots": filament_slots,
         }
 
     async def query_afc_slots(self) -> tuple[bool, list[dict[str, Any]]]:
@@ -248,6 +262,82 @@ class MoonrakerClient:
 
         # Safety cap: AFC systems typically have 4-12 lanes max
         return True, slots[:12]
+
+    async def query_filament_config(self) -> tuple[bool, list[dict[str, Any]]]:
+        """Query print_task_config + filament_detect for per-extruder filament info.
+
+        Returns (has_config, slots) — has_config is True when the printer
+        reports print_task_config with at least one loaded filament.
+        NFC spool data from filament_detect enriches slots when available."""
+        if not self.client:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        response = await self.client.get(
+            "/printer/objects/query",
+            params={"print_task_config": "", "filament_detect": ""},
+        )
+        response.raise_for_status()
+        status = response.json().get("result", {}).get("status", {})
+        config = status.get("print_task_config", {})
+        nfc_info = status.get("filament_detect", {}).get("info", [])
+
+        if not config:
+            return False, []
+
+        colors = config.get("filament_color_rgba", [])
+        types = config.get("filament_type", [])
+        sub_types = config.get("filament_sub_type", [])
+        vendors = config.get("filament_vendor", [])
+        exists = config.get("filament_exist", [])
+
+        slots: list[dict[str, Any]] = []
+        for i in range(min(len(exists), 4)):  # Cap at 4 extruders
+            color_rgba = colors[i] if i < len(colors) else ""
+            color = self._normalize_rgba_hex(color_rgba)
+
+            material_type = self._normalize_material_type(
+                types[i] if i < len(types) else None
+            )
+            sub_type = sub_types[i] if i < len(sub_types) else None
+            vendor = vendors[i] if i < len(vendors) else None
+
+            # Enrich with NFC spool data when available
+            manufacturer = vendor
+            nfc = nfc_info[i] if i < len(nfc_info) else {}
+            if isinstance(nfc, dict) and nfc.get("VERSION", 0) > 0:
+                # NFC tag detected — use actual manufacturer
+                nfc_mfr = nfc.get("MANUFACTURER")
+                if nfc_mfr and nfc_mfr != "NONE":
+                    manufacturer = nfc_mfr
+
+            slots.append({
+                "label": f"E{i + 1}",
+                "color": color or "#FFFFFF",
+                "loaded": exists[i] if i < len(exists) else False,
+                "tool_loaded": None,
+                "material_type": material_type,
+                "sub_type": sub_type,
+                "manufacturer": manufacturer,
+            })
+
+        has_config = any(s["loaded"] for s in slots)
+        return has_config, slots
+
+    @staticmethod
+    def _normalize_rgba_hex(value: Any) -> Optional[str]:
+        """Convert RGBA hex (e.g. 'E72F1DFF') to #RRGGBB format."""
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip().lstrip("#")
+        if not candidate:
+            return None
+        # 8-char RGBA: strip the alpha channel (last 2 chars)
+        if re.fullmatch(r"[0-9a-fA-F]{8}", candidate):
+            return f"#{candidate[:6].upper()}"
+        # 6-char RGB: already correct
+        if re.fullmatch(r"[0-9a-fA-F]{6}", candidate):
+            return f"#{candidate.upper()}"
+        return None
 
     @staticmethod
     def _extract_hex_color(node: dict[str, Any]) -> Optional[str]:

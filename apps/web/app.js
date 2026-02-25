@@ -73,7 +73,11 @@ function app() {
         presetMessage: null,
         presetMessageOk: true,
         _presetMessageTimer: null,
-        afcSyncing: false,
+        filamentSyncing: false,
+        syncPreviewOpen: false,
+        syncPreviewSlots: [],
+        syncApplyColors: true,
+        syncApplyProfiles: true,
         maxExtruders: 4,
         multicolorNotice: null,
 
@@ -82,8 +86,8 @@ function app() {
         printerBusy: false,
         printerStatus: 'Checking...',
         printerWebcams: [],
-        printerHasAfc: false,
-        printerAfcSlots: [],
+        printerHasFilamentConfig: false,
+        printerFilamentSlots: [],
         webcamsExpanded: false,
         webcamImageFallback: {},
         webcamImageNonce: Date.now(),
@@ -255,8 +259,8 @@ function app() {
                     this.webcamImageFallback = {};
                     this.webcamImageNonce = Date.now();
                 }
-                this.printerHasAfc = status.print_status?.has_afc || false;
-                this.printerAfcSlots = status.print_status?.afc_slots || [];
+                this.printerHasFilamentConfig = status.print_status?.has_filament_config || false;
+                this.printerFilamentSlots = status.print_status?.filament_slots || [];
                 // Show print progress in header when actively printing
                 if (status.print_status && status.print_status.state === 'printing') {
                     const pct = Math.round((status.print_status.progress || 0) * 100);
@@ -402,53 +406,103 @@ function app() {
             }
         },
 
-        async loadAfcColorsIntoPresets() {
+        async prepareSyncPreview() {
             this.presetMessage = null;
             this.presetMessageOk = true;
-            this.afcSyncing = true;
+            this.syncPreviewOpen = false;
+            this.filamentSyncing = true;
             try {
                 await this.checkPrinterStatus();
-                const slots = (this.printerAfcSlots || []).filter((slot) => slot && slot.color && slot.loaded !== false);
 
                 if (!this.printerConnected) {
-                    this.presetMessage = 'Printer offline — cannot load AFC colors.';
+                    this.presetMessage = 'Printer offline — cannot sync filament colors.';
                     this.presetMessageOk = false;
                     return;
                 }
 
+                const slots = (this.printerFilamentSlots || []).filter((slot) => slot && slot.color && slot.loaded !== false);
                 if (slots.length === 0) {
-                    this.presetMessage = 'No loaded AFC colors found.';
+                    this.presetMessage = 'No filament detected on printer.';
                     this.presetMessageOk = false;
                     return;
                 }
 
-                for (let i = 0; i < Math.min(slots.length, this.maxExtruders); i++) {
-                    const slot = slots[i];
-                    this.extruderPresets[i].color_hex = slot.color;
+                const preview = [];
+                for (let i = 0; i < this.maxExtruders; i++) {
+                    const printerSlot = i < slots.length ? slots[i] : null;
+                    const preset = this.extruderPresets[i];
+                    const currentFilament = preset.filament_id
+                        ? (this.filaments || []).find(f => f.id === Number(preset.filament_id))
+                        : null;
+                    const match = printerSlot && printerSlot.material_type
+                        ? this.findFilamentMatchForSlot(printerSlot)
+                        : null;
 
-                    if (slot.material_type && this.filaments && this.filaments.length > 0) {
-                        const match = this.findFilamentMatchForAfcSlot(slot);
-                        if (match) {
-                            this.extruderPresets[i].filament_id = match.id;
-                        }
+                    preview.push({
+                        slotIndex: i,
+                        label: `E${i + 1}`,
+                        hasFilament: !!printerSlot,
+                        currentColor: preset.color_hex || '#FFFFFF',
+                        newColor: printerSlot ? printerSlot.color : null,
+                        colorChanged: printerSlot ? (preset.color_hex || '#FFFFFF').toUpperCase() !== (printerSlot.color || '').toUpperCase() : false,
+                        currentFilamentId: preset.filament_id || null,
+                        currentFilamentName: currentFilament ? currentFilament.name : null,
+                        matchedFilament: match ? { id: match.id, name: match.name } : null,
+                        profileChanged: match ? match.id !== Number(preset.filament_id) : false,
+                        printerMaterial: printerSlot ? printerSlot.material_type : null,
+                        printerManufacturer: printerSlot ? printerSlot.manufacturer : null,
+                    });
+                }
+
+                this.syncPreviewSlots = preview;
+                this.syncApplyColors = true;
+                this.syncApplyProfiles = true;
+                this.syncPreviewOpen = true;
+            } catch (err) {
+                this.presetMessage = `Failed to sync filament colors: ${err.message}`;
+                this.presetMessageOk = false;
+                this.showError(this.presetMessage);
+            } finally {
+                this.filamentSyncing = false;
+            }
+        },
+
+        cancelSyncPreview() {
+            this.syncPreviewOpen = false;
+            this.syncPreviewSlots = [];
+        },
+
+        async applySyncPreview() {
+            try {
+                for (const slot of this.syncPreviewSlots) {
+                    if (!slot.hasFilament) continue;
+                    if (this.syncApplyColors && slot.newColor) {
+                        this.extruderPresets[slot.slotIndex].color_hex = slot.newColor;
+                    }
+                    if (this.syncApplyProfiles && slot.matchedFilament) {
+                        this.extruderPresets[slot.slotIndex].filament_id = slot.matchedFilament.id;
                     }
                 }
 
                 await this.saveExtruderPresets();
+                this.syncPreviewOpen = false;
+                this.syncPreviewSlots = [];
+
                 if (this._presetMessageTimer) clearTimeout(this._presetMessageTimer);
-                this.presetMessage = 'Loaded AFC colors into extruder presets.';
+                const parts = [];
+                if (this.syncApplyColors) parts.push('colors');
+                if (this.syncApplyProfiles) parts.push('filament profiles');
+                this.presetMessage = `Synced ${parts.join(' and ')} from printer.`;
                 this.presetMessageOk = true;
                 this._presetMessageTimer = setTimeout(() => { this.presetMessage = null; }, 5000);
             } catch (err) {
-                this.presetMessage = `Failed to load AFC colors: ${err.message}`;
+                this.presetMessage = `Failed to sync: ${err.message}`;
                 this.presetMessageOk = false;
                 this.showError(this.presetMessage);
-            } finally {
-                this.afcSyncing = false;
             }
         },
 
-        normalizeAfcMaterialType(value) {
+        normalizeMaterialType(value) {
             if (!value || typeof value !== 'string') return '';
             const compact = value.trim().toUpperCase().replace(/\s+/g, '');
             const aliases = {
@@ -458,14 +512,14 @@ function app() {
             return aliases[compact] || compact;
         },
 
-        findFilamentMatchForAfcSlot(slot) {
+        findFilamentMatchForSlot(slot) {
             if (!slot.material_type || !this.filaments || this.filaments.length === 0) return null;
-            const afcMat = this.normalizeAfcMaterialType(slot.material_type);
+            const afcMat = this.normalizeMaterialType(slot.material_type);
             let bestMatch = null;
             let bestScore = 0;
             for (const fil of this.filaments) {
                 let score = 0;
-                const filMat = this.normalizeAfcMaterialType(fil.material);
+                const filMat = this.normalizeMaterialType(fil.material);
                 if (filMat === afcMat) score += 100;
                 else continue;
                 if (slot.manufacturer && fil.name) {
