@@ -132,7 +132,7 @@ Before submitting changes, verify these still work:
 
 1. Start services: `docker compose up -d --build`
 2. Verify health: `curl http://localhost:8000/healthz`
-3. Open http://localhost:8080
+3. Open http://localhost:8234 (or your configured `WEB_PORT`)
 4. Upload a `.3mf` file and walk through: Upload → Configure → Slice → Preview
 
 ---
