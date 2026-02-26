@@ -195,6 +195,7 @@ class OrcaSlicer:
             str(self.orca_bin),
             "--slice", slice_arg,
             "--allow-newer-file",
+            "--ensure-on-bed",
             "--outputdir", str(workspace),
         ]
 

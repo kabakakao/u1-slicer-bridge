@@ -49,6 +49,36 @@ def _clear_progress(job_id: str):
     _job_progress.pop(job_id, None)
 
 
+def _get_bambu_plate_for_object(source_3mf: Path, object_id: str) -> Optional[int]:
+    """Look up the Bambu plater_id that contains the given object_id.
+
+    Bambu Studio stores plate→object mappings in model_settings.config as
+    <plate> elements containing <model_instance> entries with object_id values.
+    Our multi_plate_parser maps build <item> indices to "plates", which differ
+    from Bambu's plater_id numbering in multi-plate files.
+
+    Returns the plater_id (1-indexed) or None if not found.
+    """
+    try:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(source_3mf, 'r') as zf:
+            if 'Metadata/model_settings.config' not in zf.namelist():
+                return None
+            root = ET.fromstring(zf.read('Metadata/model_settings.config'))
+            for plate in root.findall('.//plate'):
+                plater_id = None
+                for meta in plate.findall('metadata'):
+                    if meta.get('key') == 'plater_id':
+                        plater_id = meta.get('value')
+                for mi in plate.findall('model_instance'):
+                    for m in mi.findall('metadata'):
+                        if m.get('key') == 'object_id' and m.get('value') == str(object_id):
+                            return int(plater_id) if plater_id else None
+    except Exception as e:
+        logger.warning(f"Could not look up Bambu plate for object {object_id}: {e}")
+    return None
+
+
 def _is_wipe_tower_conflict(result: Dict[str, object]) -> bool:
     """Detect Orca wipe-tower conflict failures from CLI output."""
     stdout = str(result.get("stdout") or "").lower()
@@ -1273,6 +1303,26 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["machine_load_filament_time"] = "0"
             overrides["machine_unload_filament_time"] = "0"
 
+        # Compute Bambu plate ID before embed_profiles so we can pass it for
+        # MultiAsSingle custom_gcode injection.
+        bambu_plate = None
+        if file_meta["is_bambu"]:
+            bambu_plate = _get_bambu_plate_for_object(source_3mf, str(target_plate.object_id))
+            if bambu_plate is not None:
+                if bambu_plate != request.plate_id:
+                    job_logger.info(
+                        f"Bambu file — mapping plate {request.plate_id} "
+                        f"(object {target_plate.object_id}) to Orca plate "
+                        f"{bambu_plate} (Bambu plater_id)"
+                    )
+            else:
+                # Fallback for Bambu files without plater_id metadata
+                bambu_plate = 1
+                job_logger.info(
+                    f"Bambu file — no plater_id found for object "
+                    f"{target_plate.object_id}, falling back to Orca plate 1"
+                )
+
         try:
             await embedder.embed_profiles_async(
                 source_3mf=source_3mf,
@@ -1285,6 +1335,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
                 precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
                 enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
+                bambu_plate_id=bambu_plate,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -1305,18 +1356,15 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             mapped = 20 + int(pct * 0.65)
             _update_progress(job_id, mapped, msg)
 
-        # Bambu files define plates via Metadata/plate_*.json, not <item> indices.
-        # Our multi_plate_parser maps each <item> to a "plate" (1-indexed), but
-        # Orca's --slice uses the plate_*.json numbering.  Most Bambu exports
-        # have a single plate_1.json containing all objects, so we always target
-        # plate 1 for Orca regardless of which <item> the user selected.
+        # For Bambu files, use the actual Bambu plater_id so OrcaSlicer
+        # slices the correct plate from the original (unmodified) 3MF.
         effective_plate_id = request.plate_id
-        if file_meta["is_bambu"] and request.plate_id != 1:
+        if file_meta["is_bambu"] and bambu_plate is not None:
+            effective_plate_id = bambu_plate
             job_logger.info(
-                f"Bambu file — using Orca plate 1 instead of requested "
-                f"plate {request.plate_id} (Bambu plate numbering differs from item index)"
+                f"Bambu file — using Orca plate {bambu_plate} "
+                f"(mapped from user plate {request.plate_id})"
             )
-            effective_plate_id = 1
 
         scale_factor = scale_percent / 100.0
         scale_active = abs(scale_percent - 100.0) > 0.001

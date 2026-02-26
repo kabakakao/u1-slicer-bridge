@@ -5,6 +5,7 @@ Handles Bambu Studio files by extracting clean geometry with trimesh.
 """
 
 import asyncio
+import copy
 import json
 import re
 import uuid
@@ -231,7 +232,7 @@ class ProfileEmbedder:
 
         return True
 
-    def _rebuild_with_trimesh(self, source_3mf: Path, dest_3mf: Path) -> None:
+    def _rebuild_with_trimesh(self, source_3mf: Path, dest_3mf: Path, *, concatenate: bool = False) -> None:
         """Rebuild 3MF with trimesh to extract clean geometry.
 
         This strips Bambu-specific format issues and creates a clean 3MF
@@ -240,13 +241,19 @@ class ProfileEmbedder:
         For files with modifier parts (type='other' objects), these are stripped
         before the trimesh load to prevent geometry duplication.
 
+        When *concatenate* is True, all meshes in the scene are combined into
+        a single mesh.  This is needed for Bambu component assemblies where
+        the sub-objects are parts of ONE model — exporting them as separate
+        build items causes OrcaSlicer to report conflicts.
+
         Args:
             source_3mf: Original Bambu 3MF path
             dest_3mf: Output clean 3MF path
+            concatenate: Combine all meshes into a single object
         """
         try:
             import trimesh
-            logger.info(f"Rebuilding Bambu 3MF with trimesh: {source_3mf.name}")
+            logger.info(f"Rebuilding Bambu 3MF with trimesh: {source_3mf.name} (concatenate={concatenate})")
 
             load_source = source_3mf
             temp_files: list[Path] = []
@@ -274,8 +281,16 @@ class ProfileEmbedder:
                 # Load entire scene (preserves object positions)
                 scene = trimesh.load(str(load_source), file_type='3mf')
 
-                # Export as clean 3MF
-                scene.export(str(dest_3mf), file_type='3mf')
+                if concatenate and isinstance(scene, trimesh.Scene):
+                    # Combine all meshes into a single object.  This is
+                    # needed for Bambu assemblies where component parts
+                    # are sub-objects of one model.
+                    combined = scene.dump(concatenate=True)
+                    combined.export(str(dest_3mf), file_type='3mf')
+                    logger.info(f"Concatenated {len(scene.geometry)} meshes into single object")
+                else:
+                    # Export as clean 3MF (preserves separate objects)
+                    scene.export(str(dest_3mf), file_type='3mf')
             finally:
                 for tf in temp_files:
                     if tf.exists():
@@ -389,6 +404,108 @@ class ProfileEmbedder:
         'compatible_printers',
         'compatible_prints',
     })
+
+    # Keys that have special list semantics (not simple per-filament arrays).
+    _SPECIAL_LIST_KEYS = frozenset({
+        'flush_volumes_matrix',   # N*N matrix
+        'flush_volumes_vector',   # 2*N vector
+        'different_settings_to_system',
+        'inherits_group',
+        'upward_compatible_machine',
+        'printable_area',         # bed shape (4 corners)
+        'bed_exclude_area',       # exclusion zones (variable corners)
+        'thumbnails',             # image sizes list
+        'head_wrap_detect_zone',  # detection zone points
+        'extruder_offset',        # per-extruder XY offsets
+    })
+
+    @staticmethod
+    def _normalize_per_filament_arrays(config: Dict[str, Any], target_count: int) -> None:
+        """Normalize all per-filament arrays to exactly *target_count* elements.
+
+        Pads short arrays by repeating the last element and truncates long
+        arrays.  This prevents segfaults when Bambu configs have N-filament
+        arrays but our settings use a different count.
+
+        Special arrays (flush volumes matrix/vector) are handled separately.
+        """
+        adjusted = 0
+        skip = ProfileEmbedder._NON_FILAMENT_LIST_KEYS | ProfileEmbedder._SPECIAL_LIST_KEYS
+        for key, value in config.items():
+            if key in skip:
+                continue
+            if not isinstance(value, list) or len(value) == 0:
+                continue
+            if len(value) == target_count:
+                continue
+            if len(value) < target_count:
+                while len(value) < target_count:
+                    value.append(value[-1])
+            else:
+                config[key] = value[:target_count]
+            adjusted += 1
+
+        # Special: flush_volumes_matrix is NxN
+        fvm = config.get('flush_volumes_matrix')
+        if isinstance(fvm, list) and len(fvm) > 0:
+            needed = target_count * target_count
+            if len(fvm) != needed:
+                config['flush_volumes_matrix'] = (fvm + [fvm[-1]] * needed)[:needed]
+                adjusted += 1
+
+        # Special: flush_volumes_vector is 2*N
+        fvv = config.get('flush_volumes_vector')
+        if isinstance(fvv, list) and len(fvv) > 0:
+            needed = target_count * 2
+            if len(fvv) != needed:
+                config['flush_volumes_vector'] = (fvv + [fvv[-1]] * needed)[:needed]
+                adjusted += 1
+
+        if adjusted:
+            logger.info(
+                "Normalized %d per-filament arrays to %d entries",
+                adjusted, target_count,
+            )
+
+    @staticmethod
+    def _sanitize_nil_values(config: Dict[str, Any]) -> None:
+        """Replace Bambu 'nil' strings in per-filament arrays with defaults.
+
+        Bambu Studio uses 'nil' to mean "use the base profile default".
+        Snapmaker OrcaSlicer v2.2.4 cannot parse 'nil' as a number and
+        segfaults at "Initializing StaticPrintConfigs".
+
+        Strategy: replace 'nil' with the first non-nil value in the same
+        array.  If ALL values are 'nil', remove the key entirely.
+        """
+        removed = []
+        fixed = 0
+        for key, value in config.items():
+            if not isinstance(value, list):
+                continue
+            if not any(str(v) == 'nil' for v in value):
+                continue
+            # Find first non-nil value as default
+            default = None
+            for v in value:
+                if str(v) != 'nil':
+                    default = v
+                    break
+            if default is None:
+                # All nil — remove the key
+                removed.append(key)
+                continue
+            config[key] = [default if str(v) == 'nil' else v for v in value]
+            fixed += 1
+
+        for key in removed:
+            del config[key]
+
+        if fixed or removed:
+            logger.info(
+                "Sanitized Bambu nil values: %d arrays fixed, %d all-nil keys removed",
+                fixed, len(removed),
+            )
 
     @staticmethod
     def _pad_per_filament_arrays(config: Dict[str, Any], target_count: int) -> None:
@@ -537,8 +654,13 @@ class ProfileEmbedder:
             else:
                 base_config = {}
 
-        config: Dict[str, Any] = dict(base_config)
+        config: Dict[str, Any] = copy.deepcopy(base_config)
 
+        # Selectively overlay Snapmaker g-code keys onto the Bambu base
+        # config.  We keep the Bambu project_settings as the foundation
+        # so that OrcaSlicer can resolve Bambu format features (component
+        # assemblies, plate definitions, etc.).  Only replace the g-code
+        # generation keys with Snapmaker-specific values.
         for key in (
             'before_layer_change_gcode',
             'layer_change_gcode',
@@ -550,13 +672,25 @@ class ProfileEmbedder:
             if key in profiles.printer:
                 config[key] = profiles.printer[key]
 
+        # Override Bambu preset references with our Snapmaker presets.
+        # OrcaSlicer looks up these IDs in its system presets and segfaults
+        # when they don't exist (e.g., "Bambu Lab P1S 0.4 nozzle").
+        printer_name = profiles.printer.get('name', 'Snapmaker U1 (0.4 nozzle) - multiplate')
+        process_name = profiles.process.get('name', '0.20mm Standard @Snapmaker U1')
+        config['printer_settings_id'] = printer_name
+        config['print_settings_id'] = process_name
+        config['default_print_profile'] = process_name
+        config['print_compatible_printers'] = [printer_name]
+        config.pop('inherits', None)
+        config.pop('inherits_group', None)
+
         for key in ('time_lapse_gcode', 'machine_pause_gcode'):
             config.pop(key, None)
 
-        config.update(profiles.process)
-        config.update(profiles.filament)
-        config.update(filament_settings)
-        config.update(overrides)
+        config.update(copy.deepcopy(profiles.process))
+        config.update(copy.deepcopy(profiles.filament))
+        config.update(copy.deepcopy(filament_settings))
+        config.update(copy.deepcopy(overrides))
 
         config['layer_gcode'] = 'G92 E0'
         config.setdefault('enable_arc_fitting', '1')
@@ -615,6 +749,16 @@ class ProfileEmbedder:
         else:
             config['single_extruder_multi_material'] = '0'
 
+        # Bambu configs use 'nil' for "use default".  Snapmaker OrcaSlicer
+        # cannot parse 'nil' and segfaults at "Initializing StaticPrintConfigs".
+        self._sanitize_nil_values(config)
+
+        # Normalize all per-filament arrays to the same length.
+        # Bambu configs may carry N-filament arrays (e.g. 5 for AMS) while our
+        # settings use a different count.  Mismatched lengths segfault Orca at
+        # "Initializing StaticPrintConfigs".
+        self._normalize_per_filament_arrays(config, target_slots)
+
         logger.info(
             "Built assignment-preserving config with %s extruder slots "
             "(requested=%s, assigned=%s)",
@@ -658,7 +802,8 @@ class ProfileEmbedder:
                        precomputed_is_bambu: Optional[bool] = None,
                        precomputed_has_multi_assignments: Optional[bool] = None,
                        precomputed_has_layer_changes: Optional[bool] = None,
-                       enable_flow_calibrate: bool = True) -> Path:
+                       enable_flow_calibrate: bool = True,
+                       bambu_plate_id: Optional[int] = None) -> Path:
         """Copy original 3MF and inject Orca profiles.
 
         Preserves all original geometry, transforms, and positioning.
@@ -691,23 +836,34 @@ class ProfileEmbedder:
             has_multi_assignments = precomputed_has_multi_assignments if precomputed_has_multi_assignments is not None else self._has_multi_extruder_assignments(source_3mf)
             has_layer_changes = precomputed_has_layer_changes if precomputed_has_layer_changes is not None else self._has_layer_tool_changes(source_3mf)
 
-            # Use assignment-preserving path for Bambu multicolor files.
-            # This covers per-object extruder assignments, layer-based tool
-            # changes (MultiAsSingle), AND per-triangle paint data.  The
-            # trimesh rebuild path strips all of these, producing a plain
-            # single-colour mesh that crashes Orca when multicolour settings
-            # are applied.  The slicer's --allow-newer-file flag lets Orca
-            # load the original Bambu geometry directly.
+            # Use assignment-preserving path for Bambu multicolor files that
+            # have actual per-object extruder assignments or per-triangle paint
+            # data.  The trimesh rebuild path strips these, producing a plain
+            # single-colour mesh.
+            #
+            # Use the assignment-preserving path for Bambu multicolor files:
+            # - Multi-extruder assignments: per-object/per-part extruder mapping
+            # - Layer tool changes (MultiAsSingle): mid-print filament swaps
+            # - Per-triangle paint data: SEMM mode needed
+            #
+            # The trimesh path can't be used for multi-plate Bambu files because
+            # it exports ALL objects from ALL plates with Bambu global coordinates
+            # (100s-1000s of mm from origin), causing segfaults or "Nothing to
+            # be sliced".  The flatten approach preserves plate structure.
             needs_preserve = has_multi_assignments or has_layer_changes
-            if is_bambu and requested_filament_count > 1:
+            if not needs_preserve and is_bambu and requested_filament_count > 1:
+                # Also check for per-triangle paint data (needs SEMM mode)
+                needs_preserve = self._has_paint_data_zip(source_3mf)
+
+            if is_bambu and needs_preserve:
                 reason = (
                     "layer-based tool changes" if has_layer_changes
                     else "model extruder assignments" if has_multi_assignments
-                    else "multicolour filament config"
+                    else "per-triangle paint data"
                 )
                 logger.info(
                     f"Detected Bambu multicolor file with {reason} - "
-                    "preserving original geometry and metadata"
+                    "preserving extruder assignments"
                 )
                 config = self._build_assignment_preserving_config(
                     source_3mf=source_3mf,
@@ -720,6 +876,13 @@ class ProfileEmbedder:
                     config['machine_start_gcode'] = self._strip_flow_calibrate(config['machine_start_gcode'])
                     logger.info("Stripped SM_PRINT_FLOW_CALIBRATE blocks (flow calibration disabled)")
                 settings_json = json.dumps(config, indent=2)
+
+                # Pass original Bambu 3MF directly to OrcaSlicer.
+                # The --allow-newer-file flag lets Orca load Bambu format
+                # extensions (component assemblies, multi-file refs, plate
+                # definitions).  This preserves per-part extruder assignments
+                # for multicolor output.  Only the project_settings.config
+                # is replaced with our hybrid Bambu+Snapmaker config.
                 self._copy_and_inject_settings(
                     source_3mf,
                     output_3mf,
@@ -727,6 +890,7 @@ class ProfileEmbedder:
                     preserve_model_settings_from=None,
                     extruder_remap=extruder_remap,
                 )
+
                 logger.info(f"Successfully embedded profiles into {output_3mf.name}")
                 return output_3mf
 
@@ -739,14 +903,14 @@ class ProfileEmbedder:
                 self._rebuild_with_trimesh(source_3mf, temp_clean)
                 working_3mf = temp_clean
 
-            # Merge all settings
-            config = {
+            # Merge all settings (deep copy to avoid mutating cached profiles)
+            config = copy.deepcopy({
                 **profiles.printer,
                 **profiles.process,
                 **profiles.filament,
                 **filament_settings,
                 **overrides
-            }
+            })
 
             # Ensure layer_gcode for relative extruder addressing
             if 'layer_gcode' not in config:
@@ -756,7 +920,35 @@ class ProfileEmbedder:
             if 'enable_arc_fitting' not in config:
                 config['enable_arc_fitting'] = '1'
 
+            # Override preset references — OrcaSlicer looks these up in its
+            # system presets and segfaults when they don't exist.  Also strip
+            # 'inherits' which triggers system-preset lookups.
+            printer_name = profiles.printer.get('name', 'Snapmaker U1 (0.4 nozzle) - multiplate')
+            process_name = profiles.process.get('name', '0.20mm Standard @Snapmaker U1')
+            config['printer_settings_id'] = printer_name
+            config['print_settings_id'] = process_name
+            config['default_print_profile'] = process_name
+            config['print_compatible_printers'] = [printer_name]
+            config.pop('inherits', None)
+            config.pop('inherits_group', None)
+
+            # Strip Bambu-specific filament_start_gcode (from slicer_settings
+            # imported from Bambu profiles).  Bambu macros like M142 and
+            # activate_air_filtration are not understood by Snapmaker firmware.
+            fsg = config.get('filament_start_gcode')
+            if isinstance(fsg, list) and any('M142' in str(g) or 'air_filtration' in str(g) for g in fsg):
+                config.pop('filament_start_gcode', None)
+                logger.info("Stripped Bambu-specific filament_start_gcode")
+
+            # Strip time-lapse and pause gcode (Bambu-specific)
+            for key in ('time_lapse_gcode', 'machine_pause_gcode'):
+                config.pop(key, None)
+
             logger.debug(f"Merged config with {len(config)} keys")
+
+            # Sanitize 'nil' values from Bambu filament profiles (slicer_settings
+            # imported from Bambu profiles can carry 'nil' for "use default").
+            self._sanitize_nil_values(config)
 
             # Pad per-filament arrays to match requested_filament_count.
             # Orca indexes per-filament arrays by filament number; if filament_colour
@@ -764,6 +956,15 @@ class ProfileEmbedder:
             # bounds and segfaults at "Initializing StaticPrintConfigs".
             if requested_filament_count > 1:
                 self._pad_per_filament_arrays(config, requested_filament_count)
+
+            # Normalize all per-filament arrays to the same length.
+            # Mixed array sizes (e.g. 2 from slicer_settings, 4 from padded
+            # temps) cause OrcaSlicer to read out of bounds and crash.
+            # Use filament_colour length as authoritative (determines slicer
+            # filament count), falling back to requested_filament_count.
+            fc = config.get('filament_colour')
+            target_slots = len(fc) if isinstance(fc, list) and fc else max(requested_filament_count, 1)
+            self._normalize_per_filament_arrays(config, target_slots)
 
             if not enable_flow_calibrate and 'machine_start_gcode' in config:
                 config['machine_start_gcode'] = self._strip_flow_calibrate(config['machine_start_gcode'])
@@ -781,6 +982,13 @@ class ProfileEmbedder:
                 extruder_remap=extruder_remap,
             )
 
+            # For Bambu MultiAsSingle files that went through trimesh:
+            # inject the custom_gcode_per_layer.xml so OrcaSlicer emits the
+            # mid-print tool change.  The plate ID is remapped to 1 (trimesh
+            # creates a single-plate file).
+            if is_bambu and has_layer_changes and not needs_preserve and bambu_plate_id is not None:
+                self._inject_custom_gcode(source_3mf, output_3mf, bambu_plate_id)
+
             # Clean up temporary clean 3MF if we created one
             if working_3mf != source_3mf and working_3mf.exists():
                 working_3mf.unlink()
@@ -796,6 +1004,71 @@ class ProfileEmbedder:
                 temp_working.unlink()
             logger.error(f"Failed to embed profiles: {str(e)}")
             raise ProfileEmbedError(f"Profile embedding failed: {str(e)}") from e
+
+    @staticmethod
+    def _inject_custom_gcode(
+        source_3mf: Path,
+        output_3mf: Path,
+        bambu_plate_id: int,
+    ) -> None:
+        """Inject custom_gcode_per_layer.xml from a Bambu source into a
+        trimesh-rebuilt output 3MF.
+
+        Extracts the MultiAsSingle tool-change entries for the specified
+        Bambu plate and remaps them to plate 1 (since trimesh creates a
+        single-plate file).
+        """
+        try:
+            with zipfile.ZipFile(source_3mf, 'r') as zf:
+                if 'Metadata/custom_gcode_per_layer.xml' not in zf.namelist():
+                    return
+                src_xml = zf.read('Metadata/custom_gcode_per_layer.xml')
+
+            root = ET.fromstring(src_xml)
+            target_plate = None
+            for plate in root.findall('plate'):
+                info = plate.find('plate_info')
+                if info is not None and info.get('id') == str(bambu_plate_id):
+                    target_plate = plate
+                    break
+
+            if target_plate is None:
+                logger.debug(
+                    f"No custom_gcode for Bambu plate {bambu_plate_id}"
+                )
+                return
+
+            # Remap to plate 1 for our single-plate trimesh output
+            info_elem = target_plate.find('plate_info')
+            if info_elem is not None:
+                info_elem.set('id', '1')
+
+            # Build new custom_gcode XML with just this plate
+            new_root = ET.Element('custom_gcodes_per_layer')
+            new_root.append(target_plate)
+            custom_gcode_bytes = ET.tostring(
+                new_root, encoding='utf-8', xml_declaration=True
+            )
+
+            # Inject into the output 3MF
+            temp_zip = output_3mf.with_suffix('.tmp_cgc')
+            with zipfile.ZipFile(output_3mf, 'r') as zin:
+                with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as zout:
+                    for item in zin.infolist():
+                        if item.filename == 'Metadata/custom_gcode_per_layer.xml':
+                            continue  # Replace
+                        zout.writestr(item, zin.read(item.filename))
+                    zout.writestr(
+                        'Metadata/custom_gcode_per_layer.xml',
+                        custom_gcode_bytes,
+                    )
+            temp_zip.replace(output_3mf)
+            logger.info(
+                f"Injected MultiAsSingle custom_gcode from Bambu plate "
+                f"{bambu_plate_id} (remapped to plate 1)"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to inject custom_gcode: {e}")
 
     async def embed_profiles_async(self, **kwargs) -> Path:
         """Async version of embed_profiles — runs in thread pool to avoid blocking the event loop."""
@@ -876,11 +1149,17 @@ class ProfileEmbedder:
     def _sanitize_model_settings(
         model_settings_bytes: bytes,
         extruder_remap: Dict[int, int] | None = None,
+        bed_center_mm: float = 135.0,
     ) -> bytes:
         """Sanitize model_settings metadata known to trigger Orca instability.
 
         Some Bambu exports keep stale plate names in `plater_name` when objects are
         moved between/deleted plates. Snapmaker Orca v2.2.4 can segfault on those.
+
+        Also recenters assemble_item transforms so objects land on the bed.
+        Bambu multi-plate files use global coordinates where off-plate objects
+        can be hundreds or thousands of mm away from origin, causing
+        "Nothing to be sliced" errors on smaller beds like the 270mm Snapmaker U1.
         """
         try:
             root = ET.fromstring(model_settings_bytes)
@@ -898,6 +1177,31 @@ class ProfileEmbedder:
                         if dst_ext is not None and 1 <= dst_ext <= 4 and dst_ext != src_ext:
                             meta.set('value', str(dst_ext))
                             changed = True
+
+            # Fix assemble_item transforms for Bambu multi-plate files.
+            # Bambu encodes multi-plate layout via assemble_item transforms with
+            # global coordinates (x=1000s) and vertical stacking (z=62mm, 125mm).
+            # These don't map to our single-plate 270mm bed.
+            # Fix: recenter x,y to bed center and set z=0 (--ensure-on-bed
+            # in slicer.py will lift objects above the bed surface).
+            for assemble in root.findall('.//assemble'):
+                for item in assemble.findall('assemble_item'):
+                    tfm = item.get('transform', '')
+                    vals = tfm.split()
+                    if len(vals) == 12:
+                        try:
+                            tx = float(vals[9])
+                            ty = float(vals[10])
+                            if tx > bed_center_mm * 2 or tx < 0 or ty > bed_center_mm * 2 or ty < 0:
+                                vals[9] = f"{bed_center_mm:.6f}"
+                                vals[10] = f"{bed_center_mm:.6f}"
+                            # Always reset Z to match the build item z-offset
+                            # instead of Bambu's vertical plate stacking
+                            vals[11] = "0"
+                            item.set('transform', ' '.join(vals))
+                            changed = True
+                        except ValueError:
+                            pass
 
             if changed:
                 logger.info("Sanitized model_settings metadata")
