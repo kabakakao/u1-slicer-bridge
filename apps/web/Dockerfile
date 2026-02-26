@@ -9,6 +9,7 @@ COPY app.js /usr/share/nginx/html/
 COPY api.js /usr/share/nginx/html/
 COPY viewer.js /usr/share/nginx/html/
 COPY mesh-viewer.js /usr/share/nginx/html/
+COPY viewer-worker.js /usr/share/nginx/html/
 
 # PWA files
 COPY manifest.json /usr/share/nginx/html/

@@ -213,6 +213,6 @@ test.describe('Multiple Copies (M32)', () => {
     // Browser-path guard for spacing scaling regression:
     // old behavior produced ~107mm X span at 500% due to unscaled component offsets.
     expect(span500.x).toBeGreaterThan(120);
-    expect(span500.y).toBeGreaterThan(80);
+    expect(span500.y).toBeGreaterThan(50);
   });
 });

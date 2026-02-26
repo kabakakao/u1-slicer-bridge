@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Tuple
 
@@ -37,6 +37,55 @@ from transform_3mf import apply_object_transforms_to_3mf
 router = APIRouter(tags=["slicing"])
 logger = logging.getLogger(__name__)
 INT32_MAX = 2_147_483_647
+
+# ---------------------------------------------------------------------------
+# In-memory progress store for active slicing jobs.
+# Keys are job_id strings.  Values: {"progress": 0-100, "message": str}
+# Thread-safe for simple dict assignments under CPython's GIL.
+# ---------------------------------------------------------------------------
+_job_progress: Dict[str, Dict] = {}
+
+
+def _update_progress(job_id: str, progress: int, message: str = ""):
+    _job_progress[job_id] = {"progress": min(max(progress, 0), 100), "message": message}
+
+
+def _get_progress(job_id: str) -> Dict:
+    return _job_progress.get(job_id, {"progress": 0, "message": ""})
+
+
+def _clear_progress(job_id: str):
+    _job_progress.pop(job_id, None)
+
+
+def _get_bambu_plate_for_object(source_3mf: Path, object_id: str) -> Optional[int]:
+    """Look up the Bambu plater_id that contains the given object_id.
+
+    Bambu Studio stores plate→object mappings in model_settings.config as
+    <plate> elements containing <model_instance> entries with object_id values.
+    Our multi_plate_parser maps build <item> indices to "plates", which differ
+    from Bambu's plater_id numbering in multi-plate files.
+
+    Returns the plater_id (1-indexed) or None if not found.
+    """
+    try:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(source_3mf, 'r') as zf:
+            if 'Metadata/model_settings.config' not in zf.namelist():
+                return None
+            root = ET.fromstring(zf.read('Metadata/model_settings.config'))
+            for plate in root.findall('.//plate'):
+                plater_id = None
+                for meta in plate.findall('metadata'):
+                    if meta.get('key') == 'plater_id':
+                        plater_id = meta.get('value')
+                for mi in plate.findall('model_instance'):
+                    for m in mi.findall('metadata'):
+                        if m.get('key') == 'object_id' and m.get('value') == str(object_id):
+                            return int(plater_id) if plater_id else None
+    except Exception as e:
+        logger.warning(f"Could not look up Bambu plate for object {object_id}: {e}")
+    return None
 
 
 def _is_wipe_tower_conflict(result: Dict[str, object]) -> bool:
@@ -821,6 +870,7 @@ def _clamp_int32(value: Optional[int]) -> Optional[int]:
 
 
 class SliceRequest(BaseModel):
+    job_id: Optional[str] = None  # Client-provided job ID for progress polling
     filament_ids: Optional[List[int]] = None  # Multi-filament support (list of filament IDs)
     filament_id: Optional[int] = None  # Single filament (for backward compatibility)
     filament_colors: Optional[List[str]] = None  # Override colors per extruder (e.g., ["#FF0000", "#00FF00"])
@@ -855,6 +905,7 @@ class SliceRequest(BaseModel):
 
 
 class SlicePlateRequest(BaseModel):
+    job_id: Optional[str] = None  # Client-provided job ID for progress polling
     plate_id: int
     filament_ids: Optional[List[int]] = None  # Multi-filament support
     filament_id: Optional[int] = None  # Single filament (backward compat)
@@ -966,8 +1017,9 @@ async def slice_upload(upload_id: int, request: SliceRequest):
     8. Update database
     """
     pool = get_pg_pool()
-    job_id = f"slice_{uuid.uuid4().hex[:12]}"
+    job_id = request.job_id or f"slice_{uuid.uuid4().hex[:12]}"
     job_logger = setup_job_logging(job_id)
+    _update_progress(job_id, 1, "Validating request")
 
     job_logger.info(f"Starting slicing job for upload {upload_id}")
     job_logger.info(
@@ -1111,12 +1163,15 @@ async def slice_upload(upload_id: int, request: SliceRequest):
 
     # Execute slicing workflow
     try:
+        _update_progress(job_id, 3, "Preparing workspace")
+
         # Create workspace directory
         workspace = Path(f"/cache/slicing/{job_id}")
         workspace.mkdir(parents=True, exist_ok=True)
         job_logger.info(f"Created workspace: {workspace}")
 
         # Embed profiles into original 3MF
+        _update_progress(job_id, 5, "Embedding profiles")
         job_logger.info("Embedding Orca profiles into original 3MF...")
         embedder = ProfileEmbedder(Path("/app/orca_profiles"))
         embedded_3mf = workspace / "embedded.3mf"
@@ -1290,12 +1345,20 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             )
 
         # Slice with Orca (async to avoid blocking other API requests)
+        _update_progress(job_id, 15, "Starting slicer")
         job_logger.info("Invoking Orca Slicer...")
         slicer = OrcaSlicer(printer_profile)
         scale_percent = float(request.scale_percent if request.scale_percent is not None else 100.0)
         scale_factor = scale_percent / 100.0
         scale_active = abs(scale_percent - 100.0) > 0.001
         layout_scale_active = scale_percent > 100.001
+
+        # Progress callback maps slicer's 0-100% to our 20-85% range
+        def _slicer_progress(pct, msg):
+            if pct >= 100:
+                return  # Skip slicer's "All done" — we have post-processing phases
+            mapped = 20 + int(pct * 0.65)
+            _update_progress(job_id, mapped, msg)
 
         source_for_slice = embedded_3mf
         if layout_scale_active:
@@ -1336,6 +1399,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             workspace,
             scale_factor=scale_factor,
             disable_arrange=bool(request.object_transforms),
+            progress_callback=_slicer_progress,
         )
 
         if not result["success"] and scale_active:
@@ -1366,6 +1430,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 workspace,
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
+                progress_callback=_slicer_progress,
             )
 
         if (
@@ -1381,6 +1446,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 workspace,
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
+                progress_callback=_slicer_progress,
             )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
@@ -1453,6 +1519,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 workspace,
                 scale_factor=scale_factor,
                 disable_arrange=bool(request.object_transforms),
+                progress_callback=_slicer_progress,
             )
 
         if not result["success"]:
@@ -1461,6 +1528,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             job_logger.error(f"stderr: {result['stderr']}")
             raise SlicingError(f"Orca Slicer failed: {result['stderr'][:200]}")
 
+        _update_progress(job_id, 85, "Slicer finished")
         job_logger.info("Slicing completed successfully")
         job_logger.info(f"Orca stdout: {result['stdout'][:500]}")
 
@@ -1489,6 +1557,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 job_logger.info(f"Tool remap skipped: {remap_result}")
 
         # Parse G-code metadata (async to avoid blocking event loop)
+        _update_progress(job_id, 88, "Parsing G-code metadata")
         job_logger.info("Parsing G-code metadata...")
         metadata = await asyncio.to_thread(slicer.parse_gcode_metadata, gcode_workspace_path)
         metadata["estimated_time_seconds"] = _clamp_int32(metadata.get("estimated_time_seconds")) or 0
@@ -1510,6 +1579,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                        f"Z={metadata['bounds']['max_z']:.1f}")
 
         # Validate bounds
+        _update_progress(job_id, 92, "Validating bounds")
         job_logger.info("Validating bounds against printer build volume...")
         try:
             slicer.validate_bounds(gcode_workspace_path)
@@ -1519,6 +1589,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             raise
 
         # Move G-code to final location
+        _update_progress(job_id, 95, "Saving G-code")
         slices_dir = Path("/data/slices")
         slices_dir.mkdir(parents=True, exist_ok=True)
         final_gcode_path = slices_dir / f"{job_id}.gcode"
@@ -1559,6 +1630,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_used_g_json
             )
 
+        _update_progress(job_id, 100, "Complete")
         job_logger.info(f"Slicing job {job_id} completed successfully")
 
         # Determine display colors: override > detected > filament defaults
@@ -1574,6 +1646,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         else:
             display_colors = json.loads(filament_colors_json)
 
+        _clear_progress(job_id)
         return {
             "job_id": job_id,
             "status": "completed",
@@ -1599,6 +1672,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 "(slicer crash). Try single-filament slicing for now."
             )
         job_logger.error(f"Slicing failed: {err_text}")
+        _clear_progress(job_id)
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1627,6 +1701,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
 
     except Exception as e:
         job_logger.error(f"Unexpected error: {str(e)}")
+        _clear_progress(job_id)
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1664,8 +1739,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
     10. Update database
     """
     pool = get_pg_pool()
-    job_id = f"slice_plate_{uuid.uuid4().hex[:12]}"
+    job_id = request.job_id or f"slice_plate_{uuid.uuid4().hex[:12]}"
     job_logger = setup_job_logging(job_id)
+    _update_progress(job_id, 1, "Validating request")
 
     job_logger.info(f"Starting plate slicing job for upload {upload_id}, plate {request.plate_id}")
     job_logger.info(
@@ -1831,6 +1907,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
 
     # Execute plate-specific slicing workflow
     try:
+        _update_progress(job_id, 3, "Preparing workspace")
+
         # Create workspace directory
         workspace = Path(f"/cache/slicing/{job_id}")
         workspace.mkdir(parents=True, exist_ok=True)
@@ -1839,6 +1917,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         embedded_3mf = workspace / "sliceable.3mf"
 
         # Embed profiles into source 3MF and slice only selected plate via CLI
+        _update_progress(job_id, 5, "Embedding profiles")
         job_logger.info("Embedding Orca profiles into 3MF...")
         embedder = ProfileEmbedder(Path("/app/orca_profiles"))
 
@@ -1967,6 +2046,26 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["machine_load_filament_time"] = "0"
             overrides["machine_unload_filament_time"] = "0"
 
+        # Compute Bambu plate ID before embed_profiles so we can pass it for
+        # MultiAsSingle custom_gcode injection.
+        bambu_plate = None
+        if file_meta["is_bambu"]:
+            bambu_plate = _get_bambu_plate_for_object(source_3mf, str(target_plate.object_id))
+            if bambu_plate is not None:
+                if bambu_plate != request.plate_id:
+                    job_logger.info(
+                        f"Bambu file — mapping plate {request.plate_id} "
+                        f"(object {target_plate.object_id}) to Orca plate "
+                        f"{bambu_plate} (Bambu plater_id)"
+                    )
+            else:
+                # Fallback for Bambu files without plater_id metadata
+                bambu_plate = 1
+                job_logger.info(
+                    f"Bambu file — no plater_id found for object "
+                    f"{target_plate.object_id}, falling back to Orca plate 1"
+                )
+
         try:
             await embedder.embed_profiles_async(
                 source_3mf=source_3mf,
@@ -1979,6 +2078,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
                 precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
                 enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
+                bambu_plate_id=bambu_plate,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -2002,35 +2102,27 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             )
 
         # Slice with Orca (async to avoid blocking other API requests)
+        _update_progress(job_id, 15, "Starting slicer")
         job_logger.info("Invoking Orca Slicer...")
         slicer = OrcaSlicer(printer_profile)
         scale_percent = float(request.scale_percent if request.scale_percent is not None else 100.0)
 
-        # Bambu files define plates via Metadata/plate_*.json, not always <item> indices.
-        # Some exports have only plate_1.json even when our parser exposes multiple
-        # build items; others (e.g. Shashibo) have real plate_1..N.json files.
-        # Prefer the requested plate when that Bambu plate JSON exists, otherwise
-        # fall back to Orca plate 1 for compatibility with the legacy mismatch case.
+        # Progress callback maps slicer's 0-100% to our 20-85% range
+        def _slicer_progress(pct, msg):
+            if pct >= 100:
+                return  # Skip slicer's "All done" — we have post-processing phases
+            mapped = 20 + int(pct * 0.65)
+            _update_progress(job_id, mapped, msg)
+
+        # For Bambu files, use the actual Bambu plater_id so OrcaSlicer
+        # slices the correct plate from the original (unmodified) 3MF.
         effective_plate_id = request.plate_id
-        if file_meta["is_bambu"] and request.plate_id != 1:
-            bambu_plate_ids = _index_bambu_plate_json_ids(source_3mf)
-            if request.plate_id in bambu_plate_ids:
-                job_logger.info(
-                    f"Bambu file — using requested Orca plate {request.plate_id} "
-                    f"(found Metadata/plate_{request.plate_id}.json)"
-                )
-            else:
-                if bambu_plate_ids:
-                    job_logger.info(
-                        f"Bambu file ??? using Orca plate 1 instead of requested plate "
-                        f"{request.plate_id} (available Bambu plates: {sorted(bambu_plate_ids)})"
-                    )
-                    effective_plate_id = 1
-                else:
-                    job_logger.info(
-                        f"Bambu file ??? using requested Orca plate {request.plate_id} "
-                        f"(no Metadata/plate_N.json found; keeping parser plate index)"
-                    )
+        if file_meta["is_bambu"] and bambu_plate is not None:
+            effective_plate_id = bambu_plate
+            job_logger.info(
+                f"Bambu file — using Orca plate {bambu_plate} "
+                f"(mapped from user plate {request.plate_id})"
+            )
 
         scale_factor = scale_percent / 100.0
         scale_active = abs(scale_percent - 100.0) > 0.001
@@ -2052,6 +2144,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             plate_index=effective_plate_id,
             scale_factor=scale_factor,
             disable_arrange=bool(request.object_transforms),
+            progress_callback=_slicer_progress,
         )
 
         if not result["success"] and scale_active:
@@ -2065,6 +2158,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 plate_index=effective_plate_id,
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
+                progress_callback=_slicer_progress,
             )
 
         if (
@@ -2081,6 +2175,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 plate_index=effective_plate_id,
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
+                progress_callback=_slicer_progress,
             )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
@@ -2134,6 +2229,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 plate_index=effective_plate_id,
                 scale_factor=scale_factor,
                 disable_arrange=bool(request.object_transforms),
+                progress_callback=_slicer_progress,
             )
 
         if not result["success"]:
@@ -2142,6 +2238,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"stderr: {result['stderr']}")
             raise SlicingError(f"Orca Slicer failed: {result['stderr'][:200]}")
 
+        _update_progress(job_id, 85, "Slicer finished")
         job_logger.info("Slicing completed successfully")
         job_logger.info(f"Orca stdout: {result['stdout'][:500]}")
 
@@ -2170,6 +2267,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 job_logger.info(f"Tool remap skipped: {remap_result}")
 
         # Parse G-code metadata (async to avoid blocking event loop)
+        _update_progress(job_id, 88, "Parsing G-code metadata")
         job_logger.info("Parsing G-code metadata...")
         metadata = await asyncio.to_thread(slicer.parse_gcode_metadata, gcode_workspace_path)
         metadata["estimated_time_seconds"] = _clamp_int32(metadata.get("estimated_time_seconds")) or 0
@@ -2191,6 +2289,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                        f"layers={metadata.get('layer_count', 'N/A')}")
 
         # Validate bounds
+        _update_progress(job_id, 92, "Validating bounds")
         job_logger.info("Validating bounds against printer build volume...")
         try:
             slicer.validate_bounds(gcode_workspace_path)
@@ -2200,6 +2299,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             raise
 
         # Move G-code to final location
+        _update_progress(job_id, 95, "Saving G-code")
         slices_dir = Path("/data/slices")
         slices_dir.mkdir(parents=True, exist_ok=True)
         final_gcode_path = slices_dir / f"{job_id}.gcode"
@@ -2240,6 +2340,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_used_g_json
             )
 
+        _update_progress(job_id, 100, "Complete")
         job_logger.info(f"Plate slicing job {job_id} completed successfully")
 
         # Determine display colors: override > detected > filament defaults
@@ -2255,6 +2356,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         else:
             display_colors = json.loads(filament_colors_json)
 
+        _clear_progress(job_id)
         return {
             "job_id": job_id,
             "status": "completed",
@@ -2282,6 +2384,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 "(slicer crash). Try single-filament slicing for now."
             )
         job_logger.error(f"Plate slicing failed: {err_text}")
+        _clear_progress(job_id)
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -2309,6 +2412,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
 
     except Exception as e:
         job_logger.error(f"Unexpected error: {str(e)}")
+        _clear_progress(job_id)
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -2728,6 +2832,18 @@ async def get_slicing_job(job_id: str):
         "error_message": job["error_message"]
     }
 
+    # Add real-time progress for in-progress jobs
+    if job["status"] == "processing":
+        prog = _get_progress(job["job_id"])
+        result["progress"] = prog["progress"]
+        result["progress_message"] = prog["message"]
+    elif job["status"] == "completed":
+        result["progress"] = 100
+        result["progress_message"] = "Complete"
+    elif job["status"] == "failed":
+        result["progress"] = 0
+        result["progress_message"] = job["error_message"] or "Failed"
+
     # Add metadata if job is completed
     if job["status"] == "completed":
         result["metadata"] = {
@@ -2765,6 +2881,66 @@ async def download_gcode(job_id: str):
             media_type="text/plain",
             filename=f"{job_id}.gcode"
         )
+
+
+@router.get("/jobs/{job_id}/gcode/preview-image")
+async def preview_gcode_image(
+    job_id: str,
+    size: int = Query(800, ge=200, le=2000),
+):
+    """Render a server-side 2D top-down PNG preview of the G-code.
+
+    Used for large files (>50 MB) where client-side 3D rendering is too slow.
+    Returns a PNG image that can be displayed directly in an <img> tag.
+    """
+    from gcode_image_renderer import render_gcode_image
+    import io
+
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        job = await conn.fetchrow(
+            "SELECT gcode_path, gcode_size, status, filament_colors "
+            "FROM slicing_jobs WHERE job_id = $1",
+            job_id,
+        )
+
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job["status"] != "completed":
+            raise HTTPException(status_code=400, detail="Job not completed")
+
+        gcode_path = Path(job["gcode_path"])
+        if not gcode_path.exists():
+            raise HTTPException(status_code=404, detail="G-code file not found")
+
+    # Parse filament colors from DB
+    filament_colors = None
+    if job["filament_colors"]:
+        try:
+            filament_colors = json.loads(job["filament_colors"])
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Render image in thread pool (CPU-bound)
+    img = await asyncio.to_thread(
+        render_gcode_image,
+        gcode_path,
+        image_size=size,
+        filament_colors=filament_colors,
+    )
+
+    # Encode to PNG
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
 
 
 @router.get("/jobs/{job_id}/download-3mf")

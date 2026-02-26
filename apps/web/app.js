@@ -92,6 +92,13 @@ function app() {
         presetsLoaded: false,
         presetsSaving: false,
         presetMessage: null,
+        presetMessageOk: true,
+        _presetMessageTimer: null,
+        filamentSyncing: false,
+        syncPreviewOpen: false,
+        syncPreviewSlots: [],
+        syncApplyColors: true,
+        syncApplyProfiles: true,
         maxExtruders: 4,
         multicolorNotice: null,
 
@@ -100,6 +107,8 @@ function app() {
         printerBusy: false,
         printerStatus: 'Checking...',
         printerWebcams: [],
+        printerHasFilamentConfig: false,
+        printerFilamentSlots: [],
         webcamsExpanded: false,
         webcamImageFallback: {},
         webcamImageNonce: Date.now(),
@@ -205,6 +214,7 @@ function app() {
         // Results
         sliceResult: null,
         sliceProgress: 0,         // Progress percentage (0-100)
+        sliceMessage: '',         // Current slicer phase message
 
         // Polling interval
         sliceInterval: null,
@@ -275,6 +285,8 @@ function app() {
                     this.webcamImageFallback = {};
                     this.webcamImageNonce = Date.now();
                 }
+                this.printerHasFilamentConfig = status.print_status?.has_filament_config || false;
+                this.printerFilamentSlots = status.print_status?.filament_slots || [];
                 // Show print progress in header when actively printing
                 if (status.print_status && status.print_status.state === 'printing') {
                     const pct = Math.round((status.print_status.progress || 0) * 100);
@@ -413,10 +425,145 @@ function app() {
                 this.showError(this.presetMessage);
             } finally {
                 this.presetsSaving = false;
-                setTimeout(() => {
+                if (this._presetMessageTimer) clearTimeout(this._presetMessageTimer);
+                this._presetMessageTimer = setTimeout(() => {
                     this.presetMessage = null;
-                }, 3000);
+                }, 5000);
             }
+        },
+
+        async prepareSyncPreview() {
+            this.presetMessage = null;
+            this.presetMessageOk = true;
+            this.syncPreviewOpen = false;
+            this.filamentSyncing = true;
+            try {
+                await this.checkPrinterStatus();
+
+                if (!this.printerConnected) {
+                    this.presetMessage = 'Printer offline — cannot sync filament colors.';
+                    this.presetMessageOk = false;
+                    return;
+                }
+
+                const slots = (this.printerFilamentSlots || []).filter((slot) => slot && slot.color && slot.loaded !== false);
+                if (slots.length === 0) {
+                    this.presetMessage = 'No filament detected on printer.';
+                    this.presetMessageOk = false;
+                    return;
+                }
+
+                const preview = [];
+                for (let i = 0; i < this.maxExtruders; i++) {
+                    const printerSlot = i < slots.length ? slots[i] : null;
+                    const preset = this.extruderPresets[i];
+                    const currentFilament = preset.filament_id
+                        ? (this.filaments || []).find(f => f.id === Number(preset.filament_id))
+                        : null;
+                    const match = printerSlot && printerSlot.material_type
+                        ? this.findFilamentMatchForSlot(printerSlot)
+                        : null;
+
+                    preview.push({
+                        slotIndex: i,
+                        label: `E${i + 1}`,
+                        hasFilament: !!printerSlot,
+                        currentColor: preset.color_hex || '#FFFFFF',
+                        newColor: printerSlot ? printerSlot.color : null,
+                        colorChanged: printerSlot ? (preset.color_hex || '#FFFFFF').toUpperCase() !== (printerSlot.color || '').toUpperCase() : false,
+                        currentFilamentId: preset.filament_id || null,
+                        currentFilamentName: currentFilament ? currentFilament.name : null,
+                        matchedFilament: match ? { id: match.id, name: match.name } : null,
+                        profileChanged: match ? match.id !== Number(preset.filament_id) : false,
+                        printerMaterial: printerSlot ? printerSlot.material_type : null,
+                        printerManufacturer: printerSlot ? printerSlot.manufacturer : null,
+                    });
+                }
+
+                this.syncPreviewSlots = preview;
+                this.syncApplyColors = true;
+                this.syncApplyProfiles = true;
+                this.syncPreviewOpen = true;
+            } catch (err) {
+                this.presetMessage = `Failed to sync filament colors: ${err.message}`;
+                this.presetMessageOk = false;
+                this.showError(this.presetMessage);
+            } finally {
+                this.filamentSyncing = false;
+            }
+        },
+
+        cancelSyncPreview() {
+            this.syncPreviewOpen = false;
+            this.syncPreviewSlots = [];
+        },
+
+        async applySyncPreview() {
+            try {
+                for (const slot of this.syncPreviewSlots) {
+                    if (!slot.hasFilament) continue;
+                    if (this.syncApplyColors && slot.newColor) {
+                        this.extruderPresets[slot.slotIndex].color_hex = slot.newColor;
+                    }
+                    if (this.syncApplyProfiles && slot.matchedFilament) {
+                        this.extruderPresets[slot.slotIndex].filament_id = slot.matchedFilament.id;
+                    }
+                }
+
+                await this.saveExtruderPresets();
+                this.syncPreviewOpen = false;
+                this.syncPreviewSlots = [];
+
+                if (this._presetMessageTimer) clearTimeout(this._presetMessageTimer);
+                const parts = [];
+                if (this.syncApplyColors) parts.push('colors');
+                if (this.syncApplyProfiles) parts.push('filament profiles');
+                this.presetMessage = `Synced ${parts.join(' and ')} from printer.`;
+                this.presetMessageOk = true;
+                this._presetMessageTimer = setTimeout(() => { this.presetMessage = null; }, 5000);
+            } catch (err) {
+                this.presetMessage = `Failed to sync: ${err.message}`;
+                this.presetMessageOk = false;
+                this.showError(this.presetMessage);
+            }
+        },
+
+        normalizeMaterialType(value) {
+            if (!value || typeof value !== 'string') return '';
+            const compact = value.trim().toUpperCase().replace(/\s+/g, '');
+            const aliases = {
+                'PLA+': 'PLA', 'PLAPLUS': 'PLA', 'PET-G': 'PETG',
+                'ABS+': 'ABS', 'NYLON': 'PA', 'PA6': 'PA', 'PA12': 'PA',
+            };
+            return aliases[compact] || compact;
+        },
+
+        findFilamentMatchForSlot(slot) {
+            if (!slot.material_type || !this.filaments || this.filaments.length === 0) return null;
+            const afcMat = this.normalizeMaterialType(slot.material_type);
+            let bestMatch = null;
+            let bestScore = 0;
+            for (const fil of this.filaments) {
+                let score = 0;
+                const filMat = this.normalizeMaterialType(fil.material);
+                if (filMat === afcMat) score += 100;
+                else continue;
+                if (slot.manufacturer && fil.name) {
+                    const mfr = slot.manufacturer.toLowerCase();
+                    const name = fil.name.toLowerCase();
+                    if (name.includes(mfr) || mfr.includes(name.split(' ')[0])) score += 40;
+                    else {
+                        const tokens = mfr.split(/[\s_\-]+/);
+                        if (tokens.some((t) => t.length >= 3 && name.includes(t))) score += 20;
+                    }
+                }
+                if (!bestMatch) score += 5;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMatch = fil;
+                }
+            }
+            return bestScore > 0 ? bestMatch : null;
         },
 
         /**
@@ -2168,15 +2315,12 @@ function app() {
             this.currentStep = 'slicing';
             this.activeTab = 'upload';
             this.sliceProgress = 0;
+            this.sliceMessage = '';
             this.accordionColours = false;
             this.accordionSettings = false;
 
-            // Animate progress during the blocking slice POST.
-            // Starts fast, slows down as it approaches 90%.
-            const progressTimer = setInterval(() => {
-                const remaining = 90 - this.sliceProgress;
-                this.sliceProgress += Math.max(1, Math.floor(remaining * 0.08));
-            }, 1000);
+            // Generate a job_id so we can poll progress immediately
+            const clientJobId = `slice_${Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join('')}`;
 
             try {
                 let result;
@@ -2238,31 +2382,37 @@ function app() {
                     sliceSettings.filament_id = this.selectedFilament;
                 }
                 
+                // Include client-generated job_id for immediate progress polling
+                sliceSettings.job_id = clientJobId;
+
+                // Start polling for real progress immediately (runs during the POST await)
+                this.pollSliceStatus(clientJobId);
+
                 if (isMultiPlate) {
                     // Slice specific plate
-                    console.log(`Slicing plate ${selectedPlateId} from upload ${uploadId}`);
+                    console.log(`Slicing plate ${selectedPlateId} from upload ${uploadId} (job: ${clientJobId})`);
                     result = await api.slicePlate(uploadId, selectedPlateId, sliceSettings);
                 } else {
                     // Slice regular upload
-                    console.log(`Slicing upload ${uploadId}`);
+                    console.log(`Slicing upload ${uploadId} (job: ${clientJobId})`);
                     result = await api.sliceUpload(uploadId, sliceSettings);
                 }
 
-                console.log('Slice started:', result);
-                clearInterval(progressTimer);
+                console.log('Slice completed:', result);
+                clearInterval(this.sliceInterval);
 
                 if (result.status === 'completed') {
-                    // Synchronous slicing (completed immediately)
                     this.sliceResult = result;
                     this.sliceProgress = 100;
+                    this.sliceMessage = 'Complete';
                     this.currentStep = 'complete';
-                    await this.loadJobs(); // Refresh sliced history immediately
+                    await this.loadJobs();
                 } else {
-                    // Async slicing - poll for completion
+                    // Shouldn't normally reach here, but handle as async fallback
                     this.pollSliceStatus(result.job_id);
                 }
             } catch (err) {
-                clearInterval(progressTimer);
+                clearInterval(this.sliceInterval);
                 this.showError(`Slicing failed: ${err.message}`);
                 this.currentStep = 'configure';
                 console.error(err);
@@ -2280,27 +2430,35 @@ function app() {
             this.sliceInterval = setInterval(async () => {
                 try {
                     const job = await api.getJobStatus(jobId);
-                    console.log('Slice status:', job.status);
 
-                    // Increment progress (fake progress since API doesn't provide real progress)
-                    this.sliceProgress = Math.min(90, this.sliceProgress + 5);
+                    // Use real progress from the API
+                    if (job.progress !== undefined) {
+                        this.sliceProgress = job.progress;
+                    }
+                    if (job.progress_message) {
+                        this.sliceMessage = job.progress_message;
+                    }
 
                     if (job.status === 'completed') {
                         clearInterval(this.sliceInterval);
                         this.sliceResult = job;
                         this.sliceProgress = 100;
+                        this.sliceMessage = 'Complete';
                         this.currentStep = 'complete';
                         console.log('Slicing completed');
-                        this.loadJobs(); // Refresh jobs list
+                        this.loadJobs();
                     } else if (job.status === 'failed') {
                         clearInterval(this.sliceInterval);
                         this.showError(`Slicing failed: ${job.error_message || 'Unknown error'}`);
                         this.currentStep = 'configure';
                     }
                 } catch (err) {
-                    console.error('Failed to check slice status:', err);
+                    // 404 is expected during early polls before DB record is created
+                    if (!err.message?.includes('404')) {
+                        console.error('Failed to check slice status:', err);
+                    }
                 }
-            }, 2000); // Poll every 2 seconds
+            }, 1000); // Poll every 1 second for real-time progress
         },
 
         /**
@@ -2346,6 +2504,7 @@ function app() {
             this.sliceResult = null;
             this.clearMakerWorld();
             this.sliceProgress = 0;
+            this.sliceMessage = '';
             this.uploadProgress = 0;
             this.uploadPhase = 'idle';
             this.resetJobOverrideSettings();
@@ -2371,6 +2530,7 @@ function app() {
         async goBackToConfigure() {
             this.sliceResult = null;
             this.sliceProgress = 0;
+            this.sliceMessage = '';
             this.currentStep = 'configure';
             this.activeTab = 'upload';
 

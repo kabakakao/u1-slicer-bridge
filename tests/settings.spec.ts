@@ -24,6 +24,214 @@ test.describe('Settings Modal', () => {
     await expect(page.locator('span').filter({ hasText: /^E4$/ }).first()).toBeVisible();
   });
 
+  test('Sync from Printer maps color and matches filament by material + manufacturer', async ({ page, request }) => {
+    const API = 'http://localhost:8000';
+    let createdFilamentId: number | undefined;
+    let originalPresets: any;
+
+    try {
+      const presetsRes = await request.get(`${API}/presets/extruders`);
+      expect(presetsRes.ok()).toBe(true);
+      originalPresets = await presetsRes.json();
+
+      const manufacturerHint = `ZetaBrand${Date.now()}`;
+      const createRes = await request.post(`${API}/filaments`, {
+        data: {
+          name: `${manufacturerHint} PLA Profile`,
+          material: 'PLA',
+          nozzle_temp: 210,
+          bed_temp: 60,
+          print_speed: 60,
+          bed_type: 'PEI',
+          color_hex: '#ABCDEF',
+          source_type: 'manual',
+        },
+      });
+      expect(createRes.ok()).toBe(true);
+      const created = await createRes.json();
+      createdFilamentId = created.id;
+
+      await page.evaluate(async () => {
+        const body = document.querySelector('body') as any;
+        const scopes = body?._x_dataStack || [];
+        for (const scope of scopes) {
+          if ('loadFilaments' in scope && typeof scope.loadFilaments === 'function') {
+            await scope.loadFilaments();
+            break;
+          }
+        }
+      });
+
+      await page.waitForFunction((hint) => {
+        const body = document.querySelector('body') as any;
+        const scopes = body?._x_dataStack || [];
+        for (const scope of scopes) {
+          if ('filaments' in scope && Array.isArray(scope.filaments)) {
+            return scope.filaments.some((f: any) => String(f?.name || '').includes(String(hint)));
+          }
+        }
+        return false;
+      }, manufacturerHint, { timeout: 10_000 });
+
+      await page.evaluate((hint) => {
+        const body = document.querySelector('body') as any;
+        const scopes = body?._x_dataStack || [];
+        for (const scope of scopes) {
+          if ('checkPrinterStatus' in scope && 'printerFilamentSlots' in scope) {
+            scope.printerHasFilamentConfig = true;
+            const highestId = window.setInterval(() => {}, 99999);
+            for (let i = 1; i <= highestId; i++) window.clearInterval(i);
+            scope.checkPrinterStatus = async function () {
+              this.printerConnected = true;
+              this.printerStatus = 'Connected';
+              this.printerHasFilamentConfig = true;
+              this.printerFilamentSlots = [{
+                label: 'E1',
+                color: '#112233',
+                loaded: true,
+                material_type: 'PLA',
+                manufacturer: hint,
+              }];
+            };
+            break;
+          }
+        }
+      }, manufacturerHint);
+
+      // Wait for Alpine reactivity to show the button after setting printerHasFilamentConfig
+      await page.getByRole('button', { name: 'Sync from Printer' }).waitFor({ state: 'visible', timeout: 5_000 });
+      await page.getByRole('button', { name: 'Sync from Printer' }).click();
+
+      // Wait for sync preview panel to appear
+      await page.waitForFunction(() => {
+        const body = document.querySelector('body') as any;
+        for (const scope of (body?._x_dataStack || [])) {
+          if ('syncPreviewOpen' in scope) return scope.syncPreviewOpen === true;
+        }
+        return false;
+      }, undefined, { timeout: 10_000 });
+
+      // Click Apply in the preview panel
+      await page.getByRole('button', { name: 'Apply' }).click();
+
+      await page.waitForFunction(() => {
+        const body = document.querySelector('body') as any;
+        if (body?._x_dataStack) {
+          for (const scope of body._x_dataStack) {
+            if ('presetMessage' in scope) {
+              return String(scope.presetMessage || '').includes('Synced colors and filament profiles from printer.');
+            }
+          }
+        }
+        return false;
+      }, undefined, { timeout: 10_000 });
+
+      const presets = await getAppState(page, 'extruderPresets') as any[];
+      expect(presets[0].color_hex).toBe('#112233');
+      expect(Number(presets[0].filament_id)).toBe(createdFilamentId);
+    } finally {
+      if (originalPresets) {
+        await request.put(`${API}/presets/extruders`, {
+          data: {
+            extruders: originalPresets.extruders,
+            slicing_defaults: originalPresets.slicing_defaults,
+          },
+        });
+      }
+      if (createdFilamentId) {
+        await request.delete(`${API}/filaments/${createdFilamentId}`);
+      }
+    }
+  });
+
+  test('Sync from Printer shows offline message when printer not connected', async ({ page }) => {
+    await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      const scopes = body?._x_dataStack || [];
+      for (const scope of scopes) {
+        if ('checkPrinterStatus' in scope && 'printerFilamentSlots' in scope) {
+          scope.printerHasFilamentConfig = true;
+          const highestId = window.setInterval(() => {}, 99999);
+          for (let i = 1; i <= highestId; i++) window.clearInterval(i);
+          scope.checkPrinterStatus = async function () {
+            this.printerConnected = false;
+            this.printerStatus = 'Disconnected';
+            this.printerHasFilamentConfig = true;
+            this.printerFilamentSlots = [];
+          };
+          break;
+        }
+      }
+    });
+
+    await page.getByRole('button', { name: 'Sync from Printer' }).waitFor({ state: 'visible', timeout: 5_000 });
+    await page.getByRole('button', { name: 'Sync from Printer' }).click();
+
+    await page.waitForFunction(() => {
+      const body = document.querySelector('body') as any;
+      for (const scope of (body?._x_dataStack || [])) {
+        if ('presetMessage' in scope) {
+          return String(scope.presetMessage || '').includes('Printer offline');
+        }
+      }
+      return false;
+    }, undefined, { timeout: 10_000 });
+
+    const msg = await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      for (const scope of (body?._x_dataStack || [])) {
+        if ('presetMessage' in scope) return scope.presetMessage;
+      }
+      return null;
+    });
+    expect(msg).toContain('Printer offline');
+  });
+
+  test('Sync from Printer shows no-filament message when no filament detected', async ({ page }) => {
+    await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      const scopes = body?._x_dataStack || [];
+      for (const scope of scopes) {
+        if ('checkPrinterStatus' in scope && 'printerFilamentSlots' in scope) {
+          scope.printerHasFilamentConfig = true;
+          // Replace checkPrinterStatus with a mock that preserves printerHasFilamentConfig,
+          // and clear all intervals to prevent real status polling from overwriting it
+          const highestId = window.setInterval(() => {}, 99999);
+          for (let i = 1; i <= highestId; i++) window.clearInterval(i);
+          scope.checkPrinterStatus = async function () {
+            this.printerConnected = true;
+            this.printerStatus = 'Connected';
+            this.printerHasFilamentConfig = true;
+            this.printerFilamentSlots = [];
+          };
+          break;
+        }
+      }
+    });
+
+    await page.getByRole('button', { name: 'Sync from Printer' }).waitFor({ state: 'visible', timeout: 5_000 });
+    await page.getByRole('button', { name: 'Sync from Printer' }).click();
+
+    await page.waitForFunction(() => {
+      const body = document.querySelector('body') as any;
+      for (const scope of (body?._x_dataStack || [])) {
+        if ('presetMessage' in scope) {
+          return String(scope.presetMessage || '').includes('No filament detected on printer');
+        }
+      }
+      return false;
+    }, undefined, { timeout: 10_000 });
+
+    const msg = await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      for (const scope of (body?._x_dataStack || [])) {
+        if ('presetMessage' in scope) return scope.presetMessage;
+      }
+      return null;
+    });
+    expect(msg).toContain('No filament detected on printer');
+  });
+
   test('settings auto-save on modal close (no Save button)', async ({ page }) => {
     // "Save as Defaults" was removed — settings auto-save when modal closes.
     await expect(page.getByRole('button', { name: /Save as Defaults/i })).not.toBeVisible();
