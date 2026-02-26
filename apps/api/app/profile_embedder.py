@@ -656,21 +656,21 @@ class ProfileEmbedder:
 
         config: Dict[str, Any] = copy.deepcopy(base_config)
 
-        # Selectively overlay Snapmaker g-code keys onto the Bambu base
-        # config.  We keep the Bambu project_settings as the foundation
-        # so that OrcaSlicer can resolve Bambu format features (component
-        # assemblies, plate definitions, etc.).  Only replace the g-code
-        # generation keys with Snapmaker-specific values.
-        for key in (
-            'before_layer_change_gcode',
-            'layer_change_gcode',
-            'change_filament_gcode',
-            'machine_start_gcode',
-            'machine_end_gcode',
-            'gcode_flavor',
-        ):
-            if key in profiles.printer:
-                config[key] = profiles.printer[key]
+        # Overlay Snapmaker printer settings onto the Bambu base config.
+        # We keep the Bambu project_settings as the foundation so that
+        # OrcaSlicer can resolve Bambu format features (component assemblies,
+        # plate definitions, etc.).  The printer profile provides all
+        # machine-specific values: g-code macros, bed geometry, hardware
+        # limits, nozzle config, and preset IDs.
+        #
+        # We overlay ALL printer keys to ensure Bambu hardware settings
+        # (e.g. 180mm bed from A1 mini, Bambu bed_exclude_area) don't
+        # leak through and cause issues on the Snapmaker 270mm bed.
+        #
+        # Keys from Bambu base that survive this overlay: anything NOT
+        # in the Snapmaker printer profile (Bambu-specific format keys
+        # that OrcaSlicer needs for multicolor resolution).
+        config.update(copy.deepcopy(profiles.printer))
 
         # Override Bambu preset references with our Snapmaker presets.
         # OrcaSlicer looks up these IDs in its system presets and segfaults
@@ -694,6 +694,13 @@ class ProfileEmbedder:
 
         config['layer_gcode'] = 'G92 E0'
         config.setdefault('enable_arc_fitting', '1')
+
+        # Strip Bambu-specific filament_start_gcode.  Bambu macros like M142
+        # and activate_air_filtration are not understood by Snapmaker firmware.
+        fsg = config.get('filament_start_gcode')
+        if isinstance(fsg, list) and any('M142' in str(g) or 'air_filtration' in str(g) for g in fsg):
+            config.pop('filament_start_gcode', None)
+            logger.info("Stripped Bambu-specific filament_start_gcode")
 
         self._sanitize_index_field(config, 'raft_first_layer_expansion', 0)
         self._sanitize_index_field(config, 'tree_support_wall_count', 0)
