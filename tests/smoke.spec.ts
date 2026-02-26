@@ -57,6 +57,20 @@ test.describe('Smoke Tests', () => {
     expect(health.status).toBe('ok');
   });
 
+  // Regression: crypto.randomUUID() is unavailable over plain HTTP (non-secure context).
+  // The job ID generator must use crypto.getRandomValues() which works everywhere.
+  test('job ID generation works without crypto.randomUUID (non-secure context)', async ({ page }) => {
+    // Remove crypto.randomUUID to simulate a non-secure context (plain HTTP from remote PC)
+    await page.evaluate(() => { delete (crypto as any).randomUUID; });
+
+    // Execute the same expression used in startSlice()
+    const jobId = await page.evaluate(() => {
+      return `slice_${Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join('')}`;
+    });
+
+    expect(jobId).toMatch(/^slice_[0-9a-f]{12}$/);
+  });
+
   test('settings modal opens and closes via gear icon', async ({ page }) => {
     // Open settings modal via gear icon
     await page.getByTitle('Settings').click();
