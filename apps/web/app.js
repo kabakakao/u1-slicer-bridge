@@ -1515,7 +1515,7 @@ function app() {
             this.accordionSettings = false;
 
             // Generate a job_id so we can poll progress immediately
-            const clientJobId = `slice_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+            const clientJobId = `slice_${Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join('')}`;
 
             try {
                 let result;
