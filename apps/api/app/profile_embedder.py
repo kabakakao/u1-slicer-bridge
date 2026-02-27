@@ -997,6 +997,18 @@ class ProfileEmbedder:
             # imported from Bambu profiles can carry 'nil' for "use default").
             self._sanitize_nil_values(config)
 
+            # Ensure required per-filament keys exist.  OrcaSlicer indexes
+            # these by filament number; if they're missing entirely when
+            # filament_colour indicates N>1 filaments, Orca reads uninitialised
+            # memory and segfaults at "Initializing StaticPrintConfigs".
+            # Our Snapmaker profiles omit these keys (they're implicit for
+            # single-filament), so inject sensible defaults before padding.
+            if requested_filament_count > 1:
+                if 'filament_diameter' not in config:
+                    config['filament_diameter'] = ['1.75']
+                if 'filament_is_support' not in config:
+                    config['filament_is_support'] = ['0']
+
             # Pad per-filament arrays to match requested_filament_count.
             # Orca indexes per-filament arrays by filament number; if filament_colour
             # indicates N filaments but other arrays are length 1, Orca reads past
@@ -1121,6 +1133,113 @@ class ProfileEmbedder:
         """Async version of embed_profiles — runs in thread pool to avoid blocking the event loop."""
         return await asyncio.to_thread(self.embed_profiles, **kwargs)
 
+    @staticmethod
+    def _parse_printable_area_center(printable_area) -> Optional[tuple]:
+        """Parse printable_area polygon and return its center (cx, cy).
+
+        printable_area is a list like ['-0.5x-1', '270.5x-1', '270.5x271', '-0.5x271']
+        where each entry is 'XxY'.
+        """
+        if not isinstance(printable_area, list) or len(printable_area) < 3:
+            return None
+        xs, ys = [], []
+        for pt in printable_area:
+            parts = str(pt).split('x')
+            if len(parts) != 2:
+                return None
+            try:
+                xs.append(float(parts[0]))
+                ys.append(float(parts[1]))
+            except ValueError:
+                return None
+        if not xs:
+            return None
+        return ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+
+    @staticmethod
+    def _recenter_build_items(model_bytes: bytes, dx: float, dy: float) -> bytes:
+        """Shift all build item transforms by (dx, dy) to recenter objects on the new bed.
+
+        3MF build item transforms are 3x4 affine matrices stored as 12 space-separated
+        floats: m00 m01 m02 m10 m11 m12 m20 m21 m22 tx ty tz. Indices 9,10 are XY translation.
+        """
+        if abs(dx) < 0.001 and abs(dy) < 0.001:
+            return model_bytes
+        try:
+            model_xml = model_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return model_bytes
+
+        # Only patch <item> tags inside the <build> section.
+        build_re = re.compile(
+            r'(?P<open><(?:(?P<prefix>[A-Za-z_][\w.\-]*):)?build\b[^>]*>)'
+            r'(?P<body>.*?)'
+            r'(?P<close></(?:(?P=prefix):)?build\s*>)',
+            re.DOTALL,
+        )
+        item_re = re.compile(r'<(?:(?P<prefix>[A-Za-z_][\w.\-]*):)?item\b(?P<attrs>[^>]*)/?>')
+        transform_re = re.compile(r'(\stransform\s*=\s*)(["\'])(.*?)\2')
+
+        def patch_item(m):
+            tag = m.group(0)
+            tm = transform_re.search(tag)
+            if not tm:
+                return tag
+            vals = tm.group(3).split()
+            if len(vals) != 12:
+                return tag
+            try:
+                vals[9] = str(float(vals[9]) + dx)
+                vals[10] = str(float(vals[10]) + dy)
+            except ValueError:
+                return tag
+            new_t = ' '.join(vals)
+            return transform_re.sub(
+                lambda mm: f'{mm.group(1)}{mm.group(2)}{new_t}{mm.group(2)}',
+                tag, count=1,
+            )
+
+        def patch_build(m):
+            body = item_re.sub(patch_item, m.group('body'))
+            return m.group('open') + body + m.group('close')
+
+        patched = build_re.sub(patch_build, model_xml)
+        return patched.encode('utf-8')
+
+    @staticmethod
+    def _recenter_assemble_items(ms_bytes: bytes, dx: float, dy: float) -> bytes:
+        """Shift assemble_item transforms in model_settings.config by (dx, dy)."""
+        if abs(dx) < 0.001 and abs(dy) < 0.001:
+            return ms_bytes
+        try:
+            ms_xml = ms_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return ms_bytes
+
+        assemble_re = re.compile(r'<assemble_item\b(?P<attrs>[^>]*)/?>')
+        transform_re = re.compile(r'(\stransform\s*=\s*)(["\'])(.*?)\2')
+
+        def patch_assemble(m):
+            tag = m.group(0)
+            tm = transform_re.search(tag)
+            if not tm:
+                return tag
+            vals = tm.group(3).split()
+            if len(vals) != 12:
+                return tag
+            try:
+                vals[9] = str(float(vals[9]) + dx)
+                vals[10] = str(float(vals[10]) + dy)
+            except ValueError:
+                return tag
+            new_t = ' '.join(vals)
+            return transform_re.sub(
+                lambda mm: f'{mm.group(1)}{mm.group(2)}{new_t}{mm.group(2)}',
+                tag, count=1,
+            )
+
+        return assemble_re.sub(patch_assemble, ms_xml).encode('utf-8')
+
     def _copy_and_inject_settings(
         self,
         source: Path,
@@ -1139,20 +1258,53 @@ class ProfileEmbedder:
         # Create temporary ZIP for rebuilding
         temp_zip = dest.with_suffix('.tmp')
 
+        # Compute bed recenter delta: when the bed size changes, shift build items
+        # so they maintain the same relative position on the new bed.
+        recenter_dx, recenter_dy = 0.0, 0.0
         try:
-            # Bambu Studio metadata files that are safe to drop
-            bambu_metadata_files = {
+            target_config = json.loads(settings_json)
+            target_center = self._parse_printable_area_center(target_config.get('printable_area'))
+        except Exception:
+            target_center = None
+
+        try:
+            # Slicer-specific metadata files that are safe to drop.
+            # We replace project_settings.config with our own, and foreign
+            # slicer configs (Bambu, PrusaSlicer) can conflict with our
+            # injected Orca settings — OrcaSlicer may read stale array
+            # sizes from Slic3r_PE.config and crash.
+            drop_metadata_files = {
                 'Metadata/project_settings.config',  # We'll replace this
                 'Metadata/slice_info.config',        # Bambu-specific
                 'Metadata/cut_information.xml',      # Bambu-specific
                 'Metadata/filament_sequence.json',   # Bambu-specific (can crash Orca)
+                'Metadata/Slic3r_PE.config',         # PrusaSlicer project settings
+                'Metadata/Slic3r_PE_model.config',   # PrusaSlicer model settings
             }
 
             with zipfile.ZipFile(source, 'r') as source_zf:
+                # Read source bed center from existing project_settings
+                if target_center is not None and 'Metadata/project_settings.config' in source_zf.namelist():
+                    try:
+                        src_config = json.loads(source_zf.read('Metadata/project_settings.config'))
+                        src_center = self._parse_printable_area_center(src_config.get('printable_area'))
+                        if src_center is not None:
+                            recenter_dx = target_center[0] - src_center[0]
+                            recenter_dy = target_center[1] - src_center[1]
+                            if abs(recenter_dx) > 0.5 or abs(recenter_dy) > 0.5:
+                                logger.info(
+                                    f"Recentering build items: bed center {src_center} → {target_center}, "
+                                    f"delta=({recenter_dx:.1f}, {recenter_dy:.1f})"
+                                )
+                            else:
+                                recenter_dx, recenter_dy = 0.0, 0.0
+                    except Exception as e:
+                        logger.debug(f"Could not read source printable_area for recentering: {e}")
+
                 with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as dest_zf:
                     # Copy geometry and essential files, skip Bambu metadata
                     for item in source_zf.infolist():
-                        if item.filename in bambu_metadata_files:
+                        if item.filename in drop_metadata_files:
                             logger.debug(f"Skipping Bambu metadata: {item.filename}")
                             continue
 
@@ -1165,6 +1317,9 @@ class ProfileEmbedder:
                         data = source_zf.read(item.filename)
                         if item.filename == 'Metadata/model_settings.config':
                             data = self._sanitize_model_settings(data, extruder_remap=extruder_remap)
+                            data = self._recenter_assemble_items(data, recenter_dx, recenter_dy)
+                        if item.filename == '3D/3dmodel.model':
+                            data = self._recenter_build_items(data, recenter_dx, recenter_dy)
                         dest_zf.writestr(item, data)
 
                     # Add new project_settings.config
@@ -1229,8 +1384,11 @@ class ProfileEmbedder:
             # Bambu encodes multi-plate layout via assemble_item transforms with
             # global coordinates (x=1000s) and vertical stacking (z=62mm, 125mm).
             # These don't map to our single-plate 270mm bed.
-            # Fix: recenter x,y to bed center and set z=0 (--ensure-on-bed
-            # in slicer.py will lift objects above the bed surface).
+            # Fix: recenter x,y to bed center and reset z=0 for packed coords.
+            # Threshold: only catch genuinely packed coordinates (|coord| > bed_size + margin).
+            # Bed-center origin files can have valid negative coords (e.g. -0.145 for an
+            # object near center of a 180mm bed), so tx < 0 alone is NOT sufficient.
+            packed_threshold = bed_center_mm * 2 + 100  # 370mm for Snapmaker
             for assemble in root.findall('.//assemble'):
                 for item in assemble.findall('assemble_item'):
                     tfm = item.get('transform', '')
@@ -1239,12 +1397,10 @@ class ProfileEmbedder:
                         try:
                             tx = float(vals[9])
                             ty = float(vals[10])
-                            if tx > bed_center_mm * 2 or tx < 0 or ty > bed_center_mm * 2 or ty < 0:
+                            if abs(tx) > packed_threshold or abs(ty) > packed_threshold:
                                 vals[9] = f"{bed_center_mm:.6f}"
                                 vals[10] = f"{bed_center_mm:.6f}"
-                            # Always reset Z to match the build item z-offset
-                            # instead of Bambu's vertical plate stacking
-                            vals[11] = "0"
+                                vals[11] = "0"
                             item.set('transform', ' '.join(vals))
                             changed = True
                         except ValueError:

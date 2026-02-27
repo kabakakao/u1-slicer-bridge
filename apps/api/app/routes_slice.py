@@ -18,7 +18,7 @@ from typing import Optional, List, Dict, Tuple
 
 from db import get_pg_pool
 from config import get_printer_profile
-from slicer import OrcaSlicer, SlicingError
+from slicer import OrcaSlicer, SlicingError, SlicingCancelledError, cancel_slice_job
 from profile_embedder import ProfileEmbedder, ProfileEmbedError
 from multi_plate_parser import (
     parse_multi_plate_3mf,
@@ -292,37 +292,15 @@ def _enforce_transformed_bounds_or_raise(
             bcy = (by_min + by_max) / 2.0
             assemble_preview_offset_xy = ((vol_x / 2.0) - bcx, (vol_y / 2.0) - bcy)
 
-    def _fully_inside(it: Dict[str, object]) -> bool:
-        wb = it.get("world_bounds") or {}
-        local_bounds = it.get("local_bounds") or {}
-        idx = int(it.get("build_item_index") or 0)
-        oid = str(it.get("object_id") or "")
-        t3 = assemble_transforms_by_object.get(oid) or assemble_transforms.get(idx)
-        if t3 and isinstance(local_bounds, dict):
-            # Check if the assemble transform has been sanitized to bed-local
-            # coords by _sanitize_model_settings (XY within [0, bed_size]).
-            # Sanitized transforms have wrong Z (reset to 0) and shouldn't
-            # override world_bounds from the build item (which has correct Z).
-            t3_sanitized = False
-            try:
-                t3x, t3y = float(t3[9]), float(t3[10])
-                if 0 <= t3x <= vol_x and 0 <= t3y <= vol_y:
-                    t3_sanitized = True
-            except Exception:
-                pass
-            if not t3_sanitized:
-                wb_from_assemble = _bounds_from_local_and_transform(it, t3)
-                if wb_from_assemble:
-                    wb = wb_from_assemble
-        if assemble_preview_offset_xy:
-            ox, oy = assemble_preview_offset_xy
-            try:
-                wb = {
-                    "min": [float(wb["min"][0]) + ox, float(wb["min"][1]) + oy, float(wb["min"][2])],
-                    "max": [float(wb["max"][0]) + ox, float(wb["max"][1]) + oy, float(wb["max"][2])],
-                }
-            except Exception:
-                pass
+    # Final fallback: detect bed-center vs bed-corner origin from the transformed file's
+    # world_bounds. Most slicers use bed-center origin (0,0 = center), so world_bounds
+    # can have negative XY values for objects near center. Without this offset, the
+    # _fully_inside check falsely rejects valid positions.
+    if assemble_preview_offset_xy is None and items_with_bounds:
+        off_x, off_y = _detect_origin_offset_xy(items_with_bounds, vol_x, vol_y)
+        if abs(off_x) > 1e-6 or abs(off_y) > 1e-6:
+            assemble_preview_offset_xy = (off_x, off_y)
+    def _check_wb_in_volume(wb: Dict[str, object]) -> bool:
         mins = (wb.get("min") or [None, None, None]) if isinstance(wb, dict) else [None, None, None]
         maxs = (wb.get("max") or [None, None, None]) if isinstance(wb, dict) else [None, None, None]
         try:
@@ -334,6 +312,49 @@ def _enforce_transformed_bounds_or_raise(
             min_x >= -tol and min_y >= -tol and min_z >= -tol and
             max_x <= (vol_x + tol) and max_y <= (vol_y + tol) and max_z <= (vol_z + tol)
         )
+
+    def _fully_inside(it: Dict[str, object]) -> bool:
+        wb = it.get("world_bounds") or {}
+        local_bounds = it.get("local_bounds") or {}
+        idx = int(it.get("build_item_index") or 0)
+        oid = str(it.get("object_id") or "")
+        t3 = assemble_transforms_by_object.get(oid) or assemble_transforms.get(idx)
+        if t3 and isinstance(local_bounds, dict):
+            # Check if the assemble transform uses "normal" coordinates
+            # (bed-local [0, bed_size] or bed-center [-bed/2, bed/2]).
+            # Normal-range transforms often have stale Z=0 and shouldn't
+            # override world_bounds from the build item (which has correct Z).
+            # Only Bambu packed coordinates (XY >> bed_size) should override.
+            t3_normal_range = False
+            try:
+                t3x, t3y = float(t3[9]), float(t3[10])
+                if abs(t3x) <= vol_x + 10 and abs(t3y) <= vol_y + 10:
+                    t3_normal_range = True
+            except Exception:
+                pass
+            if not t3_normal_range:
+                wb_from_assemble = _bounds_from_local_and_transform(it, t3)
+                if wb_from_assemble:
+                    wb = wb_from_assemble
+
+        # First check: world_bounds directly (correct for recentered/bed-local files).
+        if _check_wb_in_volume(wb):
+            return True
+
+        # Fallback: apply the assemble-derived display offset. This handles packed
+        # Bambu coordinates where world_bounds aren't in bed-local space.
+        if assemble_preview_offset_xy:
+            ox, oy = assemble_preview_offset_xy
+            try:
+                wb_offset = {
+                    "min": [float(wb["min"][0]) + ox, float(wb["min"][1]) + oy, float(wb["min"][2])],
+                    "max": [float(wb["max"][0]) + ox, float(wb["max"][1]) + oy, float(wb["max"][2])],
+                }
+                if _check_wb_in_volume(wb_offset):
+                    return True
+            except Exception:
+                pass
+        return False
 
     if any(_fully_inside(it) for it in items_with_bounds):
         return
@@ -526,6 +547,114 @@ def _get_bambu_plate_translation_ui_offset(
     return ((float(bed_x) / 2.0) - float(ptx), (float(bed_y) / 2.0) - float(pty))
 
 
+def _detect_origin_offset_xy(
+    items: List[Dict[str, object]],
+    bed_x: float,
+    bed_y: float,
+) -> tuple[float, float]:
+    """Detect whether 3MF coordinates use bed-center or bed-corner origin.
+
+    Most slicers (OrcaSlicer, BambuStudio, PrusaSlicer) use bed-center origin
+    where (0,0) is the center of the build plate.  Some tools (Cura, certain
+    modelers, MakerWorld exports) use bed-corner origin where (0,0) is the
+    lower-left corner.
+
+    Returns (offset_x, offset_y) to add to 3MF world coords to convert to
+    the viewer's bed-local coordinate system (0,0)→(bed_x, bed_y).
+    """
+    bed_cx = float(bed_x) / 2.0
+    bed_cy = float(bed_y) / 2.0
+
+    all_min_x = all_min_y = float("inf")
+    all_max_x = all_max_y = float("-inf")
+    for it in items:
+        wb = it.get("world_bounds")
+        if not wb or not wb.get("min") or not wb.get("max"):
+            continue
+        all_min_x = min(all_min_x, float(wb["min"][0]))
+        all_max_x = max(all_max_x, float(wb["max"][0]))
+        all_min_y = min(all_min_y, float(wb["min"][1]))
+        all_max_y = max(all_max_y, float(wb["max"][1]))
+
+    if all_min_x == float("inf"):
+        return bed_cx, bed_cy  # no bounds → default bed-center
+
+    margin = 2.0  # mm tolerance for floating-point rounding and slight overhangs
+
+    # Test bed-center: shifted bounds should fit within (0, bed)
+    shifted_fits = (
+        (all_min_x + bed_cx) >= -margin
+        and (all_max_x + bed_cx) <= bed_x + margin
+        and (all_min_y + bed_cy) >= -margin
+        and (all_max_y + bed_cy) <= bed_y + margin
+    )
+    # Test bed-corner: raw bounds already within (0, bed)
+    raw_fits = (
+        all_min_x >= -margin
+        and all_max_x <= bed_x + margin
+        and all_min_y >= -margin
+        and all_max_y <= bed_y + margin
+    )
+
+    if raw_fits and shifted_fits:
+        # Both interpretations place objects on the bed. Prefer bed-corner (no
+        # offset) to avoid weakening off-bed transform rejection: applying the
+        # bed-center offset as a second-chance pass in _enforce_transformed_bounds
+        # can falsely validate objects that are actually off-bed.
+        return 0.0, 0.0
+    if shifted_fits:
+        # Only the bed-center interpretation fits → file uses bed-center origin.
+        return bed_cx, bed_cy
+    if raw_fits:
+        # Only the bed-corner interpretation fits → file uses bed-corner origin.
+        return 0.0, 0.0
+
+    # Neither fits well → default to bed-center
+    return bed_cx, bed_cy
+
+
+def _compute_bed_recenter_offset(
+    source_3mf: Optional[Path],
+    bed_x: float,
+    bed_y: float,
+) -> tuple:
+    """Compute the offset to apply to source build-item coordinates to display
+    them in the target (Snapmaker) bed-local coordinate system.
+
+    Reads the source file's printable_area to determine its bed center,
+    then computes the delta to the target bed center.
+    """
+    target_cx = bed_x / 2.0
+    target_cy = bed_y / 2.0
+    if source_3mf is None:
+        return 0.0, 0.0
+    try:
+        with zipfile.ZipFile(source_3mf, 'r') as zf:
+            if 'Metadata/project_settings.config' not in zf.namelist():
+                return 0.0, 0.0
+            config = json.loads(zf.read('Metadata/project_settings.config'))
+            pa = config.get('printable_area')
+            if not isinstance(pa, list) or len(pa) < 3:
+                return 0.0, 0.0
+            xs, ys = [], []
+            for pt in pa:
+                parts = str(pt).split('x')
+                if len(parts) == 2:
+                    xs.append(float(parts[0]))
+                    ys.append(float(parts[1]))
+            if not xs:
+                return 0.0, 0.0
+            src_cx = (min(xs) + max(xs)) / 2.0
+            src_cy = (min(ys) + max(ys)) / 2.0
+            dx = target_cx - src_cx
+            dy = target_cy - src_cy
+            if abs(dx) < 0.5 and abs(dy) < 0.5:
+                return 0.0, 0.0
+            return dx, dy
+    except Exception:
+        return 0.0, 0.0
+
+
 def _apply_layout_direct_mapping(
     frame: Dict[str, object],
     items: List[Dict[str, object]],
@@ -533,19 +662,25 @@ def _apply_layout_direct_mapping(
     is_multi_plate: bool,
     bed_x: float = 270.0,
     bed_y: float = 270.0,
+    source_3mf: Optional[Path] = None,
 ) -> Dict[str, object]:
     """Exact/direct bed-local mapping (single-plate and any future exact multi-plate adapters).
 
-    OrcaSlicer 3MF transforms use bed-center as origin (0,0).
-    The viewer renders the bed from (0,0) to (bed_x, bed_y), so we shift
-    by (bed_x/2, bed_y/2) to convert to bed-corner-origin coordinates.
+    Computes the offset from the source file's printable_area center to the target
+    bed center, so objects appear at the correct position in the viewer's
+    (0,0)→(bed_x,bed_y) coordinate system.  Falls back to bounds-based detection
+    when the source printable_area is not available.
     """
-    bed_cx = float(bed_x) / 2.0
-    bed_cy = float(bed_y) / 2.0
+    offset_x, offset_y = _compute_bed_recenter_offset(source_3mf, bed_x, bed_y)
+    if abs(offset_x) < 0.01 and abs(offset_y) < 0.01:
+        # No printable_area info or same bed — fall back to bounds detection
+        offset_x, offset_y = _detect_origin_offset_xy(items, bed_x, bed_y)
+    origin_mode = "bed_center" if abs(offset_x) > 1 else "bed_corner"
     frame.update({
         "confidence": "exact",
         "mapping": "direct",
         "offset_xy": [0.0, 0.0],
+        "origin_detected": origin_mode,
         "capabilities": {
             "object_transform_edit": True,  # exact mapping allows editing
             "prime_tower_edit": True,
@@ -553,7 +688,7 @@ def _apply_layout_direct_mapping(
     })
     for it in items:
         x, y, z = _layout_item_base_xyz(it, is_multi_plate=is_multi_plate)
-        it["ui_base_pose"] = {"x": x + bed_cx, "y": y + bed_cy, "z": z, "rotate_z_deg": 0.0}
+        it["ui_base_pose"] = {"x": x + offset_x, "y": y + offset_y, "z": z, "rotate_z_deg": 0.0}
     return frame
 
 
@@ -607,9 +742,15 @@ def _apply_layout_bambu_plate_translation_offset_mapping(
     for it in items:
         idx = int(it.get("build_item_index") or 0)
         ptx, pty, _ = plate_translations[idx]
-        x, y, z = _layout_item_base_xyz(it, is_multi_plate=True)
-        ux = (float(x) - float(ptx)) + bed_cx
-        uy = (float(y) - float(pty)) + bed_cy
+        # Use build-item translation (core_t), NOT assemble_translation.
+        # plate_translations are derived from build items; assemble_translation
+        # lives in Bambu's internal assembly space with wildly different offsets.
+        core_t = it.get("translation") if isinstance(it.get("translation"), list) else [0, 0, 0]
+        x = float(core_t[0] or 0)
+        y = float(core_t[1] or 0)
+        z = float(core_t[2] if len(core_t) >= 3 else 0)
+        ux = (x - float(ptx)) + bed_cx
+        uy = (y - float(pty)) + bed_cy
         it["ui_base_pose"] = {"x": ux, "y": uy, "z": z, "rotate_z_deg": 0.0}
     return frame
 
@@ -733,9 +874,11 @@ def _derive_layout_placement_frame(
         return frame
 
     # Exact/direct path for non-multi-plate files.
-    # 3MF transforms use bed-center as origin; shift to bed-corner-origin for the viewer.
+    # Compute recenter offset from the source file's printable_area to the target bed.
     if not is_multi_plate:
-        return _apply_layout_direct_mapping(frame, items, is_multi_plate=False, bed_x=bed_x, bed_y=bed_y)
+        return _apply_layout_direct_mapping(
+            frame, items, is_multi_plate=False, bed_x=bed_x, bed_y=bed_y, source_3mf=source_3mf,
+        )
 
     packed_grid_step_x, packed_grid_step_y = _infer_bambu_packed_grid_steps(
         source_3mf,
@@ -1421,6 +1564,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             scale_factor=scale_factor,
             disable_arrange=bool(request.object_transforms),
             progress_callback=_slicer_progress,
+            job_id=job_id,
         )
 
         if not result["success"] and scale_active:
@@ -1452,6 +1596,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if (
@@ -1468,6 +1613,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
@@ -1541,6 +1687,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 scale_factor=scale_factor,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if not result["success"]:
@@ -1624,7 +1771,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
-            await conn.execute(
+            # Only mark completed if the job hasn't been cancelled in the meantime.
+            # The cancel endpoint may have force-marked it as 'failed' while the
+            # slicer was still running (race between cancel and completion).
+            result_tag = await conn.execute(
                 """
                 UPDATE slicing_jobs SET
                     status = 'completed',
@@ -1637,7 +1787,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                     three_mf_path = $8,
                     filament_colors = $9,
                     filament_used_g = $10
-                WHERE job_id = $1
+                WHERE job_id = $1 AND status = 'processing'
                 """,
                 job_id,
                 datetime.utcnow(),
@@ -1650,6 +1800,9 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_colors_json,
                 filament_used_g_json
             )
+            if result_tag == "UPDATE 0":
+                job_logger.info(f"Job {job_id} was cancelled before completion could be recorded")
+                raise SlicingCancelledError("Slicing cancelled by user")
 
         _update_progress(job_id, 100, "Complete")
         job_logger.info(f"Slicing job {job_id} completed successfully")
@@ -1684,6 +1837,19 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 "bounds": metadata['bounds']
             }
         }
+
+    except SlicingCancelledError:
+        job_logger.info(f"Slicing cancelled by user: {job_id}")
+        _clear_progress(job_id)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE slicing_jobs SET status = 'failed', completed_at = $2, error_message = 'Cancelled'
+                WHERE job_id = $1
+                """,
+                job_id, datetime.utcnow(),
+            )
+        raise HTTPException(status_code=499, detail="Slicing cancelled")
 
     except SlicingError as e:
         err_text = str(e)
@@ -2166,6 +2332,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             scale_factor=scale_factor,
             disable_arrange=bool(request.object_transforms),
             progress_callback=_slicer_progress,
+            job_id=job_id,
         )
 
         if not result["success"] and scale_active:
@@ -2180,6 +2347,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if (
@@ -2197,6 +2365,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
@@ -2251,6 +2420,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 scale_factor=scale_factor,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if not result["success"]:
@@ -2334,7 +2504,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
-            await conn.execute(
+            result_tag = await conn.execute(
                 """
                 UPDATE slicing_jobs SET
                     status = 'completed',
@@ -2347,7 +2517,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                     three_mf_path = $8,
                     filament_colors = $9,
                     filament_used_g = $10
-                WHERE job_id = $1
+                WHERE job_id = $1 AND status = 'processing'
                 """,
                 job_id,
                 datetime.utcnow(),
@@ -2360,6 +2530,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_colors_json,
                 filament_used_g_json
             )
+            if result_tag == "UPDATE 0":
+                job_logger.info(f"Job {job_id} was cancelled before completion could be recorded")
+                raise SlicingCancelledError("Slicing cancelled by user")
 
         _update_progress(job_id, 100, "Complete")
         job_logger.info(f"Plate slicing job {job_id} completed successfully")
@@ -2396,6 +2569,19 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 "bounds": metadata['bounds']
             }
         }
+
+    except SlicingCancelledError:
+        job_logger.info(f"Plate slicing cancelled by user: {job_id}")
+        _clear_progress(job_id)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE slicing_jobs SET status = 'failed', completed_at = $2, error_message = 'Cancelled'
+                WHERE job_id = $1
+                """,
+                job_id, datetime.utcnow(),
+            )
+        raise HTTPException(status_code=499, detail="Slicing cancelled")
 
     except SlicingError as e:
         err_text = str(e)
@@ -2880,6 +3066,32 @@ async def get_slicing_job(job_id: str):
         }
 
     return result
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_slicing_job(job_id: str):
+    """Cancel a running slicing job by killing the OrcaSlicer process."""
+    killed = cancel_slice_job(job_id)
+    if killed:
+        return {"cancelled": True, "job_id": job_id}
+    # Process not found — it may have already finished or never started.
+    # Mark the job as failed/cancelled in the DB so the poll picks it up.
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status FROM slicing_jobs WHERE job_id = $1", job_id
+        )
+        if row and row["status"] == "processing":
+            await conn.execute(
+                """
+                UPDATE slicing_jobs SET status = 'failed', completed_at = $2, error_message = 'Cancelled'
+                WHERE job_id = $1
+                """,
+                job_id, datetime.utcnow(),
+            )
+            _clear_progress(job_id)
+            return {"cancelled": True, "job_id": job_id}
+    return {"cancelled": False, "job_id": job_id}
 
 
 @router.get("/jobs/{job_id}/download")

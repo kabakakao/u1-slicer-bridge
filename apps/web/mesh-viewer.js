@@ -222,6 +222,7 @@
                 group.rotation.set(0, THREE.MathUtils.degToRad(Number(pose.rotate_z_deg || 0)), 0);
 
                 // For proxy-only rendering, offset the box so it rotates around approximate center.
+                // Proxy uses layout bounds + transform scale since it has no actual geometry.
                 if (group.userData.proxy && !group.userData.meshSolid) {
                     group.userData.proxy.scale.set(scale.x, scale.y, scale.z);
                     group.userData.proxy.position.set(
@@ -230,12 +231,9 @@
                         this._bedLocalYToLocalZ(base.centerLocal[1] || 0),
                     );
                 }
-                if (group.userData.meshSolid) {
-                    group.userData.meshSolid.scale.set(scale.x, scale.y, scale.z);
-                }
-                if (group.userData.meshWire) {
-                    group.userData.meshWire.scale.set(scale.x, scale.y, scale.z);
-                }
+                // Actual mesh geometry has the build item rotation+scale pre-applied
+                // by the backend geometry API.  Do NOT re-apply transform scale here
+                // or the mesh will be double-scaled.
                 if (group.userData.labelSprite) {
                     group.userData.labelSprite.position.set(0, Math.max(8, (Number(base.size[2] || 10) * scale.y) + 8), 0);
                 }

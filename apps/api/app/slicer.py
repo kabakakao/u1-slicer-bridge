@@ -19,6 +19,9 @@ from gcode_parser import parse_orca_metadata
 MAX_CONCURRENT_SLICES = int(os.environ.get("MAX_CONCURRENT_SLICES", "2"))
 _slicer_semaphore = None
 
+# Active slicer subprocesses keyed by job_id for cancellation support.
+_active_processes: Dict[str, subprocess.Popen] = {}
+
 
 def _get_slicer_semaphore():
     """Lazy-init semaphore (must be created within a running event loop)."""
@@ -26,6 +29,22 @@ def _get_slicer_semaphore():
     if _slicer_semaphore is None:
         _slicer_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SLICES)
     return _slicer_semaphore
+
+
+def cancel_slice_job(job_id: str) -> bool:
+    """Kill the OrcaSlicer process for *job_id* if it is still running.
+
+    Returns True if a process was found and killed, False otherwise.
+    """
+    proc = _active_processes.pop(job_id, None)
+    if proc is None:
+        return False
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+    return True
 
 
 @dataclass
@@ -45,6 +64,11 @@ class ObjectData:
 
 class SlicingError(Exception):
     """Raised when slicing fails."""
+    pass
+
+
+class SlicingCancelledError(SlicingError):
+    """Raised when slicing is cancelled by the user."""
     pass
 
 
@@ -172,6 +196,7 @@ class OrcaSlicer:
         scale_factor: Optional[float] = None,
         disable_arrange: bool = False,
         progress_callback: Optional[Callable[[int, str], None]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict:
         """Execute Orca Slicer CLI with pre-built 3MF file.
 
@@ -183,6 +208,7 @@ class OrcaSlicer:
             scale_factor: Scale factor (1.0 = no scaling)
             disable_arrange: If True, preserve authored placement (skip arrange/orient)
             progress_callback: Optional callback(percent, message) for real-time progress
+            job_id: Optional job identifier for cancellation support
 
         Returns:
             Dict with success, stdout, stderr, exit_code
@@ -241,27 +267,41 @@ class OrcaSlicer:
             reader_thread = threading.Thread(target=_read_progress_pipe, daemon=True)
             reader_thread.start()
 
-        # Execute with timeout
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,
-                env={"DISPLAY": ":99"}
-            )
+        # Execute with Popen so the process can be cancelled via cancel_slice_job().
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={"DISPLAY": ":99"},
+        )
+        if job_id:
+            _active_processes[job_id] = proc
 
+        try:
+            stdout, stderr = proc.communicate(timeout=300)
+            # Killed by cancel_slice_job() → negative return code on Linux
+            if proc.returncode < 0 and job_id and job_id not in _active_processes:
+                raise SlicingCancelledError("Slicing cancelled by user")
             return {
-                "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.returncode
+                "success": proc.returncode == 0,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": proc.returncode,
             }
+        except SlicingCancelledError:
+            raise
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
             raise SlicingError("Slicing timed out after 5 minutes")
         except Exception as e:
+            proc.kill()
+            proc.wait(timeout=5)
             raise SlicingError(f"Slicing command failed: {str(e)}")
         finally:
+            if job_id:
+                _active_processes.pop(job_id, None)
             if reader_thread:
                 reader_thread.join(timeout=3)
             if pipe_path:
@@ -279,6 +319,7 @@ class OrcaSlicer:
         scale_factor: Optional[float] = None,
         disable_arrange: bool = False,
         progress_callback: Optional[Callable[[int, str], None]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict:
         """Async version of slice_3mf — acquires semaphore to limit concurrent processes."""
         async with _get_slicer_semaphore():
@@ -291,6 +332,7 @@ class OrcaSlicer:
                 scale_factor,
                 disable_arrange,
                 progress_callback,
+                job_id,
             )
 
     def parse_gcode_metadata(self, gcode_path: Path) -> Dict:

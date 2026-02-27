@@ -219,6 +219,7 @@ function app() {
 
         // Polling interval
         sliceInterval: null,
+        sliceJobId: null,         // Current slicing job ID for cancellation
 
         /**
          * Initialize the application
@@ -829,12 +830,30 @@ function app() {
             }));
         },
 
-        selectUploadFromDrawer(upload) {
+        async selectUploadFromDrawer(upload) {
+            if (this.currentStep === 'slicing') {
+                if (!await this.showConfirm({
+                    title: 'Cancel Slicing?',
+                    message: 'Slicing is still in progress. Do you want to cancel it?',
+                    confirmText: 'Cancel Slice',
+                    destructive: true,
+                })) return;
+                this.cancelActiveSlice();
+            }
             this.closeStorage();
             this.selectUpload(upload);
         },
 
-        viewJobFromDrawer(job) {
+        async viewJobFromDrawer(job) {
+            if (this.currentStep === 'slicing') {
+                if (!await this.showConfirm({
+                    title: 'Cancel Slicing?',
+                    message: 'Slicing is still in progress. Do you want to cancel it?',
+                    confirmText: 'Cancel Slice',
+                    destructive: true,
+                })) return;
+                this.cancelActiveSlice();
+            }
             this.closeStorage();
             this.viewJob(job);
         },
@@ -1155,9 +1174,12 @@ function app() {
                 console.log('   - is_multi_plate:', result.is_multi_plate);
                 console.log('   - plates:', result.plates?.length);
                 console.log('   - plate_count:', result.plate_count);
-                
+
                 this.uploadProgress = 0;
-                this.uploadPhase = 'idle';
+                // Keep uploadPhase as 'processing' until the step transition
+                // completes — resetting to 'idle' here would briefly flash the
+                // upload dropzone while plates are still loading.
+                this.uploadPhase = 'processing';
 
                 // Add to uploads list
                 this.uploads.unshift(result);
@@ -1199,6 +1221,7 @@ function app() {
                         console.log('Single plate file');
                     }
 
+                    this.uploadPhase = 'idle';
                     if (this.selectedUpload?.is_multi_plate) {
                         this.resetObjectLayoutState();
                         this.currentStep = 'selectplate';
@@ -1216,6 +1239,7 @@ function app() {
                         console.log('Applied file print settings:', this.fileSettings);
                     }
                 } catch (err) {
+                    this.uploadPhase = 'idle';
                     this.platesLoading = false;
                     this.selectedUpload.is_multi_plate = false;
                     this.plates = [];
@@ -1377,6 +1401,10 @@ function app() {
             this.filamentOverride = false;
             this.resetJobOverrideSettings();
             this.activeTab = 'upload';
+            // Immediately leave the upload/home page so it doesn't flash
+            // while async plate/details loading runs. The final step
+            // ('configure' or 'selectplate') is set once data arrives.
+            this.currentStep = 'configure';
 
             // Fetch upload details and plates in parallel to cut wall time.
             const uploadId = upload.upload_id;
@@ -2345,6 +2373,7 @@ function app() {
 
             // Generate a job_id so we can poll progress immediately
             const clientJobId = `slice_${Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join('')}`;
+            this.sliceJobId = clientJobId;
 
             try {
                 let result;
@@ -2428,7 +2457,10 @@ function app() {
                     // already transitioned us to complete/failed)
                     if (this.currentStep === 'slicing') {
                         clearInterval(this.sliceInterval);
-                        this.showError(`Slicing failed: ${err.message}`);
+                        // Suppress error for user-initiated cancellation
+                        if (!err.message?.includes('cancelled')) {
+                            this.showError(`Slicing failed: ${err.message}`);
+                        }
                         this.currentStep = 'configure';
                         console.error('Slice POST failed:', err);
                     }
@@ -2489,7 +2521,10 @@ function app() {
                         this.loadJobs();
                     } else if (job.status === 'failed') {
                         clearInterval(this.sliceInterval);
-                        this.showError(`Slicing failed: ${job.error_message || 'Unknown error'}`);
+                        // Don't show error toast for user-initiated cancellation
+                        if (job.error_message !== 'Cancelled') {
+                            this.showError(`Slicing failed: ${job.error_message || 'Unknown error'}`);
+                        }
                         this.currentStep = 'configure';
                     }
                 } catch (err) {
@@ -2524,6 +2559,19 @@ function app() {
          * Reset workflow with confirmation if state exists
          */
         async confirmResetWorkflow() {
+            // Active slice in progress — confirm cancellation first
+            if (this.currentStep === 'slicing') {
+                if (!await this.showConfirm({
+                    title: 'Cancel Slicing?',
+                    message: 'Slicing is still in progress. Do you want to cancel it?',
+                    confirmText: 'Cancel Slice',
+                    destructive: true,
+                })) return;
+                // Reset UI immediately — cancel API fires in background
+                this.cancelActiveSlice();
+                this.resetWorkflow();
+                return;
+            }
             if (this.selectedUpload || this.sliceResult) {
                 if (!await this.showConfirm({
                     title: 'Start Over',
@@ -2547,6 +2595,7 @@ function app() {
             this.clearMakerWorld();
             this.sliceProgress = 0;
             this.sliceMessage = '';
+            this.sliceJobId = null;
             this.uploadProgress = 0;
             this.uploadPhase = 'idle';
             this.resetJobOverrideSettings();
@@ -2563,6 +2612,21 @@ function app() {
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
                 this.sliceInterval = null;
+            }
+        },
+
+        async cancelActiveSlice() {
+            if (this.sliceInterval) {
+                clearInterval(this.sliceInterval);
+                this.sliceInterval = null;
+            }
+            if (this.sliceJobId) {
+                try {
+                    await api.cancelSlice(this.sliceJobId);
+                } catch (e) {
+                    console.warn('Cancel slice request failed:', e);
+                }
+                this.sliceJobId = null;
             }
         },
 
