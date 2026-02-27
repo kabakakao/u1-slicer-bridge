@@ -1585,7 +1585,7 @@ function app() {
                 metrics.layout_fetch_ms = Math.round((this._placementNow() - tLayout0) * 10) / 10;
                 metrics.layout_backend_ms = Number(layout?.timing_ms?.total || 0) || null;
 
-                if (isStale()) return;
+                if (isStale()) { this.objectLayoutLoading = false; return; }
 
                 this.objectLayout = layout;
                 if (this.isObjectPlacementTransformApproximate()) {
@@ -1618,10 +1618,10 @@ function app() {
                         viewerSignal,
                     );
                 } catch (geomErr) {
-                    if (geomErr.name === 'AbortError') return;
+                    if (geomErr.name === 'AbortError') { this.objectLayoutLoading = false; this.objectGeometryLoading = false; return; }
                     console.warn('Failed to load placement geometry low LOD (falling back to proxies):', geomErr);
                 }
-                if (isStale()) return;
+                if (isStale()) { this.objectLayoutLoading = false; this.objectGeometryLoading = false; return; }
 
                 metrics.geometry_low_fetch_ms = Math.round((this._placementNow() - tGeomLow0) * 10) / 10;
                 metrics.geometry_low_backend_ms = Number(lowGeometry?.timing_ms?.total || 0) || null;
@@ -1645,7 +1645,7 @@ function app() {
                 }
                 await this.refineSelectedPlacementGeometry(requestedUploadId, requestedPlateId, metrics, isStale, tStart);
             } catch (err) {
-                if (err.name === 'AbortError' || isStale()) return;
+                if (err.name === 'AbortError' || isStale()) { this.objectLayoutLoading = false; this.objectGeometryLoading = false; return; }
                 this.objectLayoutLoading = false;
                 this.objectGeometryLoading = false;
                 this.objectGeometryLod = null;
@@ -1729,10 +1729,10 @@ function app() {
                     refineSignal,
                 );
             } catch (geomHighErr) {
-                if (geomHighErr.name === 'AbortError') return;
+                if (geomHighErr.name === 'AbortError') { this.objectGeometryLoading = false; return; }
                 console.warn('Failed to load placement geometry high LOD for selected object:', geomHighErr);
             }
-            if (stale()) return;
+            if (stale()) { this.objectGeometryLoading = false; return; }
 
             if (metrics) {
                 metrics.geometry_high_fetch_ms = Math.round((this._placementNow() - tGeomHigh0) * 10) / 10;
