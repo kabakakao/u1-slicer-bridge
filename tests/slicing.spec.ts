@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API, apiUpload, apiSlice, uiUploadAndSliceToComplete, proceedFromPlateSelection } from './helpers';
+import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API, apiUpload, apiSlice, apiSliceDualColour, getDefaultFilament, uiUploadAndSliceToComplete, proceedFromPlateSelection } from './helpers';
 
 test.describe('Slicing Workflow', () => {
   test.setTimeout(180_000);
@@ -1143,5 +1143,172 @@ test.describe('Slicing Workflow', () => {
     const dx = Math.abs(movedBounds.max_x - baselineBounds.max_x);
     const dy = Math.abs(movedBounds.max_y - baselineBounds.max_y);
     expect(Math.max(dx, dy)).toBeGreaterThan(3);
+  });
+
+  // ── Bed recentering regression tests (Bambu 180mm → Snapmaker 270mm) ──────
+
+  test('calib cube layout ui_base_pose recenters from 180mm to 270mm bed (regression)', async ({ request }) => {
+    // Regression: Bambu files designed for 180mm beds must show objects near the
+    // center of the 270mm Snapmaker bed after applying the printable_area offset.
+    // The source bed center is (90,90); Snapmaker bed center is (135,135).
+    // Expected offset: +45mm on both axes.
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+    const layoutRes = await request.get(`${API}/uploads/${upload.upload_id}/layout`, { timeout: 30_000 });
+    expect(layoutRes.ok()).toBe(true);
+    const layout = await layoutRes.json();
+
+    expect(layout.objects.length).toBeGreaterThan(0);
+    const obj = layout.objects[0];
+    const pose = obj.ui_base_pose;
+    expect(pose).toBeTruthy();
+
+    // Source object is at ~(98.85, 99.39) on the 180mm bed.
+    // After +45mm offset: ui_base_pose should be ~(143.85, 144.39) on the 270mm bed.
+    // Check it lands in the center region of the 270mm bed (100-170mm).
+    expect(pose.x).toBeGreaterThan(100);
+    expect(pose.x).toBeLessThan(170);
+    expect(pose.y).toBeGreaterThan(100);
+    expect(pose.y).toBeLessThan(170);
+
+    // Verify the offset is approximately 45mm from the raw transform position
+    const rawTx = obj.transform_3x4?.[9] ?? obj.translation?.[0];
+    expect(typeof rawTx).toBe('number');
+    const offsetApplied = pose.x - rawTx;
+    expect(offsetApplied).toBeGreaterThan(40);
+    expect(offsetApplied).toBeLessThan(50);
+  });
+
+  test('calib cube slices at default position after bed recentering (regression)', async ({ request }) => {
+    // Regression: embedding Snapmaker 270mm profile into a Bambu 180mm source
+    // must recenter build items so OrcaSlicer accepts them. Without recentering,
+    // objects stayed at 180mm-bed positions and could end up off the 270mm bed.
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+    const job = await apiSliceDualColour(request, upload.upload_id);
+    expect(job.status).toBe('completed');
+    expect(job.metadata.layer_count).toBeGreaterThan(0);
+
+    // Sliced bounds should be in the center region of the 270mm bed
+    const bounds = job.metadata.bounds;
+    expect(bounds.max_x).toBeGreaterThan(100);
+    expect(bounds.max_x).toBeLessThan(200);
+    expect(bounds.max_y).toBeGreaterThan(100);
+    expect(bounds.max_y).toBeLessThan(200);
+  });
+
+  test('calib cube move-to-center slices successfully (regression)', async ({ request }) => {
+    // Regression: moving the calib cube to the center of the 270mm bed used to
+    // fail with "no object is fully inside the print volume" because the profile
+    // embedder changed the bed size without recentering build items.
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+
+    // Get layout to compute move-to-center delta
+    const layoutRes = await request.get(`${API}/uploads/${upload.upload_id}/layout`, { timeout: 30_000 });
+    const layout = await layoutRes.json();
+    const obj = layout.objects[0];
+    const pose = obj.ui_base_pose;
+    const bedCenter = 135.0;
+
+    // Move to exact center of bed
+    const translateX = bedCenter - pose.x;
+    const translateY = bedCenter - pose.y;
+
+    const fil = await getDefaultFilament(request);
+    const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
+      data: {
+        filament_ids: [fil.id, fil.id],
+        object_transforms: [{
+          build_item_index: obj.build_item_index,
+          translate_x_mm: translateX,
+          translate_y_mm: translateY,
+        }],
+      },
+      timeout: 120_000,
+    });
+    expect(sliceRes.ok()).toBe(true);
+    const job = await sliceRes.json();
+    expect(job.status).toBe('completed');
+
+    // G-code max_x should be in the center region of the 270mm bed.
+    // Object is ~25mm wide, so centered at 135mm → max_x ≈ 148mm (+ prime tower).
+    const bounds = job.metadata.bounds;
+    expect(bounds.max_x).toBeGreaterThan(110);
+    expect(bounds.max_x).toBeLessThan(190);
+  });
+
+  test('calib cube move off-bed is rejected (regression)', async ({ request }) => {
+    // Regression: bounds validation must correctly reject objects moved outside
+    // the 270mm build volume after bed recentering.
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+
+    const layoutRes = await request.get(`${API}/uploads/${upload.upload_id}/layout`, { timeout: 30_000 });
+    const layout = await layoutRes.json();
+    const obj = layout.objects[0];
+
+    const fil = await getDefaultFilament(request);
+    // Move 300mm right — way past the 270mm bed edge
+    const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
+      data: {
+        filament_ids: [fil.id, fil.id],
+        object_transforms: [{
+          build_item_index: obj.build_item_index,
+          translate_x_mm: 300,
+          translate_y_mm: 0,
+        }],
+      },
+      timeout: 120_000,
+    });
+    // Should be rejected by bounds pre-check (400) or by OrcaSlicer (500)
+    expect(sliceRes.ok()).toBe(false);
+    expect([400, 500]).toContain(sliceRes.status());
+  });
+
+  test('PrusaSlicer 2-colour file plate 1 slices with transform shift @extended (regression)', async ({ request }) => {
+    test.setTimeout(420_000);
+    // PrusaSlicer files have no project_settings.config → no bed recentering.
+    // Build items are already in bed-local coordinates. Transforms must work
+    // without any coordinate system conversion.
+    const upload = await apiUpload(request, 'PrusaSlicer_majorasmask_2colour.3mf');
+
+    const layoutRes = await request.get(`${API}/uploads/${upload.upload_id}/layout?plate_id=1`, { timeout: 90_000 });
+    expect(layoutRes.ok()).toBe(true);
+    const layout = await layoutRes.json();
+    expect(layout.objects.length).toBeGreaterThan(0);
+
+    const first = layout.objects[0];
+    const fil = await getDefaultFilament(request);
+
+    // Baseline slice (plate 1)
+    const baselineRes = await request.post(`${API}/uploads/${upload.upload_id}/slice-plate`, {
+      data: {
+        plate_id: 1,
+        filament_ids: [fil.id, fil.id],
+      },
+      timeout: 300_000,
+    });
+    expect(baselineRes.ok()).toBe(true);
+    const baselineJob = await baselineRes.json();
+    expect(baselineJob.status).toBe('completed');
+    const baselineMaxX = baselineJob.metadata?.bounds?.max_x;
+    expect(typeof baselineMaxX).toBe('number');
+
+    // Shift +15mm X and verify sliced output moves
+    const movedRes = await request.post(`${API}/uploads/${upload.upload_id}/slice-plate`, {
+      data: {
+        plate_id: 1,
+        filament_ids: [fil.id, fil.id],
+        object_transforms: [{
+          build_item_index: first.build_item_index,
+          translate_x_mm: 15,
+          translate_y_mm: 0,
+        }],
+      },
+      timeout: 300_000,
+    });
+    expect(movedRes.ok()).toBe(true);
+    const movedJob = await movedRes.json();
+    expect(movedJob.status).toBe('completed');
+    const movedMaxX = movedJob.metadata?.bounds?.max_x;
+    expect(typeof movedMaxX).toBe('number');
+    expect(movedMaxX).toBeGreaterThan(baselineMaxX + 5);
   });
 });

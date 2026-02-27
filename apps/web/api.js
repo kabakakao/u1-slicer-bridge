@@ -413,6 +413,10 @@ class ApiClient {
         return this.fetch(`/jobs/${jobId}`);
     }
 
+    async cancelSlice(jobId) {
+        return this.fetch(`/jobs/${jobId}/cancel`, { method: 'POST' });
+    }
+
     /**
      * Get printer status
      */

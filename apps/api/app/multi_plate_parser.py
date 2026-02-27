@@ -617,6 +617,15 @@ def list_build_item_geometry_3mf(
                 if not object_id:
                     continue
 
+                # Apply the build item's rotation+scale (but NOT translation) to
+                # geometry vertices so the viewer displays the correct orientation.
+                # Translation is handled separately via ui_base_pose in the layout API.
+                item_t = _parse_3mf_transform_values(item.get("transform", ""))
+                rotscale_t = list(item_t)
+                rotscale_t[9] = 0.0   # zero out translation X
+                rotscale_t[10] = 0.0  # zero out translation Y
+                rotscale_t[11] = 0.0  # zero out translation Z
+
                 try:
                     vertices, triangles = _collect_object_mesh_geometry(
                         zf,
@@ -624,6 +633,7 @@ def list_build_item_geometry_3mf(
                         main_model_path,
                         object_id,
                         ns,
+                        transform_3x4=rotscale_t,
                         include_modifiers=include_modifiers,
                     )
                 except KeyError:
