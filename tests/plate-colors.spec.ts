@@ -73,16 +73,16 @@ test.describe('Per-Plate Color Detection', () => {
     const fileInput = page.locator('input[type="file"][accept=".3mf,.stl"]');
     await fileInput.setInputFiles(filePath);
 
-    // Wait for upload + parse to complete (large multi-plate file)
-    await page.waitForFunction((expected) => {
+    // Wait for upload + parse to complete (large multi-plate file lands on selectplate)
+    await page.waitForFunction(() => {
       const body = document.querySelector('body') as any;
       if (body?._x_dataStack) {
         for (const scope of body._x_dataStack) {
-          if ('currentStep' in scope) return scope.currentStep === expected;
+          if ('currentStep' in scope) return scope.currentStep === 'selectplate' || scope.currentStep === 'configure';
         }
       }
       return false;
-    }, 'configure', { timeout: UPLOAD_TRANSITION_TIMEOUT_MS });
+    }, undefined, { timeout: UPLOAD_TRANSITION_TIMEOUT_MS });
 
     // Wait for plates to load
     await page.waitForFunction(() => {
@@ -122,7 +122,7 @@ test.describe('Slice Progress Animation', () => {
     await page.getByRole('button', { name: /Slice Now/i }).click();
 
     // Wait for slicing step to appear
-    await expect(page.getByText(/Slicing Your Print/i)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/Slicing\.\.\./i)).toBeVisible({ timeout: 5_000 });
 
     // Collect progress samples over 8 seconds
     const samples: number[] = [];

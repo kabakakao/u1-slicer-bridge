@@ -81,6 +81,22 @@ test.describe('Error Handling & Edge Cases', () => {
       });
       expect(res.status()).toBe(404);
     });
+
+    test('slice with invalid object_transforms build_item_index returns 400', async ({ request }) => {
+      const fil = await getDefaultFilament(request);
+      const upload = await apiUpload(request, 'u1-auxiliary-fan-cover-hex_mw.3mf');
+
+      const res = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
+        data: {
+          filament_id: fil.id,
+          object_transforms: [{ build_item_index: 999, rotate_z_deg: 10 }],
+        },
+        timeout: 120_000,
+      });
+      expect(res.status()).toBe(400);
+      const body = await res.json();
+      expect(String(body.detail).toLowerCase()).toContain('object transform');
+    });
   });
 
   test.describe('Filament Delete Safety', () => {

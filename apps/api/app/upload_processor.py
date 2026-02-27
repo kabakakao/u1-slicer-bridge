@@ -5,6 +5,7 @@ Used by both the upload route (manual file upload) and the MakerWorld route
 (server-side download) to avoid duplicating the parsing/validation/DB pipeline.
 """
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -18,15 +19,15 @@ from multi_plate_parser import parse_multi_plate_3mf
 logger = logging.getLogger(__name__)
 
 
-async def process_3mf_file(file_path: Path, filename: str, file_size: int) -> dict:
-    """
-    Process a .3mf file: parse metadata, validate bounds, detect colors,
-    and store in the database.
+def _process_3mf_sync(file_path: Path, filename: str):
+    """CPU-bound 3MF processing: parsing, validation, color detection.
 
-    Returns the same response dict as the POST /upload endpoint.
-    Raises HTTPException-compatible errors (ValueError for 400, RuntimeError for 500).
-    """
+    Runs in a worker thread via asyncio.to_thread() to avoid blocking the
+    event loop for large/complex files.
 
+    Returns a dict with all parsed data needed for DB insert + response.
+    Raises ValueError (400) or RuntimeError (500).
+    """
     # Parse .3mf and extract object/plate metadata
     try:
         plates, is_multi_plate = parse_multi_plate_3mf(file_path)
@@ -139,6 +140,39 @@ async def process_3mf_file(file_path: Path, filename: str, file_size: int) -> di
             plate_metadata_json = json.dumps(plate_info_cache)
         except Exception as e:
             logger.warning(f"Failed to build plate metadata cache: {e}")
+
+    return {
+        "objects_count": objects_count,
+        "validation": validation,
+        "plate_validations": plate_validations,
+        "detected_colors": detected_colors,
+        "file_print_settings": file_print_settings,
+        "is_multi_plate": is_multi_plate,
+        "plates": plates,
+        "plate_metadata_json": plate_metadata_json,
+    }
+
+
+async def process_3mf_file(file_path: Path, filename: str, file_size: int) -> dict:
+    """
+    Process a .3mf file: parse metadata, validate bounds, detect colors,
+    and store in the database.
+
+    Returns the same response dict as the POST /upload endpoint.
+    Raises HTTPException-compatible errors (ValueError for 400, RuntimeError for 500).
+    """
+
+    # Run all CPU-bound parsing/validation in a worker thread
+    parsed = await asyncio.to_thread(_process_3mf_sync, file_path, filename)
+
+    objects_count = parsed["objects_count"]
+    validation = parsed["validation"]
+    plate_validations = parsed["plate_validations"]
+    detected_colors = parsed["detected_colors"]
+    file_print_settings = parsed["file_print_settings"]
+    is_multi_plate = parsed["is_multi_plate"]
+    plates = parsed["plates"]
+    plate_metadata_json = parsed["plate_metadata_json"]
 
     # Store in database
     pool = get_pg_pool()

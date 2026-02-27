@@ -40,13 +40,14 @@ Upload 3MF/STL → validate plate bounds → configure filament/settings → sli
 
 ## Milestones & Plans
 
-Milestone status lives in [AGENTS.md](AGENTS.md) (section: "Milestones Status"). **34/38 milestones complete (89%).**
+Milestone status lives in [AGENTS.md](AGENTS.md) (section: "Milestones Status"). **34/39 milestones complete (87%).**
 
 Remaining milestones (not implemented):
 - **M14** — Multi-machine support (other printer models)
 - **M19** — Slicer selection (OrcaSlicer vs Snapmaker Orca) — see `memory/milestone-slicer-selection.md`
 - **M31** — Android companion app (WebView wrapper)
-- **M33** — Move objects on build plate (interactive drag-to-position)
+- **M33** — Move objects on build plate (interactive drag-to-position) — see `memory/milestone-3d-viewer-and-move-objects.md`
+- **M36** — AI-powered model colorization (depends on M33) — see `memory/milestone-ai-colorization.md`
 
 Optional/future milestones with detailed plans in `memory/`:
 - `memory/milestone-makerworld-integration.md` — M26 MakerWorld link import (implemented)
@@ -54,6 +55,8 @@ Optional/future milestones with detailed plans in `memory/`:
 - `memory/milestone-multiple-copies.md` — M32 copies implementation (implemented)
 - `memory/milestone-vertical-layer-slider.md` — M34 layer slider (implemented)
 - `memory/milestone-settings-backup.md` — M35 backup/restore (implemented)
+- `memory/milestone-3d-viewer-and-move-objects.md` — Pre-slice 3D viewer + M33 move objects
+- `memory/milestone-ai-colorization.md` — M36 AI colorization (segmentation + Claude Vision)
 
 ## Critical Conventions
 
@@ -92,8 +95,9 @@ Optional/future milestones with detailed plans in `memory/`:
 ### Testing
 - **IMPORTANT**: Always redirect test output to a project-local file: `npm test 2>&1 | tee tmp_test_output.txt` (with 600s timeout, NOT in background)
 - Background task temp files get cleaned up and become unreadable. `tmp_*` files are already gitignored
-- Fast tests: `npm run test:fast` (110 tests, ~5 min) — use for everyday development
-- Full tests: `npm test` (148 tests, ~60 min) — use before releases
+- Fast tests: `npm run test:fast` (~103 tests, ~2 min) � use for everyday development
+- Extended tests: `npm run test:extended` (~7 heavy tests, ~5 min) � use for multi-plate / transform regressions
+- Full tests: `npm test` (~150+ tests, ~60 min) � use before releases
 - Tests run sequentially (`workers: 1`) sharing Docker services and DB state
 - When adding third-party libraries, update [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) with name, version, license, copyright, and source URL
 
@@ -148,3 +152,4 @@ Beta tags get `:beta`, stable tags get `:latest`. Production users pulling `dock
 1. Add column with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in schema.sql
 2. Also add runtime migration in the relevant Python code (for existing databases)
 3. Restart API container to apply: `docker compose build --no-cache api && docker compose up -d api`
+

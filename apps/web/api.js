@@ -37,7 +37,9 @@ class ApiClient {
 
             return await response.json();
         } catch (error) {
-            console.error(`API Error [${endpoint}]:`, error);
+            if (error.name !== 'AbortError') {
+                console.error(`API Error [${endpoint}]:`, error);
+            }
             throw error;
         }
     }
@@ -146,12 +148,15 @@ class ApiClient {
             prime_tower_brim_width: settings.prime_tower_brim_width,
             prime_tower_brim_chamfer: settings.prime_tower_brim_chamfer,
             prime_tower_brim_chamfer_max_width: settings.prime_tower_brim_chamfer_max_width,
+            wipe_tower_x: settings.wipe_tower_x,
+            wipe_tower_y: settings.wipe_tower_y,
             enable_flow_calibrate: settings.enable_flow_calibrate,
             nozzle_temp: settings.nozzle_temp,
             bed_temp: settings.bed_temp,
             bed_type: settings.bed_type,
             filament_colors: settings.filament_colors,
             extruder_assignments: settings.extruder_assignments,
+            object_transforms: settings.object_transforms,
             scale_percent: settings.scale_percent ?? 100
         };
 
@@ -175,6 +180,31 @@ class ApiClient {
      */
     async getUploadPlates(uploadId) {
         return this.fetch(`/uploads/${uploadId}/plates`);
+    }
+
+    /**
+     * Get editable object layout metadata (M33 foundation)
+     * @param {number} uploadId
+     * @param {number|null} plateId
+     */
+    async getUploadLayout(uploadId, plateId = null, options = {}) {
+        const qs = plateId ? `?plate_id=${plateId}` : '';
+        return this.fetch(`/uploads/${uploadId}/layout${qs}`, options);
+    }
+
+    /**
+     * Get per-build-item mesh geometry for placement viewer (M33/M36)
+     * @param {number} uploadId
+     * @param {number|null} plateId
+     */
+    async getUploadGeometry(uploadId, plateId = null, includeModifiers = false, lod = 'placement_low', buildItemIndex = null, options = {}) {
+        const params = new URLSearchParams();
+        if (plateId) params.set('plate_id', String(plateId));
+        if (buildItemIndex) params.set('build_item_index', String(buildItemIndex));
+        if (includeModifiers) params.set('include_modifiers', 'true');
+        if (lod) params.set('lod', String(lod));
+        const qs = params.toString() ? `?${params.toString()}` : '';
+        return this.fetch(`/uploads/${uploadId}/geometry${qs}`, options);
     }
 
     /**
@@ -207,12 +237,15 @@ class ApiClient {
             prime_tower_brim_width: settings.prime_tower_brim_width,
             prime_tower_brim_chamfer: settings.prime_tower_brim_chamfer,
             prime_tower_brim_chamfer_max_width: settings.prime_tower_brim_chamfer_max_width,
+            wipe_tower_x: settings.wipe_tower_x,
+            wipe_tower_y: settings.wipe_tower_y,
             enable_flow_calibrate: settings.enable_flow_calibrate,
             nozzle_temp: settings.nozzle_temp,
             bed_temp: settings.bed_temp,
             bed_type: settings.bed_type,
             filament_colors: settings.filament_colors,
             extruder_assignments: settings.extruder_assignments,
+            object_transforms: settings.object_transforms,
             scale_percent: settings.scale_percent ?? 100
         };
 

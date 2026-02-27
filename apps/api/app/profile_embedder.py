@@ -417,6 +417,8 @@ class ProfileEmbedder:
         'thumbnails',             # image sizes list
         'head_wrap_detect_zone',  # detection zone points
         'extruder_offset',        # per-extruder XY offsets
+        'wipe_tower_x',          # per-plate tower position (not per-filament)
+        'wipe_tower_y',          # per-plate tower position (not per-filament)
     })
 
     @staticmethod
@@ -621,23 +623,48 @@ class ProfileEmbedder:
             raw = config.get(axis_key)
             if raw is None:
                 continue
+            config[axis_key] = self._clamp_wipe_tower_value(raw, min_pos, max_pos)
 
-            value = raw[0] if isinstance(raw, list) and raw else raw
-            try:
-                numeric = float(str(value).strip())
-            except Exception:
+    def _clamp_wipe_tower_value(self, raw: Any, min_pos: float, max_pos: float) -> Any:
+        """Clamp wipe-tower position values while preserving scalar/list shape."""
+        if isinstance(raw, list):
+            normalized_list: List[str] = []
+            for value in raw:
+                normalized_list.append(self._clamp_wipe_tower_scalar(value, min_pos, max_pos))
+            return normalized_list if normalized_list else raw
+        return self._clamp_wipe_tower_scalar(raw, min_pos, max_pos)
+
+    def _clamp_wipe_tower_scalar(self, raw: Any, min_pos: float, max_pos: float) -> str:
+        """Clamp one wipe-tower coordinate; preserve unparseable values as strings."""
+        try:
+            numeric = float(str(raw).strip())
+        except Exception:
+            return str(raw)
+        if numeric < min_pos:
+            numeric = min_pos
+        if numeric > max_pos:
+            numeric = max_pos
+        return f"{numeric:.3f}"
+
+    def _has_bambu_per_plate_wipe_tower_arrays(self, base_config: Dict[str, Any]) -> bool:
+        return (
+            isinstance(base_config.get('wipe_tower_x'), list)
+            or isinstance(base_config.get('wipe_tower_y'), list)
+        )
+
+    def _preserve_bambu_wipe_tower_array_shape(
+        self,
+        config: Dict[str, Any],
+        base_config: Dict[str, Any],
+        overrides: Dict[str, Any],
+    ) -> None:
+        """Replicate scalar overrides into Bambu per-plate wipe_tower arrays."""
+        for axis_key in ("wipe_tower_x", "wipe_tower_y"):
+            if axis_key not in overrides or not isinstance(base_config.get(axis_key), list):
                 continue
-
-            if numeric < min_pos:
-                numeric = min_pos
-            if numeric > max_pos:
-                numeric = max_pos
-
-            normalized = f"{numeric:.3f}"
-            if isinstance(raw, list):
-                config[axis_key] = [normalized]
-            else:
-                config[axis_key] = normalized
+            base_values = self._ensure_list(base_config.get(axis_key))
+            if base_values:
+                config[axis_key] = [str(config[axis_key])] * len(base_values)
 
     def _build_assignment_preserving_config(
         self,
@@ -692,6 +719,13 @@ class ProfileEmbedder:
         config.update(copy.deepcopy(filament_settings))
         config.update(copy.deepcopy(overrides))
 
+        # Bambu multi-plate projects often store prime tower coordinates as
+        # per-plate arrays. Replacing them with a scalar can be ignored by
+        # Orca's toolchange path planning (it still uses the original plate
+        # entry), which produces long fan-like travel paths when the tower is
+        # moved. Preserve the array shape by replicating the requested value.
+        self._preserve_bambu_wipe_tower_array_shape(config, base_config, overrides)
+
         config['layer_gcode'] = 'G92 E0'
         config.setdefault('enable_arc_fitting', '1')
 
@@ -709,7 +743,13 @@ class ProfileEmbedder:
         self._sanitize_index_field(config, 'prime_tower_brim_chamfer', 0)
         self._sanitize_index_field(config, 'prime_tower_brim_chamfer_max_width', 0)
         # Keep purge/prime tower safely inside bed bounds for U1 reliability.
-        self._sanitize_wipe_tower_position(config)
+        # Bambu multi-plate projects use per-plate wipe_tower_x/y arrays with
+        # semantics that differ from Snapmaker's scalar fields. Applying the
+        # generic clamp to those arrays can shift otherwise-valid plate tower
+        # positions and break plate slices (e.g. Shashibo plate 6). Preserve
+        # Bambu per-plate arrays as-is and only clamp scalar-style configs.
+        if not self._has_bambu_per_plate_wipe_tower_arrays(base_config):
+            self._sanitize_wipe_tower_position(config)
         self._sanitize_index_field(config, 'solid_infill_filament', 1)
         self._sanitize_index_field(config, 'sparse_infill_filament', 1)
         self._sanitize_index_field(config, 'wall_filament', 1)

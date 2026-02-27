@@ -46,15 +46,15 @@ test.describe('Multicolour Support', () => {
     await expect(header).toBeVisible();
     // Open the accordion to see source badges
     await header.click();
-    // Should show at least one source badge (File or Default)
-    const fileBadges = page.locator('text=File').first();
-    const defaultBadges = page.locator('text=Default').first();
+    // Should show at least one source badge (File or Orca)
+    const fileBadges = page.locator('.bg-amber-100:has-text("File")').first();
+    const orcaBadges = page.locator('.bg-gray-100:has-text("Orca")').first();
     const hasFile = await fileBadges.isVisible().catch(() => false);
-    const hasDefault = await defaultBadges.isVisible().catch(() => false);
-    expect(hasFile || hasDefault).toBe(true);
+    const hasOrca = await orcaBadges.isVisible().catch(() => false);
+    expect(hasFile || hasOrca).toBe(true);
   });
 
-  test('file with >4 colors maps extras to available extruders', async ({ page }) => {
+  test('file with >4 colors maps extras to available extruders @extended', async ({ page }) => {
     // Dragon Scale has 7 metadata colors - extras should map to E1-E4.
     await uploadFile(page, 'Dragon Scale infinity.3mf');
     // Wait for plates to load using Alpine v3 API

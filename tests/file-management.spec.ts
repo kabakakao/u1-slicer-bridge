@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, getAppState, API, apiUpload, waitForJobComplete, SLOW_TEST_TIMEOUT_MS } from './helpers';
+import { waitForApp, uploadFile, getAppState, API, apiUpload, SLOW_TEST_TIMEOUT_MS, apiSliceDualColour } from './helpers';
 
 test.describe('File Management', () => {
   test.beforeEach(async ({ page }) => {
@@ -31,24 +31,8 @@ test.describe('File Management', () => {
   });
 
   test('delete job via API', async ({ request }) => {
-    // Upload and slice (dual-colour file needs 2 filament_ids)
     const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
-
-    const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
-    const filaments = (await filRes.json()).filaments;
-    const fil1 = filaments[0];
-    const fil2 = filaments.length > 1 ? filaments[1] : filaments[0];
-
-    const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
-      data: {
-        filament_ids: [fil1.id, fil2.id],
-        layer_height: 0.2,
-        infill_density: 15,
-        supports: false,
-      },
-      timeout: 120_000,
-    });
-    const job = await waitForJobComplete(request, await sliceRes.json());
+    const job = await apiSliceDualColour(request, String(upload.upload_id));
 
     // Delete the job
     const delRes = await request.delete(`${API}/jobs/${job.job_id}`, { timeout: 30_000 });

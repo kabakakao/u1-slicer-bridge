@@ -6,13 +6,13 @@ test.describe('Multi-Plate Support', () => {
     await waitForApp(page);
   });
 
-  test('multi-plate file shows plate count', async ({ page }) => {
+  test('multi-plate file shows plate count @extended', async ({ page }) => {
     await uploadFile(page, 'Dragon Scale infinity.3mf');
-    // Use more specific locator — the multi-plate info badge (not loading hints)
-    await expect(page.locator('text=/\\d+ plates detected/i').first()).toBeVisible();
+    // Multi-plate files now land on selectplate step showing plate count
+    await expect(page.locator('text=/\\d+ plates/i').first()).toBeVisible();
   });
 
-  test('plate selection cards are shown for multi-plate files', async ({ page }) => {
+  test('plate selection cards are shown for multi-plate files @extended', async ({ page }) => {
     // Reuse the Dragon Scale upload from previous test (server retains uploads)
     await selectUploadByName(page, 'Dragon Scale infinity.3mf');
     // Wait for plates to load using Alpine v3 API
@@ -31,7 +31,7 @@ test.describe('Multi-Plate Support', () => {
     expect(plates.length).toBeGreaterThan(1);
   });
 
-  test('clicking a plate selects it', async ({ page }) => {
+  test('clicking a plate selects it @extended', async ({ page }) => {
     // Reuse the Dragon Scale upload from previous test
     await selectUploadByName(page, 'Dragon Scale infinity.3mf');
     // Wait for plates using Alpine v3 API
@@ -52,7 +52,7 @@ test.describe('Multi-Plate Support', () => {
     expect(selected).not.toBeNull();
   });
 
-  test('plates API returns correct structure', async ({ request }) => {
+  test('plates API returns correct structure @extended', async ({ request }) => {
     const upload = await apiUpload(request, 'Dragon Scale infinity.3mf');
     expect(upload.is_multi_plate).toBe(true);
 
@@ -71,7 +71,7 @@ test.describe('Multi-Plate Support', () => {
     expect(plate.validation).toHaveProperty('fits');
   });
 
-  test('single-plate file does not show plate selector', async ({ page }) => {
+  test('single-plate file does not show plate selector @extended', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     // Should not show multi-plate indicator
     const isMulti = await getAppState(page, 'selectedUpload');

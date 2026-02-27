@@ -24,9 +24,10 @@ class FilamentPreset:
 PRINTER_PROFILES: Dict[str, PrinterProfile] = {
     "snapmaker_u1": PrinterProfile(
         name="Snapmaker U1",
-        build_volume_x=300.0,
-        build_volume_y=250.0,
-        build_volume_z=235.0,
+        # Match the Snapmaker Orca U1 machine profile printable volume.
+        build_volume_x=270.0,
+        build_volume_y=270.0,
+        build_volume_z=270.0,
     ),
 }
 
