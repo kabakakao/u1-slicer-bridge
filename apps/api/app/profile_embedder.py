@@ -997,6 +997,18 @@ class ProfileEmbedder:
             # imported from Bambu profiles can carry 'nil' for "use default").
             self._sanitize_nil_values(config)
 
+            # Ensure required per-filament keys exist.  OrcaSlicer indexes
+            # these by filament number; if they're missing entirely when
+            # filament_colour indicates N>1 filaments, Orca reads uninitialised
+            # memory and segfaults at "Initializing StaticPrintConfigs".
+            # Our Snapmaker profiles omit these keys (they're implicit for
+            # single-filament), so inject sensible defaults before padding.
+            if requested_filament_count > 1:
+                if 'filament_diameter' not in config:
+                    config['filament_diameter'] = ['1.75']
+                if 'filament_is_support' not in config:
+                    config['filament_is_support'] = ['0']
+
             # Pad per-filament arrays to match requested_filament_count.
             # Orca indexes per-filament arrays by filament number; if filament_colour
             # indicates N filaments but other arrays are length 1, Orca reads past
@@ -1256,12 +1268,18 @@ class ProfileEmbedder:
             target_center = None
 
         try:
-            # Bambu Studio metadata files that are safe to drop
-            bambu_metadata_files = {
+            # Slicer-specific metadata files that are safe to drop.
+            # We replace project_settings.config with our own, and foreign
+            # slicer configs (Bambu, PrusaSlicer) can conflict with our
+            # injected Orca settings — OrcaSlicer may read stale array
+            # sizes from Slic3r_PE.config and crash.
+            drop_metadata_files = {
                 'Metadata/project_settings.config',  # We'll replace this
                 'Metadata/slice_info.config',        # Bambu-specific
                 'Metadata/cut_information.xml',      # Bambu-specific
                 'Metadata/filament_sequence.json',   # Bambu-specific (can crash Orca)
+                'Metadata/Slic3r_PE.config',         # PrusaSlicer project settings
+                'Metadata/Slic3r_PE_model.config',   # PrusaSlicer model settings
             }
 
             with zipfile.ZipFile(source, 'r') as source_zf:
@@ -1286,7 +1304,7 @@ class ProfileEmbedder:
                 with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as dest_zf:
                     # Copy geometry and essential files, skip Bambu metadata
                     for item in source_zf.infolist():
-                        if item.filename in bambu_metadata_files:
+                        if item.filename in drop_metadata_files:
                             logger.debug(f"Skipping Bambu metadata: {item.filename}")
                             continue
 

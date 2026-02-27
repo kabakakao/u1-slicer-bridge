@@ -1262,4 +1262,33 @@ test.describe('Slicing Workflow', () => {
     expect([400, 500]).toContain(sliceRes.status());
   });
 
+  test('PrusaSlicer 2-colour file dual-filament slice succeeds @extended (regression)', async ({ request }) => {
+    test.setTimeout(420_000);
+    // Regression: PrusaSlicer files lack filament_diameter and filament_is_support
+    // in our Snapmaker profiles.  Without these, OrcaSlicer segfaults at
+    // "Initializing StaticPrintConfigs" when >1 filament is requested.
+    // Verify dual-filament plate slicing works for PrusaSlicer-format 3MFs.
+    const upload = await apiUpload(request, 'PrusaSlicer_majorasmask_2colour.3mf');
+
+    const layoutRes = await request.get(`${API}/uploads/${upload.upload_id}/layout?plate_id=1`, { timeout: 90_000 });
+    expect(layoutRes.ok()).toBe(true);
+    const layout = await layoutRes.json();
+    expect(layout.objects.length).toBeGreaterThan(0);
+
+    const fil = await getDefaultFilament(request);
+
+    // Dual-filament slice (plate 1) — previously segfaulted
+    const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice-plate`, {
+      data: {
+        plate_id: 1,
+        filament_ids: [fil.id, fil.id],
+      },
+      timeout: 300_000,
+    });
+    expect(sliceRes.ok()).toBe(true);
+    const job = await sliceRes.json();
+    expect(job.status).toBe('completed');
+    expect(job.metadata?.bounds?.max_x).toBeGreaterThan(0);
+    expect(job.metadata?.layer_count).toBeGreaterThan(100);
+  });
 });
