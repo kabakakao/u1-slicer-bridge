@@ -386,6 +386,8 @@ test.describe('G-code Viewer', () => {
         if (!scope || !viewer || !obj) return false;
         if (Number(scope.selectedPlate || 0) !== Number(pid)) return false;
         if (scope.objectLayoutLoading || scope.objectLayoutError) return false;
+        // Ensure layout data actually matches the requested plate (not stale from previous plate)
+        if (Number(obj.build_item_index || 0) !== Number(pid)) return false;
         const rs = typeof viewer.getDebugObjectRenderState === 'function'
           ? viewer.getDebugObjectRenderState(obj.build_item_index)
           : null;

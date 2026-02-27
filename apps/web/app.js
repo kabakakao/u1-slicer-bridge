@@ -2239,6 +2239,12 @@ function app() {
             if (plate && plate.detected_colors && plate.detected_colors.length > 0) {
                 this.detectedColors = plate.detected_colors;
             }
+            // Explicit plate selection should always trigger a layout load,
+            // even if the placement panel hasn't scrolled into view yet.
+            this.placementPanelVisible = true;
+            // Signal loading immediately so consumers don't see stale data
+            // between now and when the queued load starts.
+            this.objectLayoutLoading = true;
             // Let the plate card selection/thumbnail render first, then load the
             // heavier placement layout/geometry work.
             this.queueObjectLayoutLoad(this.selectedUpload?.upload_id, plateId, 0);
