@@ -8,8 +8,8 @@ test.describe('Multi-Plate Support', () => {
 
   test('multi-plate file shows plate count @extended', async ({ page }) => {
     await uploadFile(page, 'Dragon Scale infinity.3mf');
-    // Use more specific locator — the multi-plate info badge (not loading hints)
-    await expect(page.locator('text=/\\d+ plates detected/i').first()).toBeVisible();
+    // Multi-plate files now land on selectplate step showing plate count
+    await expect(page.locator('text=/\\d+ plates/i').first()).toBeVisible();
   });
 
   test('plate selection cards are shown for multi-plate files @extended', async ({ page }) => {

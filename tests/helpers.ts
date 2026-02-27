@@ -50,23 +50,53 @@ export function fixture(name: string) {
   return path.resolve(__dirname, '..', 'test-data', name);
 }
 
-/** Upload a file via the hidden file input */
+/** Upload a file via the hidden file input.
+ *  Multi-plate files land on 'selectplate'; single-plate files land on 'configure'. */
 export async function uploadFile(page: Page, fixtureName: string) {
   const filePath = fixture(fixtureName);
   const fileInput = page.locator('input[type="file"][accept=".3mf,.stl"]');
   await fileInput.setInputFiles(filePath);
-  // Wait for upload to complete and move to configure step.
+  // Wait for upload to complete and move to configure or selectplate step.
   // Large multi-plate files (e.g. Dragon Scale 3.6MB) need ~40s for
   // server-side parsing + per-plate validation, so allow 60s.
-  await page.waitForFunction((expected) => {
+  await page.waitForFunction(() => {
     const body = document.querySelector('body') as any;
     if (body?._x_dataStack) {
       for (const scope of body._x_dataStack) {
-        if ('currentStep' in scope) return scope.currentStep === expected;
+        if ('currentStep' in scope) return scope.currentStep === 'configure' || scope.currentStep === 'selectplate';
       }
     }
-    return body?.__x?.$data?.currentStep === expected;
-  }, 'configure', { timeout: UPLOAD_TRANSITION_TIMEOUT_MS });
+    const step = body?.__x?.$data?.currentStep;
+    return step === 'configure' || step === 'selectplate';
+  }, undefined, { timeout: UPLOAD_TRANSITION_TIMEOUT_MS });
+}
+
+/** If on selectplate step, click "Next: Configure Settings" to proceed to configure.
+ *  No-op if already on configure step. */
+export async function proceedFromPlateSelection(page: Page) {
+  const step = await getCurrentStep(page);
+  if (step === 'configure') return; // already there
+  if (step !== 'selectplate') throw new Error(`Expected selectplate or configure step, got '${step}'`);
+  // Wait for plates to be loaded (Next button is disabled until a plate is selected)
+  await page.waitForFunction(() => {
+    const body = document.querySelector('body') as any;
+    if (body?._x_dataStack) {
+      for (const scope of body._x_dataStack) {
+        if ('selectedPlate' in scope) return !!scope.selectedPlate;
+      }
+    }
+    return false;
+  }, undefined, { timeout: CONFIGURE_STEP_TIMEOUT_MS });
+  await page.getByRole('button', { name: /Next.*Configure/i }).click();
+  await page.waitForFunction(() => {
+    const body = document.querySelector('body') as any;
+    if (body?._x_dataStack) {
+      for (const scope of body._x_dataStack) {
+        if ('currentStep' in scope) return scope.currentStep === 'configure';
+      }
+    }
+    return false;
+  }, undefined, { timeout: 10_000 });
 }
 
 /** Click Slice Now from configure and wait for completion */
@@ -81,7 +111,8 @@ export async function uiUploadAndSliceToComplete(page: Page, fixtureName: string
   await sliceFromConfigure(page);
 }
 
-/** Navigate to the configure step for an already-uploaded file by filename */
+/** Navigate to the configure/selectplate step for an already-uploaded file by filename.
+ *  Multi-plate files land on 'selectplate'; single-plate files land on 'configure'. */
 export async function selectUploadByName(page: Page, filename: string) {
   // Open My Files modal
   await page.getByTitle('My Files').click();
@@ -102,16 +133,17 @@ export async function selectUploadByName(page: Page, filename: string) {
   const card = modal.locator('.rounded-lg').filter({ hasText: filename }).first();
   await expect(card).toBeVisible({ timeout: 10_000 });
   await card.getByRole('button', { name: 'Slice', exact: true }).click();
-  // Wait for configure step (modal closes and app transitions)
-  await page.waitForFunction((expected) => {
+  // Wait for configure or selectplate step (modal closes and app transitions)
+  await page.waitForFunction(() => {
     const body = document.querySelector('body') as any;
     if (body?._x_dataStack) {
       for (const scope of body._x_dataStack) {
-        if ('currentStep' in scope) return scope.currentStep === expected;
+        if ('currentStep' in scope) return scope.currentStep === 'configure' || scope.currentStep === 'selectplate';
       }
     }
-    return body?.__x?.$data?.currentStep === expected;
-  }, 'configure', { timeout: CONFIGURE_STEP_TIMEOUT_MS });
+    const step = body?.__x?.$data?.currentStep;
+    return step === 'configure' || step === 'selectplate';
+  }, undefined, { timeout: CONFIGURE_STEP_TIMEOUT_MS });
 }
 
 /** Wait for slicing to complete (up to 2.5 minutes).
@@ -127,8 +159,8 @@ export async function waitForSliceComplete(page: Page) {
     }
     if (!step) step = body?.__x?.$data?.currentStep;
     if (step === 'complete') return true;
-    // Fail fast on error — app reverts to configure or upload on failure
-    if (step === 'configure' || step === 'upload') {
+    // Fail fast on error — app reverts to configure, selectplate, or upload on failure
+    if (step === 'configure' || step === 'upload' || step === 'selectplate') {
       throw new Error(`Slice failed — app reverted to '${step}' step`);
     }
     return false;

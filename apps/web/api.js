@@ -37,7 +37,9 @@ class ApiClient {
 
             return await response.json();
         } catch (error) {
-            console.error(`API Error [${endpoint}]:`, error);
+            if (error.name !== 'AbortError') {
+                console.error(`API Error [${endpoint}]:`, error);
+            }
             throw error;
         }
     }
@@ -185,9 +187,9 @@ class ApiClient {
      * @param {number} uploadId
      * @param {number|null} plateId
      */
-    async getUploadLayout(uploadId, plateId = null) {
+    async getUploadLayout(uploadId, plateId = null, options = {}) {
         const qs = plateId ? `?plate_id=${plateId}` : '';
-        return this.fetch(`/uploads/${uploadId}/layout${qs}`);
+        return this.fetch(`/uploads/${uploadId}/layout${qs}`, options);
     }
 
     /**
@@ -195,14 +197,14 @@ class ApiClient {
      * @param {number} uploadId
      * @param {number|null} plateId
      */
-    async getUploadGeometry(uploadId, plateId = null, includeModifiers = false, lod = 'placement_low', buildItemIndex = null) {
+    async getUploadGeometry(uploadId, plateId = null, includeModifiers = false, lod = 'placement_low', buildItemIndex = null, options = {}) {
         const params = new URLSearchParams();
         if (plateId) params.set('plate_id', String(plateId));
         if (buildItemIndex) params.set('build_item_index', String(buildItemIndex));
         if (includeModifiers) params.set('include_modifiers', 'true');
         if (lod) params.set('lod', String(lod));
         const qs = params.toString() ? `?${params.toString()}` : '';
-        return this.fetch(`/uploads/${uploadId}/geometry${qs}`);
+        return this.fetch(`/uploads/${uploadId}/geometry${qs}`, options);
     }
 
     /**

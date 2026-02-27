@@ -417,6 +417,8 @@ class ProfileEmbedder:
         'thumbnails',             # image sizes list
         'head_wrap_detect_zone',  # detection zone points
         'extruder_offset',        # per-extruder XY offsets
+        'wipe_tower_x',          # per-plate tower position (not per-filament)
+        'wipe_tower_y',          # per-plate tower position (not per-filament)
     })
 
     @staticmethod

@@ -6,6 +6,7 @@
 function app() {
     let placementViewer = null;
     let placementViewerRefreshQueued = false;
+    let viewerAbortController = null;
 
     return {
         // UI State
@@ -14,7 +15,7 @@ function app() {
         uploadPhase: 'idle', // 'idle' | 'uploading' | 'processing'
         error: null,
 
-        // Current workflow step: 'upload' | 'configure' | 'slicing' | 'complete'
+        // Current workflow step: 'upload' | 'selectplate' | 'configure' | 'slicing' | 'complete'
         currentStep: 'upload',
         activeTab: 'upload', // kept for compatibility — always 'upload' now
         showSettingsModal: false,
@@ -77,7 +78,7 @@ function app() {
         objectTransformEdits: {}, // build_item_index -> {translate_x_mm, translate_y_mm, rotate_z_deg}
         objectDrag: null,         // legacy 2D drag state (unused after 3D viewer swap; kept for compatibility)
         selectedLayoutObject: null, // build_item_index selected in Object Placement UI / 3D viewer
-        placementInteractionMode: 'move', // 'move' | 'rotate'
+        placementInteractionMode: 'move', // default mode for drag interaction
         detectedColors: [],       // Colors detected from 3MF file
         fileSettings: null,       // Print settings detected from 3MF file
         filamentOverride: false,  // Whether user wants to manually override filament assignment
@@ -1180,10 +1181,7 @@ function app() {
                 this.applyDetectedColors(result.detected_colors || []);
                 this.resetJobOverrideSettings();
 
-                // Move to configure step AFTER colors/filaments are ready
-                this.currentStep = 'configure';
-                
-                // Always reload plate info so we get latest validation + preview URLs.
+                // Load plate info before setting step (multi-plate → selectplate, single → configure)
                 this.platesLoading = true;
                 this.plates = [];
                 try {
@@ -1203,7 +1201,10 @@ function app() {
 
                     if (this.selectedUpload?.is_multi_plate) {
                         this.resetObjectLayoutState();
+                        this.currentStep = 'selectplate';
+                        this.autoSelectFirstPlate();
                     } else {
+                        this.currentStep = 'configure';
                         this.queueObjectLayoutLoad(result.upload_id, null, 0);
                     }
 
@@ -1219,6 +1220,7 @@ function app() {
                     this.selectedUpload.is_multi_plate = false;
                     this.plates = [];
                     this.objectLayoutError = null;
+                    this.currentStep = 'configure';
                     console.warn('Could not load plates for new upload:', err);
                     // Still try to apply file settings from upload response
                     const fps = result.file_print_settings;
@@ -1292,9 +1294,8 @@ function app() {
                 this.filamentOverride = false;
                 this.applyDetectedColors(result.detected_colors || []);
                 this.resetJobOverrideSettings();
-                this.currentStep = 'configure';
 
-                // Load plate info
+                // Load plate info before setting step (multi-plate → selectplate, single → configure)
                 this.platesLoading = true;
                 this.plates = [];
                 try {
@@ -1312,7 +1313,10 @@ function app() {
 
                     if (this.selectedUpload?.is_multi_plate) {
                         this.resetObjectLayoutState();
+                        this.currentStep = 'selectplate';
+                        this.autoSelectFirstPlate();
                     } else {
+                        this.currentStep = 'configure';
                         this.queueObjectLayoutLoad(result.upload_id, null, 0);
                     }
 
@@ -1323,6 +1327,7 @@ function app() {
                     this.platesLoading = false;
                     this.selectedUpload.is_multi_plate = false;
                     this.plates = [];
+                    this.currentStep = 'configure';
                     const fps = result.file_print_settings;
                     this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
                     if (this.fileSettings) this.applyFileSettings(this.fileSettings);
@@ -1355,7 +1360,11 @@ function app() {
 
             // Re-selecting the same upload preserves all configure state
             if (this.selectedUpload && this.selectedUpload.upload_id === upload.upload_id) {
-                this.currentStep = 'configure';
+                if (this.selectedUpload.is_multi_plate && !this.selectedPlate) {
+                    this.currentStep = 'selectplate';
+                } else {
+                    this.currentStep = 'configure';
+                }
                 this.activeTab = 'upload';
                 return;
             }
@@ -1367,10 +1376,6 @@ function app() {
             this.resetObjectLayoutState();
             this.filamentOverride = false;
             this.resetJobOverrideSettings();
-
-            // Transition immediately so the user sees the configure step
-            // with its loading indicator instead of a blank stare.
-            this.currentStep = 'configure';
             this.activeTab = 'upload';
 
             // Fetch upload details and plates in parallel to cut wall time.
@@ -1422,7 +1427,10 @@ function app() {
 
             if (this.selectedUpload?.is_multi_plate) {
                 this.resetObjectLayoutState();
+                this.currentStep = 'selectplate';
+                this.autoSelectFirstPlate();
             } else {
+                this.currentStep = 'configure';
                 this.queueObjectLayoutLoad(uploadId, null, 0);
             }
         },
@@ -1565,9 +1573,15 @@ function app() {
                 return false;
             };
 
+            // Abort any in-flight viewer requests and create a new controller.
+            // This frees browser connections immediately so slice polling isn't blocked.
+            viewerAbortController?.abort();
+            viewerAbortController = new AbortController();
+            const viewerSignal = { signal: viewerAbortController.signal };
+
             try {
                 const tLayout0 = this._placementNow();
-                const layout = await api.getUploadLayout(requestedUploadId, requestedPlateId);
+                const layout = await api.getUploadLayout(requestedUploadId, requestedPlateId, viewerSignal);
                 metrics.layout_fetch_ms = Math.round((this._placementNow() - tLayout0) * 10) / 10;
                 metrics.layout_backend_ms = Number(layout?.timing_ms?.total || 0) || null;
 
@@ -1600,8 +1614,11 @@ function app() {
                         requestedPlateId,
                         !!this.showPlacementModifiers,
                         'placement_low',
+                        null,
+                        viewerSignal,
                     );
                 } catch (geomErr) {
+                    if (geomErr.name === 'AbortError') return;
                     console.warn('Failed to load placement geometry low LOD (falling back to proxies):', geomErr);
                 }
                 if (isStale()) return;
@@ -1628,7 +1645,7 @@ function app() {
                 }
                 await this.refineSelectedPlacementGeometry(requestedUploadId, requestedPlateId, metrics, isStale, tStart);
             } catch (err) {
-                if (isStale()) return;
+                if (err.name === 'AbortError' || isStale()) return;
                 this.objectLayoutLoading = false;
                 this.objectGeometryLoading = false;
                 this.objectGeometryLod = null;
@@ -1701,6 +1718,7 @@ function app() {
             this.objectGeometryLod = 'placement_high';
             const tGeomHigh0 = this._placementNow();
             let highGeometry = null;
+            const refineSignal = viewerAbortController ? { signal: viewerAbortController.signal } : {};
             try {
                 highGeometry = await api.getUploadGeometry(
                     uploadId,
@@ -1708,8 +1726,10 @@ function app() {
                     !!this.showPlacementModifiers,
                     'placement_high',
                     selectedIdx,
+                    refineSignal,
                 );
             } catch (geomHighErr) {
+                if (geomHighErr.name === 'AbortError') return;
                 console.warn('Failed to load placement geometry high LOD for selected object:', geomHighErr);
             }
             if (stale()) return;
@@ -1809,15 +1829,6 @@ function app() {
             };
             this.placementLoadMetrics = next;
             window.__u1PlacementViewerMetrics = next;
-        },
-
-        setPlacementInteractionMode(mode) {
-            if (this.isObjectPlacementTransformApproximate()) return;
-            const next = (mode === 'rotate') ? 'rotate' : 'move';
-            this.placementInteractionMode = next;
-            if (placementViewer && placementViewer.setInteractionMode) {
-                placementViewer.setInteractionMode(next);
-            }
         },
 
         isObjectPlacementTransformApproximate() {
@@ -2150,19 +2161,6 @@ function app() {
             return `left:${xPct}%;top:${yPct}%;transform:translate(-50%,-50%) rotate(${pose.rotate_z_deg}deg);`;
         },
 
-        nudgeObject(buildItemIndex, axis, deltaMm) {
-            if (this.isObjectPlacementTransformApproximate()) return;
-            const key = axis === 'y' ? 'translate_y_mm' : 'translate_x_mm';
-            const current = this.getObjectTransformValue(buildItemIndex, key);
-            this.setObjectTransformField(buildItemIndex, key, current + Number(deltaMm || 0));
-        },
-
-        rotateObjectBy(buildItemIndex, deltaDeg) {
-            if (this.isObjectPlacementTransformApproximate()) return;
-            const current = this.getObjectTransformValue(buildItemIndex, 'rotate_z_deg');
-            this.setObjectTransformField(buildItemIndex, 'rotate_z_deg', current + Number(deltaDeg || 0));
-        },
-
         beginObjectDrag(event, obj) {
             if (!obj || !obj.build_item_index) return;
             if (event.button !== undefined && event.button !== 0) return;
@@ -2217,6 +2215,21 @@ function app() {
         /**
          * Select a plate for slicing
          */
+        autoSelectFirstPlate() {
+            if (!this.plates || this.plates.length === 0) return;
+            const firstFit = this.plates.find(p => p.validation && p.validation.fits && p.printable);
+            this.selectPlate(firstFit ? firstFit.plate_id : this.plates[0].plate_id);
+        },
+
+        proceedFromSelectPlate() {
+            if (this.selectedUpload?.is_multi_plate && !this.selectedPlate) return;
+            this.currentStep = 'configure';
+        },
+
+        backToSelectPlate() {
+            this.currentStep = 'selectplate';
+        },
+
         selectPlate(plateId) {
             this.selectedPlate = plateId;
             this.objectTransformEdits = {};
@@ -2314,8 +2327,13 @@ function app() {
             this.sliceResult = null;  // Destroy old viewer before creating new one
             this.currentStep = 'slicing';
             this.activeTab = 'upload';
-            this.sliceProgress = 0;
-            this.sliceMessage = '';
+            this.sliceProgress = 1;
+            this.sliceMessage = 'Preparing...';
+
+            // Abort any in-flight viewer/layout requests to free browser connections
+            // for the slice POST and progress polling
+            viewerAbortController?.abort();
+            viewerAbortController = null;
             this.accordionColours = false;
             this.accordionSettings = false;
 
@@ -2382,35 +2400,33 @@ function app() {
                     sliceSettings.filament_id = this.selectedFilament;
                 }
                 
-                // Include client-generated job_id for immediate progress polling
+                // Include client-generated job_id for progress polling
                 sliceSettings.job_id = clientJobId;
 
-                // Start polling for real progress immediately (runs during the POST await)
+                // Start polling — this is the SOLE mechanism for progress and completion.
                 this.pollSliceStatus(clientJobId);
 
-                if (isMultiPlate) {
-                    // Slice specific plate
-                    console.log(`Slicing plate ${selectedPlateId} from upload ${uploadId} (job: ${clientJobId})`);
-                    result = await api.slicePlate(uploadId, selectedPlateId, sliceSettings);
-                } else {
-                    // Slice regular upload
-                    console.log(`Slicing upload ${uploadId} (job: ${clientJobId})`);
-                    result = await api.sliceUpload(uploadId, sliceSettings);
-                }
+                // Fire the slice POST without awaiting. The backend's GIL blocks the
+                // event loop during CPU-heavy profile embedding (~20s for large Bambu
+                // files), preventing poll responses. By not awaiting, we avoid holding
+                // JS state and let polling handle everything. The POST error path
+                // catches network/validation failures that polling can't detect.
+                const slicePromise = isMultiPlate
+                    ? (console.log(`Slicing plate ${selectedPlateId} from upload ${uploadId} (job: ${clientJobId})`),
+                       api.slicePlate(uploadId, selectedPlateId, sliceSettings))
+                    : (console.log(`Slicing upload ${uploadId} (job: ${clientJobId})`),
+                       api.sliceUpload(uploadId, sliceSettings));
 
-                console.log('Slice completed:', result);
-                clearInterval(this.sliceInterval);
-
-                if (result.status === 'completed') {
-                    this.sliceResult = result;
-                    this.sliceProgress = 100;
-                    this.sliceMessage = 'Complete';
-                    this.currentStep = 'complete';
-                    await this.loadJobs();
-                } else {
-                    // Shouldn't normally reach here, but handle as async fallback
-                    this.pollSliceStatus(result.job_id);
-                }
+                slicePromise.catch(err => {
+                    // Only handle if we're still on the slicing step (polling hasn't
+                    // already transitioned us to complete/failed)
+                    if (this.currentStep === 'slicing') {
+                        clearInterval(this.sliceInterval);
+                        this.showError(`Slicing failed: ${err.message}`);
+                        this.currentStep = 'configure';
+                        console.error('Slice POST failed:', err);
+                    }
+                });
             } catch (err) {
                 clearInterval(this.sliceInterval);
                 this.showError(`Slicing failed: ${err.message}`);
@@ -2427,12 +2443,30 @@ function app() {
                 clearInterval(this.sliceInterval);
             }
 
+            // Animate fake progress 1-4% while waiting for real backend data.
+            // The backend's GIL blocks poll responses during CPU-heavy embedding
+            // (~20s for large Bambu files). This gives the user visual feedback.
+            let fakeProgress = 1;
+            this.sliceProgress = 1;
+            this.sliceMessage = 'Preparing...';
+            let gotRealProgress = false;
+
+            let pollCount = 0;
             this.sliceInterval = setInterval(async () => {
+                const myPoll = ++pollCount;
+
+                // Animate fake progress until real data arrives
+                if (!gotRealProgress) {
+                    fakeProgress = Math.min(fakeProgress + 0.2, 4);
+                    this.sliceProgress = Math.round(fakeProgress);
+                }
+
                 try {
                     const job = await api.getJobStatus(jobId);
 
                     // Use real progress from the API
-                    if (job.progress !== undefined) {
+                    if (job.progress !== undefined && job.progress > 0) {
+                        gotRealProgress = true;
                         this.sliceProgress = job.progress;
                     }
                     if (job.progress_message) {
@@ -2445,7 +2479,7 @@ function app() {
                         this.sliceProgress = 100;
                         this.sliceMessage = 'Complete';
                         this.currentStep = 'complete';
-                        console.log('Slicing completed');
+                        console.log('Slicing completed via poll');
                         this.loadJobs();
                     } else if (job.status === 'failed') {
                         clearInterval(this.sliceInterval);
@@ -2453,12 +2487,11 @@ function app() {
                         this.currentStep = 'configure';
                     }
                 } catch (err) {
-                    // 404 is expected during early polls before DB record is created
                     if (!err.message?.includes('404')) {
-                        console.error('Failed to check slice status:', err);
+                        console.error(`[poll #${myPoll}] error:`, err);
                     }
                 }
-            }, 1000); // Poll every 1 second for real-time progress
+            }, 1000);
         },
 
         /**
@@ -2467,9 +2500,12 @@ function app() {
         headerTitle() {
             switch (this.currentStep) {
                 case 'upload': return 'U1 Slicer Bridge';
+                case 'selectplate': return this.selectedUpload?.filename
+                    ? 'Select Plate: ' + this.selectedUpload.filename
+                    : 'Select Plate';
                 case 'configure': return this.selectedUpload?.filename
                     ? 'Configure: ' + this.selectedUpload.filename
-                    : 'Configure Print Settings';
+                    : 'Configure';
                 case 'slicing': return this.selectedUpload?.filename
                     ? 'Slicing: ' + this.selectedUpload.filename
                     : 'Slicing...';

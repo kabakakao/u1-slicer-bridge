@@ -299,9 +299,21 @@ def _enforce_transformed_bounds_or_raise(
         oid = str(it.get("object_id") or "")
         t3 = assemble_transforms_by_object.get(oid) or assemble_transforms.get(idx)
         if t3 and isinstance(local_bounds, dict):
-            wb_from_assemble = _bounds_from_local_and_transform(it, t3)
-            if wb_from_assemble:
-                wb = wb_from_assemble
+            # Check if the assemble transform has been sanitized to bed-local
+            # coords by _sanitize_model_settings (XY within [0, bed_size]).
+            # Sanitized transforms have wrong Z (reset to 0) and shouldn't
+            # override world_bounds from the build item (which has correct Z).
+            t3_sanitized = False
+            try:
+                t3x, t3y = float(t3[9]), float(t3[10])
+                if 0 <= t3x <= vol_x and 0 <= t3y <= vol_y:
+                    t3_sanitized = True
+            except Exception:
+                pass
+            if not t3_sanitized:
+                wb_from_assemble = _bounds_from_local_and_transform(it, t3)
+                if wb_from_assemble:
+                    wb = wb_from_assemble
         if assemble_preview_offset_xy:
             ox, oy = assemble_preview_offset_xy
             try:
@@ -519,8 +531,17 @@ def _apply_layout_direct_mapping(
     items: List[Dict[str, object]],
     *,
     is_multi_plate: bool,
+    bed_x: float = 270.0,
+    bed_y: float = 270.0,
 ) -> Dict[str, object]:
-    """Exact/direct bed-local mapping (single-plate and any future exact multi-plate adapters)."""
+    """Exact/direct bed-local mapping (single-plate and any future exact multi-plate adapters).
+
+    OrcaSlicer 3MF transforms use bed-center as origin (0,0).
+    The viewer renders the bed from (0,0) to (bed_x, bed_y), so we shift
+    by (bed_x/2, bed_y/2) to convert to bed-corner-origin coordinates.
+    """
+    bed_cx = float(bed_x) / 2.0
+    bed_cy = float(bed_y) / 2.0
     frame.update({
         "confidence": "exact",
         "mapping": "direct",
@@ -532,7 +553,7 @@ def _apply_layout_direct_mapping(
     })
     for it in items:
         x, y, z = _layout_item_base_xyz(it, is_multi_plate=is_multi_plate)
-        it["ui_base_pose"] = {"x": x, "y": y, "z": z, "rotate_z_deg": 0.0}
+        it["ui_base_pose"] = {"x": x + bed_cx, "y": y + bed_cy, "z": z, "rotate_z_deg": 0.0}
     return frame
 
 
@@ -711,10 +732,10 @@ def _derive_layout_placement_frame(
     if not items:
         return frame
 
-    # Exact/direct path for non-multi-plate files. Do not apply preview-centering offsets here;
-    # it causes preview/slice mismatches for simple files (e.g. auxiliary fan cover).
+    # Exact/direct path for non-multi-plate files.
+    # 3MF transforms use bed-center as origin; shift to bed-corner-origin for the viewer.
     if not is_multi_plate:
-        return _apply_layout_direct_mapping(frame, items, is_multi_plate=False)
+        return _apply_layout_direct_mapping(frame, items, is_multi_plate=False, bed_x=bed_x, bed_y=bed_y)
 
     packed_grid_step_x, packed_grid_step_y = _infer_bambu_packed_grid_steps(
         source_3mf,
@@ -2592,11 +2613,11 @@ async def get_upload_layout(upload_id: int, plate_id: Optional[int] = Query(None
         raise HTTPException(status_code=404, detail="Source 3MF file not found")
 
     started = time.perf_counter()
-    try:
+
+    def _compute_layout():
         items = list_build_items_3mf(source_3mf, plate_id=plate_id)
         printer_profile = get_printer_profile("snapmaker_u1")
         validator = PlateValidator(printer_profile)
-
         validation = validator.validate_3mf_bounds(source_3mf, plate_id=plate_id)
         bounds = validation.get("bounds")
         placement_frame = _derive_layout_placement_frame(
@@ -2608,6 +2629,10 @@ async def get_upload_layout(upload_id: int, plate_id: Optional[int] = Query(None
             bed_y=float(printer_profile.build_volume_y),
             validation_bounds=bounds if isinstance(bounds, dict) else None,
         )
+        return items, printer_profile, validation, bounds, placement_frame
+
+    try:
+        items, printer_profile, validation, bounds, placement_frame = await asyncio.to_thread(_compute_layout)
 
         return {
             "upload_id": upload_id,
@@ -2673,7 +2698,8 @@ async def get_upload_geometry(
         max_triangles = 50000
 
     try:
-        geom = list_build_item_geometry_3mf(
+        geom = await asyncio.to_thread(
+            list_build_item_geometry_3mf,
             source_3mf,
             plate_id=plate_id,
             build_item_index=build_item_index,

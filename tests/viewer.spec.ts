@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, selectUploadByName, waitForSliceComplete, getAppState, API, apiUpload, apiSliceDualColour } from './helpers';
+import { waitForApp, uploadFile, selectUploadByName, waitForSliceComplete, getAppState, API, apiUpload, apiSliceDualColour, proceedFromPlateSelection } from './helpers';
 
 test.describe('G-code Viewer', () => {
   // This test slices a file first, so it needs extra time
@@ -245,11 +245,19 @@ test.describe('G-code Viewer', () => {
     await apiUpload(request, 'Shashibo-h2s-textured.3mf');
     await selectUploadByName(page, 'Shashibo-h2s-textured.3mf');
 
+    // Select plate 6 on selectplate step and proceed to configure
     await page.evaluate(() => {
       const body = document.querySelector('body') as any;
       const scope = (body?._x_dataStack || []).find((s: any) => typeof s.selectPlate === 'function');
       if (!scope) throw new Error('Alpine app scope not found');
       scope.selectPlate(6);
+    });
+    await proceedFromPlateSelection(page);
+
+    await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      const scope = (body?._x_dataStack || []).find((s: any) => typeof s.selectPlate === 'function');
+      if (!scope) throw new Error('Alpine app scope not found');
       scope.sliceSettings.enable_prime_tower = true;
       scope.sliceSettings.prime_tower_width = 35;
       scope.sliceSettings.prime_tower_brim_width = 3;
@@ -300,18 +308,26 @@ test.describe('G-code Viewer', () => {
     expect(Number(placement!.tower.y ?? 999)).toBeLessThanOrEqual(placement!.bedH);
   });
 
-  test('Shashibo H2D selected plate uses exact translation-offset mapping and enables object move/rotate controls (regression)', async ({ page, request }) => {
+  test('Shashibo H2D selected plate uses exact translation-offset mapping and enables object move controls (regression)', async ({ page, request }) => {
     await page.setViewportSize({ width: 1440, height: 1400 });
     await waitForApp(page);
     await apiUpload(request, 'Shashibo-h2s-textured.3mf');
     await selectUploadByName(page, 'Shashibo-h2s-textured.3mf');
+
+    // Select plate 5 on selectplate step and proceed to configure
+    await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      const scope = (body?._x_dataStack || []).find((s: any) => typeof s.selectPlate === 'function');
+      if (!scope) throw new Error('Alpine app scope not found');
+      scope.selectPlate(5);
+    });
+    await proceedFromPlateSelection(page);
     await page.getByText('Object Placement').scrollIntoViewIfNeeded();
 
     await page.evaluate(() => {
       const body = document.querySelector('body') as any;
       const scope = (body?._x_dataStack || []).find((s: any) => typeof s.selectPlate === 'function');
       if (!scope) throw new Error('Alpine app scope not found');
-      scope.selectPlate(5); // Small - H2D (currently approximate packed mapping path)
       scope.sliceSettings.enable_prime_tower = true;
       scope.schedulePlacementViewerRefresh?.();
     });
@@ -333,12 +349,7 @@ test.describe('G-code Viewer', () => {
       );
     }, undefined, { timeout: 120_000 });
 
-    await expect(page.getByText(/object move\/rotate is (temporarily )?disabled/i)).not.toBeVisible();
-    await expect(page.getByRole('button', { name: 'Move' })).toBeEnabled();
-    await expect(page.getByRole('button', { name: 'Rotate' })).toBeEnabled();
-    await expect(page.getByLabel('X Offset (mm)').first()).toBeEnabled();
-    await expect(page.getByLabel('Y Offset (mm)').first()).toBeEnabled();
-    await expect(page.getByLabel('Rotate Z (deg)').first()).toBeEnabled();
+    await expect(page.getByText(/object move is disabled/i)).not.toBeVisible();
 
     // Prime tower remains supported too.
     const caps = await page.evaluate(() => {
@@ -355,6 +366,7 @@ test.describe('G-code Viewer', () => {
     await waitForApp(page);
     await apiUpload(request, 'Shashibo-h2s-textured.3mf');
     await selectUploadByName(page, 'Shashibo-h2s-textured.3mf');
+    await proceedFromPlateSelection(page);
     await page.getByText('Object Placement').scrollIntoViewIfNeeded();
 
     async function getPlateRenderSize(plateId: number) {

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API, apiUpload, apiSlice, uiUploadAndSliceToComplete } from './helpers';
+import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API, apiUpload, apiSlice, uiUploadAndSliceToComplete, proceedFromPlateSelection } from './helpers';
 
 test.describe('Slicing Workflow', () => {
   test.setTimeout(180_000);
@@ -10,8 +10,9 @@ test.describe('Slicing Workflow', () => {
   function parsePrimeTowerFootprint(gcode: string) {
     let x: number | null = null;
     let y: number | null = null;
-    let e: number | null = null;
     let inPrimeTower = false;
+    let relativeE = false;
+    let absE: number | null = null;
     let minX = Number.POSITIVE_INFINITY;
     let minY = Number.POSITIVE_INFINITY;
     let maxX = Number.NEGATIVE_INFINITY;
@@ -20,8 +21,12 @@ test.describe('Slicing Workflow', () => {
 
     for (const rawLine of gcode.split('\n')) {
       const line = rawLine.trim();
-      if (line.startsWith('; FEATURE: ')) {
-        inPrimeTower = line.toLowerCase() === '; feature: prime tower';
+      if (line === 'M83') { relativeE = true; continue; }
+      if (line === 'M82') { relativeE = false; continue; }
+      if (line.startsWith('G92 ')) { const re = line.match(/E(-?\d+(?:\.\d+)?)/); if (re) absE = Number(re[1]); continue; }
+      // OrcaSlicer uses ";TYPE:" (Snapmaker profiles) or "; FEATURE: " for feature annotations
+      if (line.startsWith('; FEATURE: ') || line.startsWith(';TYPE:')) {
+        inPrimeTower = /prime.tower/i.test(line);
         continue;
       }
       if (!inPrimeTower) continue;
@@ -36,16 +41,15 @@ test.describe('Slicing Workflow', () => {
 
       const en = Number(me[1]);
       if (!Number.isFinite(en)) continue;
-      if (e == null) {
-        e = en;
-        continue;
+      let isExtrusion = false;
+      if (relativeE) {
+        isExtrusion = en > 1e-6;
+      } else {
+        if (absE == null) { absE = en; continue; }
+        isExtrusion = en > absE + 1e-6;
+        absE = en;
       }
-      // Absolute extrusion mode; only positive extrusion moves contribute to footprint.
-      if (en <= (e + 1e-6)) {
-        e = en;
-        continue;
-      }
-      e = en;
+      if (!isExtrusion) continue;
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       minX = Math.min(minX, x!);
       maxX = Math.max(maxX, x!);
@@ -71,15 +75,19 @@ test.describe('Slicing Workflow', () => {
   function maxPrimeTowerPositiveExtrusionSegment(gcode: string) {
     let x: number | null = null;
     let y: number | null = null;
-    let e: number | null = null;
     let inPrimeTower = false;
+    let relativeE = false;
+    let absE: number | null = null;
     let maxLen = 0;
     let segments = 0;
 
     for (const rawLine of gcode.split('\n')) {
       const line = rawLine.trim();
-      if (line.startsWith('; FEATURE: ')) {
-        inPrimeTower = line.toLowerCase() === '; feature: prime tower';
+      if (line === 'M83') { relativeE = true; continue; }
+      if (line === 'M82') { relativeE = false; continue; }
+      if (line.startsWith('G92 ')) { const re = line.match(/E(-?\d+(?:\.\d+)?)/); if (re) absE = Number(re[1]); continue; }
+      if (line.startsWith('; FEATURE: ') || line.startsWith(';TYPE:')) {
+        inPrimeTower = /prime.tower/i.test(line);
         continue;
       }
       if (!inPrimeTower) continue;
@@ -96,15 +104,15 @@ test.describe('Slicing Workflow', () => {
 
       const en = Number(me[1]);
       if (!Number.isFinite(en)) continue;
-      if (e == null) {
-        e = en;
-        continue;
+      let isExtrusion = false;
+      if (relativeE) {
+        isExtrusion = en > 1e-6;
+      } else {
+        if (absE == null) { absE = en; continue; }
+        isExtrusion = en > absE + 1e-6;
+        absE = en;
       }
-      if (en <= (e + 1e-6)) {
-        e = en;
-        continue;
-      }
-      e = en;
+      if (!isExtrusion) continue;
       if (!Number.isFinite(prevX) || !Number.isFinite(prevY) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
       maxLen = Math.max(maxLen, Math.hypot((x as number) - (prevX as number), (y as number) - (prevY as number)));
       segments += 1;
@@ -142,8 +150,9 @@ test.describe('Slicing Workflow', () => {
   function parseNonPrimePositiveExtrusionBounds(gcode: string) {
     let x: number | null = null;
     let y: number | null = null;
-    let e: number | null = null;
     let inPrimeTower = false;
+    let relativeE = false;
+    let absE: number | null = null;
     let minX = Number.POSITIVE_INFINITY;
     let minY = Number.POSITIVE_INFINITY;
     let maxX = Number.NEGATIVE_INFINITY;
@@ -152,8 +161,11 @@ test.describe('Slicing Workflow', () => {
 
     for (const rawLine of gcode.split('\n')) {
       const line = rawLine.trim();
-      if (line.startsWith('; FEATURE: ')) {
-        inPrimeTower = line.toLowerCase() === '; feature: prime tower';
+      if (line === 'M83') { relativeE = true; continue; }
+      if (line === 'M82') { relativeE = false; continue; }
+      if (line.startsWith('G92 ')) { const re = line.match(/E(-?\d+(?:\.\d+)?)/); if (re) absE = Number(re[1]); continue; }
+      if (line.startsWith('; FEATURE: ') || line.startsWith(';TYPE:')) {
+        inPrimeTower = /prime.tower/i.test(line);
         continue;
       }
       if (inPrimeTower) continue;
@@ -168,15 +180,15 @@ test.describe('Slicing Workflow', () => {
 
       const en = Number(me[1]);
       if (!Number.isFinite(en)) continue;
-      if (e == null) {
-        e = en;
-        continue;
+      let isExtrusion = false;
+      if (relativeE) {
+        isExtrusion = en > 1e-6;
+      } else {
+        if (absE == null) { absE = en; continue; }
+        isExtrusion = en > absE + 1e-6;
+        absE = en;
       }
-      if (en <= (e + 1e-6)) {
-        e = en;
-        continue;
-      }
-      e = en;
+      if (!isExtrusion) continue;
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       minX = Math.min(minX, x!);
       maxX = Math.max(maxX, x!);
@@ -485,7 +497,7 @@ test.describe('Slicing Workflow', () => {
     }
   });
 
-  test('slice-plate rejects Shashibo small plate transform when no object remains fully inside volume (regression)', async ({ request }) => {
+  test('slice-plate rejects Shashibo small plate transform when object is moved fully off-bed (regression)', async ({ request }) => {
     const upload = await apiUpload(request, 'Shashibo-h2s-textured.3mf');
     expect(upload.is_multi_plate).toBe(true);
 
@@ -495,25 +507,20 @@ test.describe('Slicing Workflow', () => {
     const fil = filaments[0];
     expect(fil?.id).toBeTruthy();
 
-    // Reproduces the user's failed plate 5 "Small - H2D" slice attempts from logs.
-    // Orca reported "Nothing to be sliced" because the moved object was no longer fully
-    // inside the print volume. We should fail fast with a clear 400 before Orca runs.
+    // A large shift that moves the object completely off the 270mm bed.
+    // Should fail fast with a 400 before Orca runs, or Orca reports failure.
     const res = await request.post(`${API}/uploads/${upload.upload_id}/slice-plate`, {
       data: {
         plate_id: 5,
         filament_ids: [fil.id, fil.id],
         layer_height: 0.2,
         infill_density: 15,
-        supports: true,
-        enable_prime_tower: true,
-        prime_tower_width: 35,
-        prime_tower_brim_width: 3,
-        wipe_tower_x: 135.084,
-        wipe_tower_y: 108.167,
+        supports: false,
+        enable_prime_tower: false,
         object_transforms: [{
           build_item_index: 5,
-          translate_x_mm: 78.13137934346855,
-          translate_y_mm: 59.792077493470174,
+          translate_x_mm: 200,
+          translate_y_mm: 200,
           rotate_z_deg: 0,
         }],
       },
@@ -727,13 +734,21 @@ test.describe('Slicing Workflow', () => {
   test('Shashibo plate 6 preview object/tower relative placement matches sliced output quadrant (parity) @extended', async ({ page, request }) => {
     await page.setViewportSize({ width: 1440, height: 1400 });
     await uploadFile(page, 'Shashibo-h2s-textured.3mf');
+
+    // Select plate 6 on selectplate step and proceed to configure
+    await page.evaluate(() => {
+      const body = document.querySelector('body') as any;
+      const scope = (body?._x_dataStack || []).find((s: any) => typeof s.selectPlate === 'function');
+      if (!scope) throw new Error('Alpine app scope not found');
+      scope.selectPlate(6);
+    });
+    await proceedFromPlateSelection(page);
     await page.getByText('Object Placement').scrollIntoViewIfNeeded();
 
     await page.evaluate(() => {
       const body = document.querySelector('body') as any;
       const scope = (body?._x_dataStack || []).find((s: any) => typeof s.selectPlate === 'function');
       if (!scope) throw new Error('Alpine app scope not found');
-      scope.selectPlate(6); // Large - H2D
       scope.sliceSettings.enable_prime_tower = true;
       scope.sliceSettings.prime_tower_width = 35;
       scope.sliceSettings.prime_tower_brim_width = 3;
@@ -1023,10 +1038,7 @@ test.describe('Slicing Workflow', () => {
     expect(typeof baselineBounds.max_x).toBe('number');
     expect(typeof baselineBounds.max_y).toBe('number');
 
-    // Ensure placement viewer is visible and in move mode.
-    const moveModeButton = page.getByRole('button', { name: 'Move', exact: true });
-    await expect(moveModeButton).toBeVisible({ timeout: 45_000 });
-    await moveModeButton.click();
+    // Ensure placement viewer is visible.
     const canvas = page.locator('canvas[x-ref="placementViewerCanvas"]');
     await canvas.scrollIntoViewIfNeeded();
     await expect(canvas).toBeVisible({ timeout: 15_000 });

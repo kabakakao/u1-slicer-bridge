@@ -22,13 +22,13 @@ test.describe('STL Upload (M30)', () => {
     await uploadFile(page, '3DBenchy.stl');
     const step = await getAppState(page, 'currentStep');
     expect(step).toBe('configure');
-    await expect(page.getByRole('heading', { name: 'Configure Print Settings' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Configure', exact: true })).toBeVisible();
   });
 
   test('STL upload appears in My Files with .stl filename', async ({ page }) => {
     await waitForApp(page);
     await uploadFile(page, '3DBenchy.stl');
-    await page.getByTitle('Back to upload').click();
+    await page.getByTitle('Leave configure').click();
     await page.getByTestId('confirm-ok').click();
     await page.getByTitle('My Files').click();
     const modal = page.locator('[x-show="showStorageDrawer"]');

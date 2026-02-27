@@ -17,14 +17,14 @@ test.describe('Upload Workflow', () => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     const step = await getAppState(page, 'currentStep');
     expect(step).toBe('configure');
-    await expect(page.getByRole('heading', { name: 'Configure Print Settings' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Configure', exact: true })).toBeVisible();
     await expect(page.getByText(/Colours.*Filaments/i)).toBeVisible();
     await expect(page.getByRole('button', { name: /Slice Now/i })).toBeVisible();
   });
 
   test('uploaded file appears in My Files and can be reopened to configure', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
-    await page.getByTitle('Back to upload').click();
+    await page.getByTitle('Leave configure').click();
     await page.getByTestId('confirm-ok').click();
     expect(await getAppState(page, 'currentStep')).toBe('upload');
 
