@@ -596,12 +596,17 @@ def _detect_origin_offset_xy(
         and all_max_y <= bed_y + margin
     )
 
+    if raw_fits and shifted_fits:
+        # Both interpretations place objects on the bed. Prefer bed-corner (no
+        # offset) to avoid weakening off-bed transform rejection: applying the
+        # bed-center offset as a second-chance pass in _enforce_transformed_bounds
+        # can falsely validate objects that are actually off-bed.
+        return 0.0, 0.0
     if shifted_fits:
-        # Bed-center is the dominant convention (OrcaSlicer, BambuStudio, PrusaSlicer).
-        # Prefer it whenever shifted bounds fit, even if raw also fits.
+        # Only the bed-center interpretation fits → file uses bed-center origin.
         return bed_cx, bed_cy
     if raw_fits:
-        # Shifted bounds exceed the bed → file uses bed-corner origin.
+        # Only the bed-corner interpretation fits → file uses bed-corner origin.
         return 0.0, 0.0
 
     # Neither fits well → default to bed-center
@@ -1591,6 +1596,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if (
@@ -1607,6 +1613,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
@@ -1680,6 +1687,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 scale_factor=scale_factor,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if not result["success"]:
@@ -1763,7 +1771,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
-            await conn.execute(
+            # Only mark completed if the job hasn't been cancelled in the meantime.
+            # The cancel endpoint may have force-marked it as 'failed' while the
+            # slicer was still running (race between cancel and completion).
+            result_tag = await conn.execute(
                 """
                 UPDATE slicing_jobs SET
                     status = 'completed',
@@ -1776,7 +1787,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                     three_mf_path = $8,
                     filament_colors = $9,
                     filament_used_g = $10
-                WHERE job_id = $1
+                WHERE job_id = $1 AND status = 'processing'
                 """,
                 job_id,
                 datetime.utcnow(),
@@ -1789,6 +1800,9 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_colors_json,
                 filament_used_g_json
             )
+            if result_tag == "UPDATE 0":
+                job_logger.info(f"Job {job_id} was cancelled before completion could be recorded")
+                raise SlicingCancelledError("Slicing cancelled by user")
 
         _update_progress(job_id, 100, "Complete")
         job_logger.info(f"Slicing job {job_id} completed successfully")
@@ -2333,6 +2347,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if (
@@ -2350,6 +2365,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 scale_factor=1.0,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
@@ -2404,6 +2420,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 scale_factor=scale_factor,
                 disable_arrange=bool(request.object_transforms),
                 progress_callback=_slicer_progress,
+                job_id=job_id,
             )
 
         if not result["success"]:
@@ -2487,7 +2504,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
-            await conn.execute(
+            result_tag = await conn.execute(
                 """
                 UPDATE slicing_jobs SET
                     status = 'completed',
@@ -2500,7 +2517,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                     three_mf_path = $8,
                     filament_colors = $9,
                     filament_used_g = $10
-                WHERE job_id = $1
+                WHERE job_id = $1 AND status = 'processing'
                 """,
                 job_id,
                 datetime.utcnow(),
@@ -2513,6 +2530,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_colors_json,
                 filament_used_g_json
             )
+            if result_tag == "UPDATE 0":
+                job_logger.info(f"Job {job_id} was cancelled before completion could be recorded")
+                raise SlicingCancelledError("Slicing cancelled by user")
 
         _update_progress(job_id, 100, "Complete")
         job_logger.info(f"Plate slicing job {job_id} completed successfully")
